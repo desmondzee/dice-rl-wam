@@ -183,6 +183,28 @@ def test_n_step_sparse_terminal_three_chunks():
     assert float(rows[2]["reward"]) == pytest.approx(1.0)
 
 
+def test_open_episode_sample_bootstraps_from_successor():
+    buf = ChunkReplay(capacity=32)
+    first = _replay_row(0, 0)
+    first["s"] = np.zeros(STATE_DIM, np.float32)
+    first["a"] = np.zeros((HORIZON, ACTION_DIM), np.float32)
+    second = _replay_row(0, 0)
+    second["s"] = np.ones(STATE_DIM, np.float32)
+    second["a"] = np.full((HORIZON, ACTION_DIM), 2.0, np.float32)
+    buf.add_online(first)
+    assert not buf.has_ready_online()
+    with pytest.raises(ValueError, match="no online"):
+        buf.sample(1, expert_ratio=0.0)
+    buf.add_online(second)
+    assert buf.has_ready_online()
+    batch = buf.sample(1, expert_ratio=0.0)
+    np.testing.assert_array_equal(batch["s"][0].numpy(), np.zeros(STATE_DIM, np.float32))
+    np.testing.assert_array_equal(batch["s_next"][0].numpy(), np.ones(STATE_DIM, np.float32))
+    np.testing.assert_array_equal(batch["a_next"][0].numpy(), np.full((HORIZON, ACTION_DIM), 2.0, np.float32))
+    assert float(batch["n_steps"][0]) == 2.0
+    assert float(batch["done"][0]) == 0.0
+
+
 def test_rlpd_mix_respects_scheduled_ratio():
     buf = ChunkReplay(capacity=200)
     for _ in range(80):
@@ -293,6 +315,59 @@ def test_commit_executed_writes_residual_not_base():
     torch.testing.assert_close(written[:, :, :USED_DOF], executed[:, :, :USED_DOF])
     assert torch.count_nonzero(written[:, :, USED_DOF:]) == 0
     assert not torch.equal(written, a_base)
+    first = torch.ones(1, HORIZON, ACTION_DIM)
+    policy.commit_executed(first, first_chunk=True)
+    written_first = model_to_mlp(policy._executed_actions)
+    assert torch.count_nonzero(written_first[:, :4]) == 0
+    torch.testing.assert_close(written_first[:, 4:, :USED_DOF], torch.ones(1, 12, USED_DOF))
+
+
+def test_later_chunk_start_obs_allows_none_batch():
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy._first_chunk = True
+    policy._extract_raw_obs = lambda batch: {"from": "batch"}
+    with pytest.raises(RuntimeError, match="First chunk"):
+        policy._start_raw_obs(None)
+    assert policy._start_raw_obs({"ok": True}) == {"from": "batch"}
+    policy._first_chunk = False
+    sentinel = {"from": "buffer"}
+    policy._obs_buffer = [sentinel]
+    assert policy._start_raw_obs(None) is sentinel
+    assert policy._start_raw_obs({"ok": True}) == {"from": "batch"}
+
+
+def test_isolated_critic_encode_clears_then_restores_streaming_vae():
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    dirty = torch.arange(8, dtype=torch.float32).reshape(1, 1, 2, 2, 2)
+
+    class Streaming:
+        def __init__(self):
+            self.feat_cache = [dirty.clone()]
+            self.cleared = False
+
+        def clear_cache(self):
+            self.cleared = True
+            self.feat_cache = [None]
+
+    vae = Streaming()
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy._frozen = {"streaming_vae": vae}
+    seen = []
+
+    def encode(_frames):
+        seen.append(list(vae.feat_cache))
+        vae.feat_cache = [torch.ones_like(dirty)]
+        return torch.zeros(1, 48, 1, 8, 16)
+
+    policy._encode_frames = encode
+    latent = policy._encode_isolated([{"obs": 1}])
+    assert latent.shape[1] == 48
+    assert vae.cleared
+    assert seen == [[None]]
+    torch.testing.assert_close(vae.feat_cache[0], dirty)
 
 
 def test_expand_conditional_kv_repeats_conditional_batch_only():
@@ -408,6 +483,70 @@ def test_train_eval_fires_after_crossing_chunk_stride():
     assert train_eval_schedule(12, 25_000) == [0]
 
 
+def test_host_array_converts_bfloat16():
+    from script.lingbot_rl_train import _host_array
+
+    values = _host_array(torch.tensor([1.0], dtype=torch.bfloat16))
+    assert values.dtype == np.float32
+    np.testing.assert_allclose(values, [1.0], atol=1e-3)
+
+
+def test_actor_critic_cast_bfloat16_policy_tensors_to_float32():
+    model = DiceResidualModel(device="cpu")
+    state = torch.zeros(2, STATE_DIM, dtype=torch.bfloat16)
+    noise = torch.zeros(2, HORIZON, ACTION_DIM, dtype=torch.bfloat16)
+    action = torch.zeros(2, HORIZON, ACTION_DIM, dtype=torch.bfloat16)
+    residual = model.actor(state, noise)
+    q = model.critic(state, action)
+    applied = apply_residual(action, residual)
+    assert residual.dtype == torch.float32
+    assert q.dtype == torch.float32
+    assert applied.dtype == torch.float32
+    assert torch.isfinite(residual).all()
+    assert torch.isfinite(q).all()
+
+
+def test_replay_sample_converts_bf16_tensors_to_float32():
+    buf = ChunkReplay(capacity=8)
+    row = _replay_row(0, 0)
+    row["s"] = torch.zeros(STATE_DIM, dtype=torch.bfloat16)
+    row["z"] = torch.zeros(HORIZON, ACTION_DIM, dtype=torch.bfloat16)
+    row["a_base"] = torch.zeros(HORIZON, ACTION_DIM, dtype=torch.bfloat16)
+    row["a"] = torch.zeros(HORIZON, ACTION_DIM, dtype=torch.bfloat16)
+    buf.add_online(row)
+    buf.finalize_episode()
+    batch = buf.sample(1, expert_ratio=0.0)
+    for key in ("s", "z", "a_base", "a", "s_next", "a_next"):
+        assert batch[key].dtype == torch.float32, key
+        assert torch.isfinite(batch[key]).all()
+
+
+def test_env_success_requires_explicit_boolean():
+    from script.lingbot_rl_train import env_success
+
+    assert env_success({"is_success": False}) is False
+    assert env_success({"is_success": np.bool_(True)}) is True
+    with pytest.raises(ValueError, match="is_success"):
+        env_success({})
+    with pytest.raises(ValueError, match="is_success"):
+        env_success({"is_success": np.array([False])})
+
+
+def test_action_batch_failure_does_not_hide_oom():
+    from script.lingbot_rl_policy import reraise_action_batch_failure
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        try:
+            raise RuntimeError("CUDA out of memory")
+        except RuntimeError as exc:
+            reraise_action_batch_failure(exc)
+    with pytest.raises(RuntimeError, match="action candidate batching failed"):
+        try:
+            raise RuntimeError("shape mismatch")
+        except RuntimeError as exc:
+            reraise_action_batch_failure(exc)
+
+
 def test_expert_n_step_is_three_chunks():
     buf = ChunkReplay(capacity=32)
     for reward, done in ((0, 0), (0, 0), (1, 1)):
@@ -443,7 +582,7 @@ def test_train_mocked_step_logs_and_saves_small_weights(tmp_path, monkeypatch):
                 "first_chunk": True,
             }
 
-        def commit_executed(self, chunk):
+        def commit_executed(self, chunk, first_chunk=False):
             self._executed_actions = chunk
 
         def select_action(self, batch):
@@ -536,5 +675,11 @@ def test_modal_lock_and_help_do_not_print_secrets(capsys):
     assert module.WANDB_SECRET_NAME == "dice-lingbot-wandb"
     assert module.HF_SECRET_NAME == "dice-lingbot-hf"
     assert module.RESULT_VOLUME == "dice-lingbot-rl-runs"
+    assert module.SMOKE_ENV_STEPS == 32
+    source = Path(module.__file__).read_text()
+    train_block = source.split("def run_train", 1)[1].split("def run_smoke", 1)[0]
+    smoke_block = source.split("def run_smoke", 1)[1].split("def run_eval", 1)[0]
+    assert "--max-env-steps" not in train_block
+    assert "--max-env-steps" in smoke_block
     assert "lingbot_eval.py" in module.FILES
     assert "lingbot_sft_data.py" in module.FILES

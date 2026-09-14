@@ -6,7 +6,7 @@ from lerobot.policies.lingbot_va.modeling_lingbot_va import LingBotVAPolicy
 from lerobot.policies.lingbot_va.utils import data_seq_to_patch
 
 from script.lingbot_eval_config import CAMERAS
-from script.lingbot_rl_model import ACTION_DIM, HORIZON, STATE_DIM, USED_DOF, apply_residual
+from script.lingbot_rl_model import ACTION_DIM, HORIZON, STATE_DIM, USED_DOF, apply_residual, mask_unused_dof
 
 
 def env_action_count(first_chunk):
@@ -77,6 +77,15 @@ def frozen_prior_kwargs():
     }
 
 
+def reraise_action_batch_failure(exc):
+    """Keep OOM visible. Spec: fail explicitly rather than dropping K or rewriting CUDA errors."""
+    if "out of memory" in str(exc).lower():
+        raise exc
+    if str(exc) == "action candidate batching failed":
+        raise exc
+    raise RuntimeError("action candidate batching failed") from exc
+
+
 def expand_conditional_kv(transformer, k):
     """Repeat video-CFG batch index 0 to K. Never expand the uncond row (that would be batch 8)."""
     for block in transformer.blocks:
@@ -111,8 +120,12 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._last_real_latent = latent
         return latent
 
-    def commit_executed(self, mlp_chunk):
-        self._executed_actions = mlp_to_model(mlp_chunk).to(device=self.config.device, dtype=self.dtype)
+    def commit_executed(self, mlp_chunk, first_chunk=False):
+        chunk = mask_unused_dof(mlp_chunk)
+        if first_chunk:
+            chunk = chunk.clone()
+            chunk[:, :4] = 0
+        self._executed_actions = mlp_to_model(chunk).to(device=self.config.device, dtype=self.dtype)
 
     def observe_env_step(self, batch):
         if (self._prev_j + 1) % self._keyframe_stride == 0:
@@ -145,7 +158,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self.eval()
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
-        latent = self._encode_frames([self._extract_raw_obs(batch)])
+        latent = self._encode_isolated([self._extract_raw_obs(batch)])
         return self._pool_from_latent(latent)
 
     @torch.no_grad()
@@ -195,13 +208,59 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         for block, snap in zip(self.transformer.blocks, snaps):
             block.attn1.attn_caches["pos"] = _clone_cache(snap)
 
+    def _start_raw_obs(self, batch):
+        """Live batch on collection; `select_action` later chunks pass `None` and use the last keyframe."""
+        if self._first_chunk:
+            if batch is None:
+                raise RuntimeError("First chunk requires a live observation batch")
+            return self._extract_raw_obs(batch)
+        if batch is not None:
+            return self._extract_raw_obs(batch)
+        if not self._obs_buffer:
+            raise RuntimeError("Later chunk is missing keyframe observations")
+        return self._obs_buffer[-1]
+
+    def _snapshot_vae_cache(self):
+        snaps = {}
+        frozen = self._frozen or {}
+        for key in ("streaming_vae", "streaming_vae_half"):
+            vae = frozen.get(key)
+            if vae is None or not hasattr(vae, "feat_cache"):
+                continue
+            snaps[key] = [item.clone() if torch.is_tensor(item) else item for item in vae.feat_cache]
+        return snaps
+
+    def _restore_vae_cache(self, snaps):
+        frozen = self._frozen or {}
+        for key, cache in snaps.items():
+            vae = frozen.get(key)
+            if vae is None:
+                continue
+            vae.feat_cache = [item.clone() if torch.is_tensor(item) else item for item in cache]
+
+    def _clear_vae_cache(self):
+        frozen = self._frozen or {}
+        for key in ("streaming_vae", "streaming_vae_half"):
+            vae = frozen.get(key)
+            if vae is not None and hasattr(vae, "clear_cache"):
+                vae.clear_cache()
+
+    def _encode_isolated(self, raw_frames):
+        """1-frame critic encode must not continue the AR streaming-VAE cache (kernel T=3)."""
+        snap = self._snapshot_vae_cache()
+        try:
+            self._clear_vae_cache()
+            return self._encode_frames(raw_frames)
+        finally:
+            self._restore_vae_cache(snap)
+
     @torch.no_grad()
     def decode_candidates(self, batch, k=4, video_noise=None, action_noise=None):
         self.eval()
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
         first = self._first_chunk
-        start_obs = self._extract_raw_obs(batch)
+        start_obs = self._start_raw_obs(batch)
         if first:
             init_latent = self._encode_frames([start_obs])
             self._init_latent = init_latent
@@ -210,11 +269,11 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             frame_st_id = 0
             critic_latent = init_latent
         else:
+            critic_latent = self._encode_isolated([start_obs])
             self._compute_kv_cache(self._obs_buffer, self._executed_actions)
             self._obs_buffer = []
             init_latent = None
             frame_st_id = self._frame_st_id
-            critic_latent = self._encode_frames([start_obs])
         state = self._pool_from_latent(critic_latent)
         actions, latents, z_model, video = self._infer(
             init_latent, frame_st_id, video_noise=video_noise, action_noise=action_noise, k=k
@@ -224,9 +283,9 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._exec_step = 0
         self._started = True
         return {
-            "s": state,
-            "z": model_to_mlp(z_model),
-            "a_base": model_to_mlp(actions),
+            "s": state.float(),
+            "z": model_to_mlp(z_model).float(),
+            "a_base": model_to_mlp(actions).float(),
             "video_noise": video,
             "latents": latents,
             "first_chunk": first,
@@ -334,10 +393,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
 
         post_video = self._snapshot_kv()
         try:
-            try:
-                expand_conditional_kv(self.transformer, k)
-            except RuntimeError as exc:
-                raise RuntimeError("action candidate batching failed") from exc
+            expand_conditional_kv(self.transformer, k)
             for i, t in enumerate(action_timesteps):
                 last_step = i == len(action_timesteps) - 1
                 action_cond = (
@@ -367,23 +423,21 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             actions[:, ~self._action_mask] *= 0
         except RuntimeError as exc:
             self._restore_kv(post_video)
-            if str(exc) == "action candidate batching failed":
-                raise
-            raise RuntimeError("action candidate batching failed") from exc
+            reraise_action_batch_failure(exc)
         self._restore_kv(post_video)
         return actions, latents, z_used, video_used
 
     def _apply_residual_choice(self, decoded, index):
-        a_base = decoded["a_base"][index:index + 1]
-        noise = decoded["z"][index:index + 1]
-        state = decoded["s"]
+        a_base = decoded["a_base"][index:index + 1].float()
+        noise = decoded["z"][index:index + 1].float()
+        state = decoded["s"].float()
         if state.shape[0] != 1:
             state = state[:1]
         if self.residual_model is None:
             chosen = a_base
         else:
             chosen = apply_residual(a_base, self.residual_model.actor(state, noise))
-        self.commit_executed(chosen)
+        self.commit_executed(chosen, first_chunk=decoded["first_chunk"])
         if self.config.save_predicted_video:
             self.last_predicted_frames = None
             self.last_predicted_latents = decoded["latents"].detach().to("cpu")

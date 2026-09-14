@@ -22,6 +22,7 @@ HF_SECRET_NAME = "dice-lingbot-hf"
 WANDB_SECRET_NAME = "dice-lingbot-wandb"
 EVAL_PYTHON = "/opt/lerobot/.venv/bin/python"
 INFERENCE_PATHS = ("residual.pt", "summary.json", "settings.json", "status.json", "train_eval", "eval")
+SMOKE_ENV_STEPS = 32
 FILES = (
     "lingbot_eval_config.py", "lingbot_eval.py", "lingbot_eval_report.py", "lingbot_sft_config.py",
     "lingbot_sft_data.py",
@@ -101,14 +102,17 @@ def prepare(config):
                 "--prepared-output", str(output),
             ], check=True)
             prepared_path = json.loads(output.read_text())["prepared_path"]
-        from script.lingbot_eval import download_snapshot
-        token = os.environ.get("HF_TOKEN", "").strip()
-        if not token:
-            raise RuntimeError("HF_TOKEN is required in dice-lingbot-hf for CPU asset preparation")
-        download_snapshot(
-            DATASET_REPO, repo_type="dataset", revision=DATASET_REVISION,
-            cache_dir="/cache/hub", token=token,
-        )
+        if _dataset_root() is None:
+            token = os.environ.get("HF_TOKEN", "").strip()
+            if not token:
+                raise RuntimeError("HF_TOKEN is required in dice-lingbot-hf for CPU asset preparation")
+            subprocess.run([
+                EVAL_PYTHON, "-c",
+                "import os; from script.lingbot_eval import download_snapshot; "
+                "from script.lingbot_sft_config import DATASET_REPO, DATASET_REVISION; "
+                "download_snapshot(DATASET_REPO, repo_type='dataset', revision=DATASET_REVISION, "
+                "cache_dir='/cache/hub', token=os.environ['HF_TOKEN'])",
+            ], check=True)
         return prepared_path
     finally:
         cache.commit()
@@ -145,6 +149,42 @@ def run_train(config, prepared_path, run_name, resume=False):
             command.append("--resume")
         subprocess.run(command, check=True, env=env)
         status = {"stage": "train", "run_name": run_name, "complete": True}
+        (output / "status.json").write_text(json.dumps(status, indent=2) + "\n")
+        return json.loads((output / "summary.json").read_text())
+    finally:
+        try:
+            results.commit()
+        finally:
+            _release(run_name, owner)
+
+
+@app.function(image=image, gpu="H100", cpu=16, memory=98304, timeout=7200, retries=0,
+              volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/rl": results},
+              secrets=[wandb_secret], max_containers=1)
+def run_smoke(config, prepared_path, run_name):
+    """A few env steps on one H100. Does not change the pinned 100k recipe or ingest 300 demos."""
+    cfg = RLConfig(**config).validate()
+    validate_name(run_name)
+    owner = _acquire(run_name)
+    env = os.environ.copy()
+    env["HF_HUB_OFFLINE"] = "1"
+    env["TRANSFORMERS_OFFLINE"] = "1"
+    try:
+        cache.reload()
+        source.reload()
+        results.reload()
+        output = Path("/rl") / run_name
+        output.mkdir(parents=True, exist_ok=True)
+        subprocess.run([
+            EVAL_PYTHON, "-m", "script.lingbot_rl_train", "train",
+            "--config-json", json.dumps(asdict(cfg)),
+            "--prepared-path", prepared_path,
+            "--output-dir", str(output),
+            "--run-name", run_name,
+            "--result-volume", RESULT_VOLUME,
+            "--max-env-steps", str(SMOKE_ENV_STEPS),
+        ], check=True, env=env)
+        status = {"stage": "smoke", "run_name": run_name, "complete": True, "max_env_steps": SMOKE_ENV_STEPS}
         (output / "status.json").write_text(json.dumps(status, indent=2) + "\n")
         return json.loads((output / "summary.json").read_text())
     finally:
@@ -221,8 +261,8 @@ def download_inference(run_name, download_dir):
 def main(stage: str = "train", run_name: str = "", resume: bool = False,
          wandb_project: str = "dice-lingbot-va-rl", wandb_entity: str = "",
          download_dir: str = "result/lingbot-rl"):
-    if stage not in ("prepare", "train", "eval"):
-        raise ValueError("Stage must be prepare, train, or eval")
+    if stage not in ("prepare", "train", "eval", "smoke"):
+        raise ValueError("Stage must be prepare, train, eval, or smoke")
     eval_cfg = EvalConfig(
         source_run="libero30-sft", checkpoint_step=600, stage="eval", seed=42,
         wandb_project="dice-lingbot-va-eval", wandb_entity=wandb_entity or None,
@@ -230,7 +270,10 @@ def main(stage: str = "train", run_name: str = "", resume: bool = False,
     rl_cfg = RLConfig(
         wandb_project=wandb_project, wandb_entity=wandb_entity or None,
     ).validate()
-    run_name = validate_name(run_name or rl_cfg.default_run_name)
+    if stage == "smoke":
+        run_name = validate_name(run_name or "libero30-dice-smoke")
+    else:
+        run_name = validate_name(run_name or rl_cfg.default_run_name)
     if stage != "prepare" and (Path(download_dir) / run_name).exists():
         raise FileExistsError("Local result directory exists; choose a different --download-dir")
     prepared_path = prepare.remote(asdict(eval_cfg))
@@ -239,6 +282,8 @@ def main(stage: str = "train", run_name: str = "", resume: bool = False,
         return
     if stage == "train":
         summary = run_train.remote(asdict(rl_cfg), prepared_path, run_name, resume)
+    elif stage == "smoke":
+        summary = run_smoke.remote(asdict(rl_cfg), prepared_path, run_name)
     else:
         summary = run_eval.remote(asdict(rl_cfg), prepared_path, run_name, resume)
     print(json.dumps(summary, indent=2))

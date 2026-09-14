@@ -146,8 +146,25 @@ def _device():
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def _host_array(tensor):
+    return tensor.detach().float().contiguous().cpu().numpy()
+
+
+def env_success(info):
+    if "is_success" not in info or not isinstance(info["is_success"], (bool, np.bool_)):
+        raise ValueError("Environment must report a boolean is_success explicitly")
+    return bool(info["is_success"])
+
+
 def _to_model_device(sample, device):
-    return {key: value.to(device) if torch.is_tensor(value) else value for key, value in sample.items()}
+    moved = {}
+    for key, value in sample.items():
+        if torch.is_tensor(value):
+            value = value.to(device)
+            if value.is_floating_point():
+                value = value.float()
+        moved[key] = value
+    return moved
 
 
 def _update_from_buffer(model, buffer, expert_ratio, device):
@@ -187,9 +204,9 @@ def _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir):
 
 def _maybe_sharpen(model, policy, batch, device):
     decoded = policy.decode_candidates(batch, k=8)
-    a_base = decoded["a_base"].to(device)
-    noise = decoded["z"].to(device)
-    state = decoded["s"].to(device)
+    a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
+    noise = decoded["z"].to(device=device, dtype=torch.float32)
+    state = decoded["s"].to(device=device, dtype=torch.float32)
     if state.shape[0] == 1 and a_base.shape[0] > 1:
         state = state.expand(a_base.shape[0], -1)
     with torch.no_grad():
@@ -220,18 +237,23 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
     seed_all(config.seed)
-    policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), prepared.get("architecture") or {})
+    architecture = prepared.get("architecture") or {}
+    if prepared.get("checkpoint"):
+        from script.lingbot_eval import read_checkpoint_metadata, read_json
+        metadata = read_checkpoint_metadata(prepared["checkpoint"])
+        architecture = metadata["architecture"]
+        norm = metadata["normalization"]
+    else:
+        metadata = None
+        norm = prepared["normalization"] if "normalization" in prepared else prepared.get("norm") or {
+            "q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23,
+        }
+    policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture)
     model = DiceResidualModel(device=device)
     policy.residual_model = model
     buffer = ChunkReplay()
     tasks = prepared["tasks"]
-    norm = prepared["normalization"] if "normalization" in prepared else prepared.get("norm") or {
-        "q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23,
-    }
     if prepared.get("checkpoint"):
-        from script.lingbot_eval import read_checkpoint_metadata, read_json
-        metadata = read_checkpoint_metadata(prepared["checkpoint"])
-        norm = metadata["normalization"]
         cache_path = output_dir / "expert_features.pt"
         if dataset_root:
             task_to_id = {task["instruction"]: task["task_id"] for task in tasks}
@@ -264,10 +286,14 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     budget = config.online_env_steps if max_env_steps is None else max_env_steps
     eval_schedule = train_eval_schedule(budget, config.train_eval_every)
     evaluated = set()
+    do_train_eval = max_env_steps is None
 
     def maybe_eval():
         # Episode-boundary only: `_train_eval` / sharpening call `policy.reset()`.
         # Thresholds, not exact equality, so 12/16-step chunks still hit 25k/50k/75k/100k.
+        # `--max-env-steps` is unit/cloud smoke: skip the 10-task eval so a few chunks stay cheap.
+        if not do_train_eval:
+            return
         due = due_train_evals(env_steps, eval_schedule, evaluated)
         if due:
             evaluated.update(due)
@@ -310,9 +336,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             while env_steps < budget and episode_length < 520:
                 batch = observation_batch(observation, task["instruction"], device)
                 decoded = policy.decode_candidates(batch, k=config.k_candidates)
-                state = decoded["s"].to(device)
-                noise = decoded["z"].to(device)
-                a_base = decoded["a_base"].to(device)
+                state = decoded["s"].to(device=device, dtype=torch.float32)
+                noise = decoded["z"].to(device=device, dtype=torch.float32)
+                a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
                 k = a_base.shape[0]
                 if k != config.k_candidates:
                     raise RuntimeError("action candidate batching failed")
@@ -322,7 +348,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     q_values = model.critic(state_k, executed)
                     star = int(q_values.reshape(-1).argmax())
                 chosen = executed[star:star + 1]
-                policy.commit_executed(chosen.cpu())
+                policy.commit_executed(chosen.cpu(), first_chunk=decoded["first_chunk"])
                 env_actions = slice_env_actions(chosen.cpu(), decoded["first_chunk"])
                 n_env = env_actions.shape[1]
                 chunk_reward = 0.0
@@ -335,7 +361,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     executed_n += 1
                     episode_length += 1
                     env_steps += 1
-                    if info.get("is_success") and not saw_success:
+                    if env_success(info) and not saw_success:
                         chunk_reward = 1.0
                         saw_success = True
                         episode_success = 1.0
@@ -343,12 +369,12 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         done = 1.0
                         break
                 episode_return += chunk_reward
-                s_cpu = state.detach().cpu().numpy()[0]
+                s_cpu = _host_array(state)[0]
                 row = {
                     "s": s_cpu,
-                    "z": noise[star].detach().cpu().numpy(),
-                    "a_base": a_base[star].detach().cpu().numpy(),
-                    "a": chosen.detach().cpu().numpy()[0],
+                    "z": _host_array(noise[star]),
+                    "a_base": _host_array(a_base[star]),
+                    "a": _host_array(chosen)[0],
                     "reward": np.float32(chunk_reward),
                     "done": np.float32(done),
                     "s_next": s_cpu.copy(),
@@ -359,7 +385,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 buffer.add_online(row)
                 chunks += 1
                 expert_ratio = config.rlpd_expert_ratio(env_steps)
-                if any(float(item["is_expert"]) == 0.0 for item in buffer.rows()):
+                if buffer.has_ready_online():
                     critic_info, actor_info = _update_from_buffer(model, buffer, expert_ratio, device)
                     log = {
                         "env_steps": env_steps, "chunks": chunks,

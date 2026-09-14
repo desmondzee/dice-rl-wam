@@ -21,14 +21,20 @@ BATCH = 256
 REPLAY_CAPACITY = 100_000
 
 
+def mlp_float(tensor):
+    if not torch.is_tensor(tensor):
+        tensor = torch.as_tensor(tensor)
+    return tensor.float()
+
+
 def mask_unused_dof(chunk):
-    out = chunk.clone()
+    out = mlp_float(chunk).clone()
     out[..., USED_DOF:] = 0
     return out
 
 
 def apply_residual(a_base, residual):
-    return mask_unused_dof(a_base + residual)
+    return mask_unused_dof(mlp_float(a_base) + mlp_float(residual))
 
 
 def _mlp(in_dim, out_dim):
@@ -48,6 +54,8 @@ class ResidualActor(nn.Module):
         self.net = _mlp(STATE_DIM + HORIZON * ACTION_DIM, HORIZON * ACTION_DIM)
 
     def forward(self, state, noise):
+        state = mlp_float(state)
+        noise = mlp_float(noise)
         batch = state.shape[0]
         residual = self.net(torch.cat([state, noise.reshape(batch, -1)], dim=-1))
         return mask_unused_dof(residual.reshape(batch, HORIZON, ACTION_DIM))
@@ -61,6 +69,7 @@ class CriticEnsemble(nn.Module):
         )
 
     def forward(self, state, action, return_all=False):
+        state = mlp_float(state)
         batch = state.shape[0]
         x = torch.cat([state, mask_unused_dof(action).reshape(batch, -1)], dim=-1)
         qs = [head(x) for head in self.heads]

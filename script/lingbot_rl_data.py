@@ -44,7 +44,7 @@ def expert_fingerprint(manifest, norm, episodes=None):
 
 def _tensor_state(state):
     if torch.is_tensor(state):
-        state = state.detach().cpu().numpy()
+        state = state.detach().float().cpu().numpy()
     state = np.asarray(state, dtype=np.float32)
     if state.ndim == 2:
         state = state[0]
