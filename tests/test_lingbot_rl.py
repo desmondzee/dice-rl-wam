@@ -315,3 +315,36 @@ def test_expand_conditional_kv_raises_when_cache_missing():
     block = SimpleNamespace(attn1=SimpleNamespace(attn_caches={}))
     with pytest.raises(RuntimeError, match="action candidate batching failed"):
         expand_conditional_kv(SimpleNamespace(blocks=[block]), 4)
+
+
+def test_expert_chunk_stride_and_padding(tmp_path):
+    from script.lingbot_rl_data import featurize_experts, normalize_demo_action
+
+    class StubPolicy:
+        def extract_critic_state(self, batch):
+            return torch.zeros(1, 3072)
+
+        def reset(self):
+            return None
+
+    actions = np.zeros((12 + 16 + 4, 7), np.float32)
+    actions[:, 0] = np.arange(32)
+    episode = {"actions": actions, "task": "put the moka pot", "task_id": 8, "frames": [object()] * 32}
+    rows = featurize_experts(
+        StubPolicy(), [episode], norm=_eval_normalization(), cache_path=tmp_path / "expert_features.pt")
+    assert len(rows) == 3
+    assert rows[0]["n_env_actions"] == 12
+    assert rows[1]["n_env_actions"] == 16
+    assert rows[2]["n_env_actions"] == 4
+    assert rows[0]["a"].shape == (16, 30)
+    assert np.count_nonzero(rows[0]["a"][:, 7:]) == 0
+    assert rows[-1]["done"] == 1
+    np.testing.assert_array_equal(rows[0]["z"], np.zeros((16, 30), np.float32))
+    np.testing.assert_array_equal(rows[0]["a_base"], rows[0]["a"])
+    again = featurize_experts(
+        StubPolicy(), [episode], norm=_eval_normalization(), cache_path=tmp_path / "expert_features.pt")
+    assert len(again) == 3
+    raw = np.array([-1.0, 0.0, 1.0, 0.5, -0.5, 0.0, 0.0], np.float32)
+    normed = normalize_demo_action(raw, _eval_normalization())
+    decoded = decode_action(torch.from_numpy(normed).reshape(1, 7), _eval_normalization())
+    np.testing.assert_allclose(decoded, raw, atol=1e-5)
