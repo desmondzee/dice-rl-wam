@@ -348,3 +348,92 @@ def test_expert_chunk_stride_and_padding(tmp_path):
     normed = normalize_demo_action(raw, _eval_normalization())
     decoded = decode_action(torch.from_numpy(normed).reshape(1, 7), _eval_normalization())
     np.testing.assert_allclose(decoded, raw, atol=1e-5)
+
+
+def test_train_mocked_step_logs_and_saves_small_weights(tmp_path, monkeypatch):
+    import sys
+
+    import script.lingbot_rl_train as train
+    from script.lingbot_rl_model import ACTION_DIM, HORIZON, STATE_DIM
+
+    class StubPolicy:
+        def reset(self):
+            self._executed_actions = None
+
+        def extract_critic_state(self, batch):
+            return torch.zeros(1, STATE_DIM)
+
+        def decode_candidates(self, batch, k=4, **kwargs):
+            z = torch.zeros(k, HORIZON, ACTION_DIM)
+            a_base = torch.zeros(k, HORIZON, ACTION_DIM)
+            return {
+                "s": torch.zeros(1, STATE_DIM),
+                "z": z,
+                "a_base": a_base,
+                "video_noise": torch.zeros(1),
+                "first_chunk": True,
+            }
+
+        def commit_executed(self, chunk):
+            self._executed_actions = chunk
+
+        def select_action(self, batch):
+            return torch.zeros(1, 7)
+
+        def observe_env_step(self, batch):
+            return None
+
+    class StubEnv:
+        def __init__(self, **kwargs):
+            self.steps = 0
+            self.init_state_id = 0
+
+        def reset(self, seed=None):
+            self.steps = 0
+            zeros = __import__("numpy").zeros((128, 128, 3), __import__("numpy").uint8)
+            return {"pixels": {"image": zeros, "image2": zeros}}, {}
+
+        def step(self, action):
+            self.steps += 1
+            done = self.steps >= 12
+            return self.reset()[0], 0.0, done, False, {"is_success": False}
+
+        def close(self):
+            return None
+
+    logs = []
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: StubPolicy())
+    monkeypatch.setattr(train, "LiberoEnv", StubEnv)
+    monkeypatch.setitem(
+        sys.modules,
+        "wandb",
+        type("W", (), {
+            "init": staticmethod(lambda **k: type("R", (), {
+                "log": logs.append,
+                "summary": {},
+                "finish": lambda **k: None,
+            })()),
+            "finish": staticmethod(lambda **k: None),
+        })(),
+    )
+    train.train(output_dir=tmp_path, run_name="unit", max_env_steps=12, prepared_path=tmp_path / "prepared.json")
+    assert (tmp_path / "residual.pt").is_file()
+    payload = torch.load(tmp_path / "residual.pt", map_location="cpu", weights_only=True)
+    assert set(payload) <= {"actor", "critic", "target_critic"}
+    resume = torch.load(tmp_path / "resume" / "latest.pt", map_location="cpu", weights_only=False)
+    assert "transformer" not in resume
+    assert "env_steps" in resume
+    assert "recipe" in resume
+
+
+def test_sharpening_metrics_not_residual_rms():
+    from script.lingbot_rl_model import DiceResidualModel
+    from script.lingbot_rl_train import sharpening_metrics
+
+    model = DiceResidualModel(device="cpu")
+    s = torch.zeros(2, 3072)
+    a_base = torch.zeros(2, 8, 16, 30)
+    a = a_base + 0.1
+    metrics = sharpening_metrics(model, s, a_base, a)
+    assert "delta_h" in metrics and "delta_v" in metrics
+    assert "residual_rms" not in metrics

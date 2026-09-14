@@ -86,3 +86,15 @@ class ChunkReplay:
                 tensor = tensor.unsqueeze(-1)
             batch[key] = tensor
         return batch
+
+    def state_dict(self):
+        return {
+            "capacity": self.capacity,
+            "episode_start": self._episode_start,
+            "data": self._data,
+        }
+
+    def load_state_dict(self, payload):
+        self.capacity = payload["capacity"]
+        self._episode_start = payload["episode_start"]
+        self._data = payload["data"]
