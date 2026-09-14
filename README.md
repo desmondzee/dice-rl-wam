@@ -165,14 +165,22 @@ The later SFT-vs-DICE-RL benchmark should use 100 rollouts/task as reported in D
 
 The residual trainer freezes `libero30-sft` **step 000600** and uses the same released LIBERO sampler as the 69% eval (video 20, `video_exec_step=-1`, action 50, CFG 5.0/1.0). Do not switch to the paper real-time 3-step / s=0.6 decoder; that would be a different π_pre. Comparison eval is 20 rollouts/task, init-states 1–20, seed 42 — identical to `EvalConfig(stage="eval")`. Do not re-run the SFT 69% job.
 
-The following command **starts paid Modal compute** (one H100, 12h train timeout). Use the active Modal profile (workspace `tiwariojas`). Add `--wandb-entity YOUR_ENTITY` if needed. W&B project is `dice-lingbot-va-rl`.
+The following command **starts paid Modal compute** (one H100, 12h train timeout). Use the active Modal profile (workspace `tiwariojas`). `--detach` is a Modal CLI flag and must come **before** `-m` so the H100 job keeps running if this laptop disconnects. Add `--wandb-entity YOUR_ENTITY` if needed. W&B project is `dice-lingbot-va-rl`.
 
 ```bash
-uv run --no-project --with modal==1.1.4 modal run -m script.lingbot_rl_modal \
+uv run --no-project --with modal==1.1.4 modal profile current
+uv run --no-project --with modal==1.1.4 modal run --detach -m script.lingbot_rl_modal \
   --stage train --run-name libero30-dice-baseline
 ```
 
-Keep the client attached until download finishes. Local download is inference-only (`residual.pt`, summaries, train-eval rows, and after `--stage eval` the 20-rollout JSON/`report.html`). Resume state, replay, Adam, expert cache, and the 5B transformer stay on `dice-lingbot-rl-runs`. Volumes: `dice-lingbot-sft-cache` and `dice-lingbot-sft-runs` read-only on GPU; `dice-lingbot-rl-runs` writable. CPU prepare uses `dice-lingbot-hf`; GPU uses `dice-lingbot-wandb` with Hub offline.
+Stay connected through CPU prepare until the GPU function is running; after that a dropped client does not cancel the job. Weights are committed to `dice-lingbot-rl-runs` as the run proceeds. Pull inference artifacts later (no GPU) with `--stage download` once `status.json` has `"complete": true`:
+
+```bash
+uv run --no-project --with modal==1.1.4 modal run -m script.lingbot_rl_modal \
+  --stage download --run-name libero30-dice-baseline
+```
+
+Local download is inference-only (`residual.pt`, summaries, train-eval rows, and after `--stage eval` the 20-rollout JSON/`report.html`). Resume state, replay, Adam, expert cache, and the 5B transformer stay on `dice-lingbot-rl-runs`. Volumes: `dice-lingbot-sft-cache` and `dice-lingbot-sft-runs` read-only on GPU; `dice-lingbot-rl-runs` writable. CPU prepare uses `dice-lingbot-hf`; GPU uses `dice-lingbot-wandb` with Hub offline.
 
 `--stage eval` runs the 20-rollout comparison against the trained residual. Train-time eval is 1 rollout/task every 25k env steps and is not the 69% comparison.
 

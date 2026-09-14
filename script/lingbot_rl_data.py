@@ -1,5 +1,6 @@
 import hashlib
 import json
+import pickle
 from pathlib import Path
 
 import numpy as np
@@ -129,8 +130,11 @@ def featurize_experts(policy, dataset, manifest=None, norm=None, cache_path=None
     cache_path = Path(cache_path) if cache_path is not None else None
     fingerprint = expert_fingerprint(manifest, norm, episodes)
     if cache_path is not None and cache_path.is_file():
-        payload = torch.load(cache_path, map_location="cpu", weights_only=False)
-        if payload.get("fingerprint") == fingerprint:
+        try:
+            payload = torch.load(cache_path, map_location="cpu", weights_only=False)
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError, pickle.UnpicklingError):
+            payload = None
+        if payload is not None and payload.get("fingerprint") == fingerprint:
             return payload["rows"]
     rows = []
     for episode in episodes:
@@ -164,10 +168,14 @@ def load_manifest_episodes(dataset_root, manifest, task_to_id=None, norm=None):
         idx = episode["episode_index"]
         chunk = idx // info["chunks_size"]
         rel = info["data_path"].format(episode_chunk=chunk, episode_index=idx)
-        table = pq.read_table(root / rel, columns=["action", "episode_index", "frame_index"])
+        parquet_path = root / rel
+        try:
+            table = pq.read_table(parquet_path, columns=["action", "episode_index", "frame_index"])
+        except Exception as exc:
+            raise RuntimeError(f"Failed to read episode {idx} parquet {parquet_path}: {exc}") from exc
         actions = np.asarray(table["action"].to_pylist(), dtype=np.float32)
         if actions.shape[-1] != USED_DOF or not np.isfinite(actions).all():
-            raise ValueError("Expected finite seven-dimensional LIBERO actions")
+            raise ValueError(f"Expected finite seven-dimensional LIBERO actions in {parquet_path}")
         latents = _try_load_latents(root, info, episode, actions, norm)
         frames = [] if latents is not None else _load_episode_frames(root, info, episode, table)
         if latents is None and (not frames or frames[0] is None):
@@ -187,18 +195,35 @@ def load_manifest_episodes(dataset_root, manifest, task_to_id=None, norm=None):
     return loaded
 
 
+def _usable_torch_archive(path):
+    path = Path(path)
+    try:
+        if not path.is_file() or path.stat().st_size < 64:
+            return False
+        with path.open("rb") as handle:
+            magic = handle.read(64)
+    except OSError:
+        return False
+    if magic.startswith(b"version https://git-lfs") or magic.lstrip().startswith(b"<"):
+        return False
+    return magic.startswith(b"PK") or magic.startswith(b"\x80")
+
+
 def _try_load_latents(root, info, episode, actions, norm):
     from script.lingbot_sft_data import assemble_streams, episode_paths, load_latent
 
     _, paths = episode_paths(info, episode)
     files = [root / path for path in paths]
-    if not all(path.is_file() for path in files):
+    if not all(_usable_torch_archive(path) for path in files):
         return None
-    assembled = assemble_streams([load_latent(path) for path in files], actions, episode, norm)
-    latents = assembled["latents"]
-    if latents.ndim != 4:
-        raise ValueError("Expected published latents with shape (C, F, H, W)")
-    return latents.unsqueeze(0)
+    try:
+        assembled = assemble_streams([load_latent(path) for path in files], actions, episode, norm)
+        latents = assembled["latents"]
+        if latents.ndim != 4:
+            raise ValueError("Expected published latents with shape (C, F, H, W)")
+        return latents.unsqueeze(0)
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError, pickle.UnpicklingError):
+        return None
 
 
 def _read_rgb_video(path):
@@ -222,11 +247,14 @@ def _load_episode_videos(root, info, episode):
     for camera in SFT_CAMERAS:
         path = root / template.format(
             episode_chunk=chunk, episode_index=episode["episode_index"], video_key=camera)
-        if not path.is_file():
+        try:
+            if not path.is_file() or path.stat().st_size < 32:
+                return []
+            arrays.append(_read_rgb_video(path))
+        except (OSError, ValueError, RuntimeError, KeyError, TypeError):
             return []
-        arrays.append(_read_rgb_video(path))
-    if arrays[0].shape[0] != arrays[1].shape[0]:
-        raise ValueError("Camera video lengths differ")
+    if len(arrays) != 2 or arrays[0].shape[0] != arrays[1].shape[0]:
+        return []
     return [
         {"pixels": {"image": arrays[0][index], "image2": arrays[1][index]}}
         for index in range(arrays[0].shape[0])

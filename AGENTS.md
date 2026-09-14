@@ -117,7 +117,7 @@ uv run --no-project --with modal==1.1.4 --with click==8.1.8 --with typer==0.16.0
 User-run (paid) train, not executed as local verification:
 
 ```text
-uv run --no-project --with modal==1.1.4 modal run -m script.lingbot_rl_modal --stage train --run-name libero30-dice-baseline
+uv run --no-project --with modal==1.1.4 modal run --detach -m script.lingbot_rl_modal --stage train --run-name libero30-dice-baseline
 ```
 
 Modal image builders use an internal PyPI mirror by default. LeRobot's pinned lockfile records https://pypi.org/simple, so evaluation image uv sync, uv export, and constrained uv pip install commands explicitly pass --index-url https://pypi.org/simple. Without that flag, uv reports a missing remote index, re-resolves, and fails --locked. Keep --locked and the upstream lockfile unchanged; upgrading uv or regenerating the lock is not the fix.

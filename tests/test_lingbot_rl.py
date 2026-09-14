@@ -1,3 +1,5 @@
+import io
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -455,6 +457,126 @@ def test_featurize_experts_pools_published_latents(tmp_path):
     assert float(rows[1]["s"][0]) == 7.0
 
 
+def _rewrite_numpy_core_pickle_global(path):
+    raw = path.read_bytes()
+    old, new = b"numpy._core.multiarray", b"numpy.core.multiarray"
+    if old not in raw:
+        return False
+    if raw[:2] != b"PK":
+        path.write_bytes(raw.replace(old, new))
+        return True
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as zin:
+        infos = list(zin.infolist())
+        contents = {info.filename: zin.read(info.filename) for info in infos}
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as zout:
+        for info in infos:
+            data = contents[info.filename]
+            if old in data:
+                data = data.replace(old, new)
+            copied = zipfile.ZipInfo(filename=info.filename, date_time=info.date_time)
+            copied.compress_type = info.compress_type
+            zout.writestr(copied, data)
+    path.write_bytes(out.getvalue())
+    return True
+
+
+def test_load_latent_accepts_published_numpy_core_pickle_name(tmp_path):
+    from script.lingbot_sft_data import load_latent
+
+    path = tmp_path / "latent.pth"
+    torch.save({"frame_ids": np.arange(2, dtype=np.int64), "text": "task"}, path)
+    if not _rewrite_numpy_core_pickle_global(path):
+        pytest.skip("pickle already uses numpy.core.multiarray")
+    loaded = load_latent(path)
+    assert np.array_equal(loaded["frame_ids"], np.arange(2, dtype=np.int64))
+
+
+def _latent_episode_layout(tmp_path, camera_bytes):
+    from script.lingbot_sft_config import CAMERAS
+
+    episode = {"episode_index": 0, "length": 12, "tasks": ["put the moka pot"]}
+    info = {
+        "chunks_size": 1000,
+        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+    }
+    files = []
+    for camera, payload in zip(CAMERAS, camera_bytes):
+        path = tmp_path / f"latents/chunk-000/{camera}/episode_000000_0_12.pth"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        files.append(path)
+    return info, episode, files
+
+
+def test_try_load_latents_returns_none_for_truncated_zip(tmp_path):
+    from script.lingbot_rl_data import _try_load_latents
+
+    good = tmp_path / "good.pth"
+    torch.save({"frame_ids": np.arange(2, dtype=np.int64)}, good)
+    raw = good.read_bytes()
+    info, episode, _ = _latent_episode_layout(tmp_path, (raw, raw[:24]))
+    assert _try_load_latents(
+        tmp_path, info, episode, np.zeros((12, 7), np.float32), _eval_normalization()) is None
+
+
+def test_try_load_latents_returns_none_for_lfs_pointer_and_empty(tmp_path):
+    from script.lingbot_rl_data import _try_load_latents
+
+    pointer = b"version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n"
+    info, episode, _ = _latent_episode_layout(tmp_path, (pointer, b""))
+    assert _try_load_latents(
+        tmp_path, info, episode, np.zeros((12, 7), np.float32), _eval_normalization()) is None
+
+
+def test_load_latent_names_corrupt_path(tmp_path):
+    from script.lingbot_sft_data import load_latent
+
+    path = tmp_path / "broken.pth"
+    path.write_bytes(b"PK\x03\x04truncated")
+    with pytest.raises(RuntimeError, match="broken.pth"):
+        load_latent(path)
+
+
+def test_featurize_experts_rebuilds_corrupt_cache(tmp_path):
+    from script.lingbot_rl_data import featurize_experts
+
+    class StubPolicy:
+        def reset(self):
+            return None
+
+        def extract_critic_state(self, batch):
+            return torch.ones(1, 3072)
+
+    cache = tmp_path / "expert_features.pt"
+    cache.write_bytes(b"PK\x03\x04truncated")
+    episode = {
+        "actions": np.zeros((12, 7), np.float32),
+        "task": "put the moka pot",
+        "task_id": 8,
+        "frames": [object()] * 12,
+    }
+    rows = featurize_experts(
+        StubPolicy(), [episode], norm=_eval_normalization(), cache_path=cache)
+    assert len(rows) == 1
+    assert float(rows[0]["s"][0]) == 1.0
+
+
+def test_load_episode_videos_returns_empty_on_truncated_mp4(tmp_path):
+    from script.lingbot_rl_data import _load_episode_videos
+    from script.lingbot_sft_config import CAMERAS
+
+    info = {
+        "chunks_size": 1000,
+        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+    }
+    for camera in CAMERAS:
+        path = tmp_path / f"videos/chunk-000/{camera}/episode_000000.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"not an mp4")
+    assert _load_episode_videos(tmp_path, info, {"episode_index": 0, "length": 4}) == []
+
+
 def test_missing_demo_cameras_do_not_fabricate_none_frames(tmp_path):
     from script.lingbot_rl_data import _load_episode_frames
 
@@ -667,6 +789,26 @@ def test_modal_download_skips_resume_and_refuses_overwrite(tmp_path, monkeypatch
     assert "expert_features" not in joined
     with pytest.raises(FileExistsError):
         module.download_inference("libero30-dice-baseline", tmp_path / "result/lingbot-rl")
+
+
+def test_download_stage_skips_prepare_and_gpu(tmp_path, monkeypatch):
+    import script.lingbot_rl_modal as module
+
+    called = []
+
+    def record(name):
+        def remote(*args, **kwargs):
+            called.append(name)
+            raise AssertionError(f"{name} should not run for download")
+        return type("Fn", (), {"remote": staticmethod(remote)})()
+
+    monkeypatch.setattr(module, "prepare", record("prepare"))
+    monkeypatch.setattr(module, "run_train", record("train"))
+    monkeypatch.setattr(module, "run_eval", record("eval"))
+    monkeypatch.setattr(module, "run_smoke", record("smoke"))
+    monkeypatch.setattr(module, "download_inference", lambda run_name, download_dir: called.append((run_name, download_dir)) or "out")
+    module.main(stage="download", run_name="libero30-dice-baseline", download_dir=str(tmp_path / "result/lingbot-rl"))
+    assert called == [("libero30-dice-baseline", str(tmp_path / "result/lingbot-rl"))]
 
 
 def test_modal_lock_and_help_do_not_print_secrets(capsys):

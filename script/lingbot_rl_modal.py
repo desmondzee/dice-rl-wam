@@ -261,8 +261,8 @@ def download_inference(run_name, download_dir):
 def main(stage: str = "train", run_name: str = "", resume: bool = False,
          wandb_project: str = "dice-lingbot-va-rl", wandb_entity: str = "",
          download_dir: str = "result/lingbot-rl"):
-    if stage not in ("prepare", "train", "eval", "smoke"):
-        raise ValueError("Stage must be prepare, train, eval, or smoke")
+    if stage not in ("prepare", "train", "eval", "smoke", "download"):
+        raise ValueError("Stage must be prepare, train, eval, smoke, or download")
     eval_cfg = EvalConfig(
         source_run="libero30-sft", checkpoint_step=600, stage="eval", seed=42,
         wandb_project="dice-lingbot-va-eval", wandb_entity=wandb_entity or None,
@@ -274,6 +274,9 @@ def main(stage: str = "train", run_name: str = "", resume: bool = False,
         run_name = validate_name(run_name or "libero30-dice-smoke")
     else:
         run_name = validate_name(run_name or rl_cfg.default_run_name)
+    if stage == "download":
+        print(download_inference(run_name, download_dir))
+        return
     if stage != "prepare" and (Path(download_dir) / run_name).exists():
         raise FileExistsError("Local result directory exists; choose a different --download-dir")
     prepared_path = prepare.remote(asdict(eval_cfg))

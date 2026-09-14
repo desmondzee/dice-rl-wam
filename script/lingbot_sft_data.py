@@ -1,5 +1,6 @@
 import json
 import logging
+import pickle
 import math
 import os
 import time
@@ -25,11 +26,42 @@ from script.lingbot_sft_config import (
 )
 
 
+def _numpy_safe_globals():
+    try:
+        from numpy._core.multiarray import _reconstruct as reconstruct
+    except ImportError:
+        from numpy.core.multiarray import _reconstruct as reconstruct
+    allowed = [
+        reconstruct,
+        (reconstruct, "numpy.core.multiarray._reconstruct"),
+        (reconstruct, "numpy._core.multiarray._reconstruct"),
+        np.ndarray,
+        np.dtype,
+        np.generic,
+    ]
+    for dtype in (np.bool_, np.uint8, np.int32, np.int64, np.float32, np.float64):
+        allowed.append(dtype)
+        allowed.append(type(np.dtype(dtype)))
+    try:
+        import numpy.dtypes as np_dtypes
+        for name in dir(np_dtypes):
+            obj = getattr(np_dtypes, name)
+            if isinstance(obj, type):
+                allowed.append(obj)
+    except Exception:
+        pass
+    return allowed
+
+
 def load_latent(path):
-    allowed = [np.core.multiarray._reconstruct, np.ndarray, np.dtype]
-    allowed += [type(np.dtype(dtype)) for dtype in (np.int32, np.int64, np.float32, np.float64)]
-    with torch.serialization.safe_globals(allowed):
-        return torch.load(path, map_location="cpu", weights_only=True)
+    path = Path(path)
+    try:
+        with torch.serialization.safe_globals(_numpy_safe_globals()):
+            return torch.load(path, map_location="cpu", weights_only=True)
+    except pickle.UnpicklingError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load latent {path}: {exc}") from exc
 
 
 def choose_episodes(episodes, cfg):

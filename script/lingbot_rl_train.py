@@ -103,7 +103,10 @@ def save_resume(path, model, buffer, env_steps, chunks, recipe):
 
 
 def load_resume(path, model, buffer, recipe):
-    payload = torch.load(path, map_location=model.device, weights_only=False)
+    try:
+        payload = torch.load(path, map_location=model.device, weights_only=False)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load resume checkpoint {path}: {exc}") from exc
     if payload.get("recipe") != recipe:
         raise ValueError("Resume recipe fingerprint mismatch")
     if "transformer" in payload:
@@ -298,7 +301,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         if due:
             evaluated.update(due)
             summary = _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir)
-            run.log({f"train_eval/{key}": value for key, value in summary.items() if key != "per_task_success"})
+            logged = {f"train_eval/{key}": value for key, value in summary.items() if key != "per_task_success"}
+            logged["env_steps"] = env_steps
+            run.log(logged)
             for task_id, success in summary["per_task_success"].items():
                 run.log({f"train_eval/task_{task_id}_success": float(success), "env_steps": env_steps})
             task = tasks[0]
@@ -438,7 +443,10 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     policy = load_residual_policy(prepared["checkpoint"], prepared["model_path"], prepared.get("architecture") or metadata.get("architecture") or {})
     model = DiceResidualModel(device=device)
     residual_path = Path(residual_path or Path(output_dir) / "residual.pt")
-    model.load_inference_state_dict(torch.load(residual_path, map_location="cpu", weights_only=True))
+    try:
+        model.load_inference_state_dict(torch.load(residual_path, map_location="cpu", weights_only=True))
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load residual weights {residual_path}: {exc}") from exc
     policy.residual_model = model
     suite, tasks = describe_suite(prepared["assets_path"])
     output_dir = Path(output_dir)
