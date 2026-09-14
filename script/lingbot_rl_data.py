@@ -154,6 +154,10 @@ def load_manifest_episodes(dataset_root, manifest, task_to_id=None):
         if actions.shape[-1] != USED_DOF or not np.isfinite(actions).all():
             raise ValueError("Expected finite seven-dimensional LIBERO actions")
         frames = _load_episode_frames(root, info, episode, table)
+        if not frames or frames[0] is None:
+            raise ValueError(
+                f"Could not load RGB frames for episode {idx}; expert critic state requires demo cameras"
+            )
         loaded.append({
             "actions": actions,
             "task": episode["tasks"][0],

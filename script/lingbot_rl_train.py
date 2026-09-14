@@ -56,6 +56,13 @@ def recipe_of(config):
     return config.protocol()
 
 
+def _ingest_experts(buffer, rows):
+    for row in rows:
+        buffer.add_expert(row)
+        if float(row["done"]) == 1.0:
+            buffer.finalize_episode()
+
+
 def _atomic_torch(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -199,6 +206,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     if prepared.get("source_run") not in (None, config.source_run) or prepared.get("checkpoint_step") not in (None, config.checkpoint_step):
         raise ValueError("Prepared checkpoint does not match the pinned RL recipe")
     device = _device()
+    if device == "cuda":
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
     seed_all(config.seed)
     policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), prepared.get("architecture") or {})
     model = DiceResidualModel(device=device)
@@ -216,11 +226,11 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         if dataset_root:
             task_to_id = {task["instruction"]: task["task_id"] for task in tasks}
             episodes = load_manifest_episodes(dataset_root, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), task_to_id)
-            for row in featurize_experts(policy, episodes, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm, cache_path):
-                buffer.add_expert(row)
+            _ingest_experts(buffer, featurize_experts(
+                policy, episodes, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm, cache_path))
         elif cache_path.is_file():
-            for row in featurize_experts(policy, [], read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm, cache_path):
-                buffer.add_expert(row)
+            _ingest_experts(buffer, featurize_experts(
+                policy, [], read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm, cache_path))
     suite = None
     if prepared.get("assets_path"):
         from script.lingbot_eval import describe_suite
@@ -231,6 +241,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     resume_path = output_dir / "resume" / "latest.pt"
     if resume:
         env_steps, chunks = load_resume(resume_path, model, buffer, recipe)
+    if max_env_steps is None and env_steps == 0:
+        if not any(float(row["is_expert"]) == 1.0 for row in buffer.rows()):
+            raise RuntimeError("Expert features missing; RLPD requires the 300 SFT demos")
     _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe})
     run = wandb.init(
         project=config.wandb_project, entity=config.wandb_entity, name=run_name or config.default_run_name,
@@ -378,6 +391,9 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
         raise ValueError("Comparison eval drifted from the 69% SFT protocol")
     prepared = _read_prepared(prepared_path)
     device = _device()
+    if device == "cuda":
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
     metadata = read_checkpoint_metadata(prepared["checkpoint"])
     policy = load_residual_policy(prepared["checkpoint"], prepared["model_path"], prepared.get("architecture") or metadata.get("architecture") or {})
     model = DiceResidualModel(device=device)

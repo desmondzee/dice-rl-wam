@@ -39,12 +39,11 @@ class ChunkReplay:
         stored = {
             **row,
             "is_expert": np.float32(1.0),
-            "n_steps": np.float32(1.0),
-            "a_next": np.array(row["a"], copy=True),
         }
+        stored.setdefault("n_steps", np.float32(1.0))
+        stored.setdefault("a_next", np.array(stored["a"], copy=True))
         self._data.append(stored)
         self._trim()
-        self._episode_start = len(self._data)
 
     def finalize_episode(self):
         episode = self._data[self._episode_start:]

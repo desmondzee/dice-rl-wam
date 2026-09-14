@@ -106,6 +106,8 @@ class RLConfig:
             "comparison_episodes_per_task": 20,
             "comparison_initial_state_offset": 1,
             "comparison_seed": 42,
+            "checkpoint_step": self.checkpoint_step,
+            "source_run": self.source_run,
             "lerobot_revision": LEROBOT_REVISION,
             "model_repo": MODEL_REPO,
             "model_revision": MODEL_REVISION,

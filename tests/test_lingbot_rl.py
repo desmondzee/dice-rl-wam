@@ -1,4 +1,5 @@
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -63,6 +64,8 @@ def test_config_pins_released_libero_sampler_and_step_600():
     assert proto["comparison_episodes_per_task"] == 20
     assert proto["comparison_initial_state_offset"] == 1
     assert proto["comparison_seed"] == 42
+    assert proto["checkpoint_step"] == 600
+    assert proto["source_run"] == "libero30-sft"
 
 
 @pytest.mark.parametrize("changes", [
@@ -350,6 +353,17 @@ def test_expert_chunk_stride_and_padding(tmp_path):
     np.testing.assert_allclose(decoded, raw, atol=1e-5)
 
 
+def test_expert_n_step_is_three_chunks():
+    buf = ChunkReplay(capacity=32)
+    for reward, done in ((0, 0), (0, 0), (1, 1)):
+        buf.add_expert(_replay_row(reward, done, expert=True))
+        if done:
+            buf.finalize_episode()
+    rows = buf.rows()
+    assert [float(row["n_steps"]) for row in rows] == [3.0, 2.0, 1.0]
+    assert float(rows[0]["reward"]) == pytest.approx(GAMMA ** 2)
+
+
 def test_train_mocked_step_logs_and_saves_small_weights(tmp_path, monkeypatch):
     import sys
 
@@ -437,3 +451,33 @@ def test_sharpening_metrics_not_residual_rms():
     metrics = sharpening_metrics(model, s, a_base, a)
     assert "delta_h" in metrics and "delta_v" in metrics
     assert "residual_rms" not in metrics
+
+
+def test_modal_download_skips_resume_and_refuses_overwrite(tmp_path, monkeypatch):
+    import script.lingbot_rl_modal as module
+
+    calls = []
+
+    def download(command, check):
+        calls.append(command)
+        dest = Path(command[-1]) / "libero30-dice-baseline"
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "residual.pt").write_bytes(b"x")
+        (dest / "summary.json").write_text("{}")
+
+    monkeypatch.setattr(module.subprocess, "run", download)
+    out = module.download_inference("libero30-dice-baseline", tmp_path / "result/lingbot-rl")
+    assert Path(out).joinpath("residual.pt").is_file()
+    joined = " ".join(str(part) for part in calls[0])
+    assert "resume" not in joined
+    assert "expert_features" not in joined
+    with pytest.raises(FileExistsError):
+        module.download_inference("libero30-dice-baseline", tmp_path / "result/lingbot-rl")
+
+
+def test_modal_lock_and_help_do_not_print_secrets(capsys):
+    import script.lingbot_rl_modal as module
+
+    assert module.WANDB_SECRET_NAME == "dice-lingbot-wandb"
+    assert module.HF_SECRET_NAME == "dice-lingbot-hf"
+    assert module.RESULT_VOLUME == "dice-lingbot-rl-runs"
