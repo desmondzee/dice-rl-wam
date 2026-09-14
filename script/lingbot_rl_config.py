@@ -34,6 +34,8 @@ class RLConfig:
             raise ValueError("Collection K is pinned to 4")
         if self.online_env_steps != 100_000:
             raise ValueError("Online budget is 100,000 env action steps")
+        if self.train_eval_every != 25_000 or self.train_eval_episodes_per_task != 1:
+            raise ValueError("Train-time eval is 1 rollout/task every 25,000 env steps")
         if type(self.seed) is not int or not 0 <= self.seed < 2**32:
             raise ValueError("Invalid seed")
         if not self.wandb_project:
@@ -85,6 +87,25 @@ class RLConfig:
             "used_action_channels": list(range(7)),
             "k_candidates": self.k_candidates,
             "online_env_steps": self.online_env_steps,
+            "residual_input": "z",
+            "mlp_hidden": [1024, 1024, 1024],
+            "critic_ensemble": 10,
+            "beta": 100.0,
+            "epsilon": -0.5,
+            "n_step_chunks": 3,
+            "gamma": 0.99,
+            "utd": 10,
+            "tau": 0.01,
+            "adam_lr": 1e-4,
+            "batch_size": 256,
+            "rlpd_start": 0.5,
+            "rlpd_end": 0.1,
+            "replay_capacity": 100_000,
+            "train_eval_every": self.train_eval_every,
+            "train_eval_episodes_per_task": self.train_eval_episodes_per_task,
+            "comparison_episodes_per_task": 20,
+            "comparison_initial_state_offset": 1,
+            "comparison_seed": 42,
             "lerobot_revision": LEROBOT_REVISION,
             "model_repo": MODEL_REPO,
             "model_revision": MODEL_REVISION,
