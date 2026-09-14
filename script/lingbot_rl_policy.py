@@ -5,6 +5,7 @@ from einops import rearrange
 from lerobot.policies.lingbot_va.modeling_lingbot_va import LingBotVAPolicy
 from lerobot.policies.lingbot_va.utils import data_seq_to_patch
 
+from script.lingbot_eval_config import CAMERAS
 from script.lingbot_rl_model import ACTION_DIM, HORIZON, STATE_DIM, USED_DOF, apply_residual
 
 
@@ -71,6 +72,7 @@ def frozen_prior_kwargs():
         "snr_shift": 5.0,
         "action_snr_shift": 0.05,
         "used_action_channel_ids": list(range(7)),
+        "obs_cam_keys": list(CAMERAS),
         "save_predicted_video": False,
     }
 
@@ -147,6 +149,16 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         return self._pool_from_latent(latent)
 
     @torch.no_grad()
+    def extract_critic_state_from_latent(self, latent, batch):
+        """Pool published start-of-chunk VAE latents. Same critic cache as RGB `extract_critic_state`."""
+        self.eval()
+        self._ensure_frozen_modules()
+        self._maybe_init_prompt(batch)
+        if latent.ndim != 5:
+            raise ValueError("Published latents must be shaped (B, C, T, H, W)")
+        return self._pool_from_latent(latent.to(device=self.config.device, dtype=self.dtype))
+
+    @torch.no_grad()
     def _pool_from_latent(self, latent):
         self._ensure_critic_cache()
         captured = []
@@ -189,18 +201,21 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
         first = self._first_chunk
+        start_obs = self._extract_raw_obs(batch)
         if first:
-            init_latent = self._encode_frames([self._extract_raw_obs(batch)])
+            init_latent = self._encode_frames([start_obs])
             self._init_latent = init_latent
             self._init_streaming_cache(init_latent)
             self._obs_buffer = []
             frame_st_id = 0
+            critic_latent = init_latent
         else:
             self._compute_kv_cache(self._obs_buffer, self._executed_actions)
             self._obs_buffer = []
             init_latent = None
             frame_st_id = self._frame_st_id
-        state = self._pool_from_latent(self._last_real_latent)
+            critic_latent = self._encode_frames([start_obs])
+        state = self._pool_from_latent(critic_latent)
         actions, latents, z_model, video = self._infer(
             init_latent, frame_st_id, video_noise=video_noise, action_noise=action_noise, k=k
         )
@@ -395,7 +410,6 @@ def load_residual_policy(checkpoint, model_path, architecture):
         input_features={key: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)) for key in CAMERAS},
         output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))},
         wan_pretrained_path=str(model_path),
-        obs_cam_keys=list(CAMERAS),
         **frozen_prior_kwargs(),
     )
     if (

@@ -24,6 +24,7 @@ EVAL_PYTHON = "/opt/lerobot/.venv/bin/python"
 INFERENCE_PATHS = ("residual.pt", "summary.json", "settings.json", "status.json", "train_eval", "eval")
 FILES = (
     "lingbot_eval_config.py", "lingbot_eval.py", "lingbot_eval_report.py", "lingbot_sft_config.py",
+    "lingbot_sft_data.py",
     "lingbot_rl_config.py", "lingbot_rl_model.py", "lingbot_rl_buffer.py", "lingbot_rl_policy.py",
     "lingbot_rl_data.py", "lingbot_rl_train.py",
 )
@@ -99,7 +100,16 @@ def prepare(config):
                 "--cache-root", "/cache", "--checkpoint", f"/sft/{cfg.source_run}/checkpoints/step_{cfg.checkpoint_step:06d}",
                 "--prepared-output", str(output),
             ], check=True)
-            return json.loads(output.read_text())["prepared_path"]
+            prepared_path = json.loads(output.read_text())["prepared_path"]
+        from script.lingbot_eval import download_snapshot
+        token = os.environ.get("HF_TOKEN", "").strip()
+        if not token:
+            raise RuntimeError("HF_TOKEN is required in dice-lingbot-hf for CPU asset preparation")
+        download_snapshot(
+            DATASET_REPO, repo_type="dataset", revision=DATASET_REVISION,
+            cache_dir="/cache/hub", token=token,
+        )
+        return prepared_path
     finally:
         cache.commit()
 

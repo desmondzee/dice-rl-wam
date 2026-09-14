@@ -56,6 +56,16 @@ def recipe_of(config):
     return config.protocol()
 
 
+def train_eval_schedule(budget, every):
+    if every < 1:
+        raise ValueError("train_eval_every must be positive")
+    return list(range(0, budget + 1, every))
+
+
+def due_train_evals(env_steps, schedule, evaluated):
+    return [point for point in schedule if env_steps >= point and point not in evaluated]
+
+
 def _ingest_experts(buffer, rows):
     for row in rows:
         buffer.add_expert(row)
@@ -225,7 +235,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         cache_path = output_dir / "expert_features.pt"
         if dataset_root:
             task_to_id = {task["instruction"]: task["task_id"] for task in tasks}
-            episodes = load_manifest_episodes(dataset_root, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), task_to_id)
+            episodes = load_manifest_episodes(
+                dataset_root, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"),
+                task_to_id, norm)
             _ingest_experts(buffer, featurize_experts(
                 policy, episodes, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm, cache_path))
         elif cache_path.is_file():
@@ -250,12 +262,15 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         config=config.to_dict(), resume="allow" if resume else None,
     )
     budget = config.online_env_steps if max_env_steps is None else max_env_steps
-    eval_points = {0, 25_000, 50_000, 75_000, 100_000}
+    eval_schedule = train_eval_schedule(budget, config.train_eval_every)
     evaluated = set()
 
     def maybe_eval():
-        if env_steps in eval_points and env_steps not in evaluated:
-            evaluated.add(env_steps)
+        # Episode-boundary only: `_train_eval` / sharpening call `policy.reset()`.
+        # Thresholds, not exact equality, so 12/16-step chunks still hit 25k/50k/75k/100k.
+        due = due_train_evals(env_steps, eval_schedule, evaluated)
+        if due:
+            evaluated.update(due)
             summary = _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir)
             run.log({f"train_eval/{key}": value for key, value in summary.items() if key != "per_task_success"})
             for task_id, success in summary["per_task_success"].items():
@@ -365,8 +380,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         save_resume(resume_path, model, buffer, env_steps, chunks, recipe)
         if commit is not None:
             commit()
-    if budget in eval_points:
-        maybe_eval()
+    maybe_eval()
     save_inference(output_dir / "residual.pt", model)
     save_resume(resume_path, model, buffer, env_steps, chunks, recipe)
     _write_json(output_dir / "summary.json", {"env_steps": env_steps, "chunks": chunks})

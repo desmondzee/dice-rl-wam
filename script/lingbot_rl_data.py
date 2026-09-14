@@ -85,7 +85,20 @@ def _episode_rows(policy, episode, norm):
         n_env = min(env_action_count(first), len(actions) - offset)
         raw = actions[offset:offset + n_env]
         chunk = _chunk_actions(raw, first, norm)
-        state = _tensor_state(policy.extract_critic_state(_critic_batch(episode, offset, device)))
+        if episode.get("latents") is not None:
+            latents = episode["latents"]
+            if latents.ndim != 5:
+                raise ValueError("Published expert latents must be shaped (B, C, T, H, W)")
+            frame_count = latents.shape[2]
+            index = min(offset // 4, max(frame_count - 1, 0))
+            if not hasattr(policy, "extract_critic_state_from_latent"):
+                raise TypeError("Policy must pool critic state from published latents")
+            state = _tensor_state(
+                policy.extract_critic_state_from_latent(
+                    latents[:, :, index:index + 1], {"task": [episode["task"]]})
+            )
+        else:
+            state = _tensor_state(policy.extract_critic_state(_critic_batch(episode, offset, device)))
         rows.append({
             "s": state,
             "z": np.zeros((HORIZON, ACTION_DIM), dtype=np.float32),
@@ -128,10 +141,12 @@ def featurize_experts(policy, dataset, manifest=None, norm=None, cache_path=None
     return rows
 
 
-def load_manifest_episodes(dataset_root, manifest, task_to_id=None):
+def load_manifest_episodes(dataset_root, manifest, task_to_id=None, norm=None):
     """Load the 300 SFT demos listed in the checkpoint manifest from a LeRobot snapshot."""
     import pyarrow.parquet as pq
 
+    if norm is None:
+        raise ValueError("Checkpoint norm_stats.json is required")
     root = Path(dataset_root)
     info = json.loads((root / "meta" / "info.json").read_text())
     episodes = manifest["episodes"]
@@ -153,20 +168,69 @@ def load_manifest_episodes(dataset_root, manifest, task_to_id=None):
         actions = np.asarray(table["action"].to_pylist(), dtype=np.float32)
         if actions.shape[-1] != USED_DOF or not np.isfinite(actions).all():
             raise ValueError("Expected finite seven-dimensional LIBERO actions")
-        frames = _load_episode_frames(root, info, episode, table)
-        if not frames or frames[0] is None:
+        latents = _try_load_latents(root, info, episode, actions, norm)
+        frames = [] if latents is not None else _load_episode_frames(root, info, episode, table)
+        if latents is None and (not frames or frames[0] is None):
             raise ValueError(
-                f"Could not load RGB frames for episode {idx}; expert critic state requires demo cameras"
+                f"Could not load published latents or RGB frames for episode {idx}; "
+                "expert critic state requires demo cameras"
             )
         loaded.append({
             "actions": actions,
             "task": episode["tasks"][0],
             "task_id": task_to_id[episode["tasks"][0]],
             "frames": frames,
+            "latents": latents,
             "success": True,
             "episode_index": idx,
         })
     return loaded
+
+
+def _try_load_latents(root, info, episode, actions, norm):
+    from script.lingbot_sft_data import assemble_streams, episode_paths, load_latent
+
+    _, paths = episode_paths(info, episode)
+    files = [root / path for path in paths]
+    if not all(path.is_file() for path in files):
+        return None
+    assembled = assemble_streams([load_latent(path) for path in files], actions, episode, norm)
+    latents = assembled["latents"]
+    if latents.ndim != 4:
+        raise ValueError("Expected published latents with shape (C, F, H, W)")
+    return latents.unsqueeze(0)
+
+
+def _read_rgb_video(path):
+    import imageio.v2 as imageio
+
+    frames = [np.asarray(frame, dtype=np.uint8) for frame in imageio.get_reader(str(path))]
+    stacked = np.stack(frames, axis=0)
+    if stacked.ndim != 4 or stacked.shape[-1] != 3:
+        raise ValueError("Expected HxWx3 RGB video frames")
+    return stacked
+
+
+def _load_episode_videos(root, info, episode):
+    from script.lingbot_sft_config import CAMERAS as SFT_CAMERAS
+
+    template = info.get("video_path") or (
+        "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+    )
+    chunk = episode["episode_index"] // info["chunks_size"]
+    arrays = []
+    for camera in SFT_CAMERAS:
+        path = root / template.format(
+            episode_chunk=chunk, episode_index=episode["episode_index"], video_key=camera)
+        if not path.is_file():
+            return []
+        arrays.append(_read_rgb_video(path))
+    if arrays[0].shape[0] != arrays[1].shape[0]:
+        raise ValueError("Camera video lengths differ")
+    return [
+        {"pixels": {"image": arrays[0][index], "image2": arrays[1][index]}}
+        for index in range(arrays[0].shape[0])
+    ]
 
 
 def _load_episode_frames(root, info, episode, table):
@@ -191,4 +255,4 @@ def _load_episode_frames(root, info, episode, table):
                 return frames
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             pass
-    return [None] * int(episode.get("length") or table.num_rows)
+    return _load_episode_videos(root, info, episode)

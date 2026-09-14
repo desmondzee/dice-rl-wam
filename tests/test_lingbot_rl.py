@@ -264,6 +264,7 @@ def test_frozen_prior_kwargs_match_sft_eval_protocol():
     assert kwargs["camera_layout"] == proto["camera_layout"] == "width_concat"
     assert kwargs["text_encoder_device"] == proto["text_encoder_device"] == "cpu"
     assert kwargs["used_action_channel_ids"] == proto["used_action_channels"] == list(range(7))
+    assert kwargs["obs_cam_keys"] == proto["camera_keys"]
     assert kwargs["save_predicted_video"] is False
     assert kwargs["device"] == "cuda"
 
@@ -271,7 +272,8 @@ def test_frozen_prior_kwargs_match_sft_eval_protocol():
 def test_policy_class_exposes_collection_api():
     from script.lingbot_rl_policy import ResidualLingBotPolicy
 
-    for name in ("decode_candidates", "extract_critic_state", "commit_executed", "select_action"):
+    for name in ("decode_candidates", "extract_critic_state", "extract_critic_state_from_latent",
+                 "commit_executed", "select_action"):
         assert callable(getattr(ResidualLingBotPolicy, name))
 
 
@@ -351,6 +353,59 @@ def test_expert_chunk_stride_and_padding(tmp_path):
     normed = normalize_demo_action(raw, _eval_normalization())
     decoded = decode_action(torch.from_numpy(normed).reshape(1, 7), _eval_normalization())
     np.testing.assert_allclose(decoded, raw, atol=1e-5)
+
+
+def test_featurize_experts_pools_published_latents(tmp_path):
+    from script.lingbot_rl_data import featurize_experts
+
+    class StubPolicy:
+        def reset(self):
+            return None
+
+        def extract_critic_state(self, batch):
+            raise AssertionError("RGB path should not run when published latents exist")
+
+        def extract_critic_state_from_latent(self, latent, batch):
+            assert latent.shape[2] == 1
+            return torch.full((1, 3072), float(latent[0, 0, 0, 0, 0]))
+
+    latents = torch.zeros(1, 48, 8, 8, 16)
+    latents[0, 0, 3] = 7
+    actions = np.zeros((12 + 16, 7), np.float32)
+    episode = {"actions": actions, "task": "put the moka pot", "task_id": 8, "latents": latents}
+    rows = featurize_experts(
+        StubPolicy(), [episode], norm=_eval_normalization(), cache_path=tmp_path / "expert_features.pt")
+    assert len(rows) == 2
+    assert float(rows[0]["s"][0]) == 0.0
+    assert float(rows[1]["s"][0]) == 7.0
+
+
+def test_missing_demo_cameras_do_not_fabricate_none_frames(tmp_path):
+    from script.lingbot_rl_data import _load_episode_frames
+
+    info = {
+        "features": {},
+        "chunks_size": 1000,
+        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+    }
+    frames = _load_episode_frames(
+        tmp_path, info, {"episode_index": 0, "length": 4}, type("Table", (), {"num_rows": 4})())
+    assert frames == []
+
+
+def test_train_eval_fires_after_crossing_chunk_stride():
+    from script.lingbot_rl_train import due_train_evals, train_eval_schedule
+
+    schedule = train_eval_schedule(100_000, 25_000)
+    assert schedule == [0, 25_000, 50_000, 75_000, 100_000]
+    evaluated = set()
+    assert due_train_evals(0, schedule, evaluated) == [0]
+    evaluated.update([0])
+    assert due_train_evals(24_999, schedule, evaluated) == []
+    assert due_train_evals(25_012, schedule, evaluated) == [25_000]
+    evaluated.update([25_000])
+    assert due_train_evals(50_016, schedule, evaluated) == [50_000]
+    assert train_eval_schedule(12, 25_000) == [0]
 
 
 def test_expert_n_step_is_three_chunks():
@@ -481,3 +536,5 @@ def test_modal_lock_and_help_do_not_print_secrets(capsys):
     assert module.WANDB_SECRET_NAME == "dice-lingbot-wandb"
     assert module.HF_SECRET_NAME == "dice-lingbot-hf"
     assert module.RESULT_VOLUME == "dice-lingbot-rl-runs"
+    assert "lingbot_eval.py" in module.FILES
+    assert "lingbot_sft_data.py" in module.FILES
