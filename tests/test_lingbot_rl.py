@@ -1088,3 +1088,14 @@ def test_modal_lock_and_help_do_not_print_secrets(capsys):
     assert "--max-env-steps" in smoke_block
     assert "lingbot_eval.py" in module.FILES
     assert "lingbot_sft_data.py" in module.FILES
+
+
+def test_residual_actor_initializes_to_zero_so_policy_starts_at_prior():
+    torch.manual_seed(3)
+    model = DiceResidualModel(device="cpu")
+    state = torch.randn(5, STATE_DIM)
+    noise = torch.randn(5, HORIZON, ACTION_DIM)
+    residual = model.actor(state, noise)
+    torch.testing.assert_close(residual, torch.zeros(5, HORIZON, ACTION_DIM))
+    a_base = mask_unused_dof(torch.randn(5, HORIZON, ACTION_DIM))
+    torch.testing.assert_close(apply_residual(a_base, residual), a_base)

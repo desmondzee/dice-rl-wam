@@ -52,6 +52,9 @@ class ResidualActor(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = _mlp(STATE_DIM + HORIZON * ACTION_DIM, HORIZON * ACTION_DIM)
+        final = self.net[-1]
+        nn.init.zeros_(final.weight)
+        nn.init.zeros_(final.bias)
 
     def forward(self, state, noise):
         state = mlp_float(state)
