@@ -233,7 +233,7 @@ def _update_from_buffer(model, buffer, expert_ratio, device):
     for _ in range(UTD):
         critic_info = model.update_critic(sample["s"], sample["a"], target, sample["is_expert"])
     actor_info = model.update_actor(
-        sample["s"], sample["z"], sample["a_base"], sample["is_expert"], target)
+        sample["s"], sample["z_all"], sample["a_base_all"], sample["is_expert"], sample["mc_return"])
     return critic_info, actor_info
 
 

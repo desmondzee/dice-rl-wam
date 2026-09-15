@@ -153,7 +153,10 @@ def test_actor_critic_one_step_update_on_random_tensors():
     before = {k: v.detach().clone() for k, v in model.actor.named_parameters()}
     critic_info = model.update_critic(
         state, apply_residual(a_base, model.actor(state, noise).detach()), target, is_expert)
-    actor_info = model.update_actor(state, noise, a_base, is_expert, target)
+    mc_return = torch.zeros(8, 1)
+    actor_info = model.update_actor(
+        state, noise.unsqueeze(1).repeat(1, K_CANDIDATES, 1, 1),
+        a_base.unsqueeze(1).repeat(1, K_CANDIDATES, 1, 1), is_expert, mc_return)
     assert torch.isfinite(torch.tensor(critic_info["critic_loss"]))
     assert torch.isfinite(torch.tensor(actor_info["actor_loss"]))
     assert 0.0 <= actor_info["bc_filter_rate"] <= 1.0
@@ -1174,3 +1177,31 @@ def test_n_step_target_averages_current_policy_over_candidates():
         ], dim=0).mean(dim=0)
     torch.testing.assert_close(target[0], (GAMMA ** 3) * qs[0])
     torch.testing.assert_close(target[1], torch.tensor([1.0]))
+
+
+def test_bc_filter_disables_only_on_better_and_mc_underestimated():
+    from script.lingbot_rl_model import bc_filter_keep
+
+    q_a = torch.tensor([[0.9, 0.9, 0.3, 0.9]])
+    q_base = torch.tensor([[0.5, 0.5, 0.5, 0.95]])
+    mc_return = torch.tensor([[1.5]])
+    keep = bc_filter_keep(q_a, q_base, mc_return)
+    torch.testing.assert_close(keep, torch.tensor([[0.0, 0.0, 1.0, 1.0]]))
+    keep_low_mc = bc_filter_keep(q_a, q_base, torch.tensor([[0.9]]))
+    torch.testing.assert_close(keep_low_mc, torch.ones(1, 4))
+
+
+def test_update_actor_consumes_candidate_sets_and_mc_return():
+    torch.manual_seed(4)
+    model = DiceResidualModel(device="cpu")
+    state = torch.randn(6, STATE_DIM)
+    z_all = torch.randn(6, K_CANDIDATES, HORIZON, ACTION_DIM)
+    a_base_all = mask_unused_dof(torch.randn(6, K_CANDIDATES, HORIZON, ACTION_DIM))
+    is_expert = torch.zeros(6, 1)
+    is_expert[:3] = 1
+    mc_return = torch.zeros(6, 1)
+    before = {k: v.detach().clone() for k, v in model.actor.named_parameters()}
+    info = model.update_actor(state, z_all, a_base_all, is_expert, mc_return)
+    assert torch.isfinite(torch.tensor(info["actor_loss"]))
+    assert 0.0 <= info["bc_filter_rate"] <= 1.0
+    assert any(not torch.equal(before[k], v) for k, v in model.actor.named_parameters())

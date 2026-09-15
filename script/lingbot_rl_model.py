@@ -38,6 +38,12 @@ def apply_residual(a_base, residual):
     return mask_unused_dof(mlp_float(a_base) + mlp_float(residual))
 
 
+def bc_filter_keep(q_a, q_base, mc_return):
+    better = (q_a > q_base).float()
+    underestimated = ((q_a - mc_return) < EPSILON).float()
+    return 1.0 - better * underestimated
+
+
 def _mlp(in_dim, out_dim):
     dims = [in_dim, *HIDDEN, out_dim]
     layers = []
@@ -118,18 +124,23 @@ class DiceResidualModel:
             "q_mean": float(torch.stack(preds).mean().detach()),
         }
 
-    def update_actor(self, state, noise, a_base, is_expert, target_q):
-        residual = self.actor(state, noise)
-        action = apply_residual(a_base, residual)
-        q_a = self.critic(state, action)
+    def update_actor(self, state, z_all, a_base_all, is_expert, mc_return):
+        state = mlp_float(state)
+        z_all = mlp_float(z_all)
+        a_base_all = mlp_float(a_base_all)
+        batch, k = z_all.shape[0], z_all.shape[1]
+        state_k = state.unsqueeze(1).expand(batch, k, state.shape[-1]).reshape(batch * k, -1)
+        z_flat = z_all.reshape(batch * k, HORIZON, ACTION_DIM)
+        base_flat = a_base_all.reshape(batch * k, HORIZON, ACTION_DIM)
+        residual = self.actor(state_k, z_flat)
+        action = apply_residual(base_flat, residual)
+        q_a = self.critic(state_k, action).reshape(batch, k)
         with torch.no_grad():
-            q_base = self.critic(state, a_base)
-            better = (q_a > q_base).float()
-            underestimated = ((q_a - target_q) < EPSILON).float()
-            bc_keep = 1.0 - better * underestimated
+            q_base = self.critic(state_k, base_flat).reshape(batch, k)
+            bc_keep = bc_filter_keep(q_a, q_base, mlp_float(mc_return))
         online = (is_expert == 0).float()
-        q_term = -(q_a * online).sum() / online.sum().clamp(min=1.0)
-        mse = ((action - a_base) ** 2).mean(dim=(1, 2), keepdim=True)
+        q_term = -(q_a.mean(dim=1, keepdim=True) * online).sum() / online.sum().clamp(min=1.0)
+        mse = ((action - base_flat) ** 2).mean(dim=(1, 2)).reshape(batch, k)
         bc = (bc_keep * mse).mean()
         loss = q_term + BETA * bc
         self.actor_opt.zero_grad(set_to_none=True)
@@ -137,7 +148,7 @@ class DiceResidualModel:
         self.actor_opt.step()
         return {
             "actor_loss": float(loss.detach()),
-            "residual_rms": float(((action - a_base).detach() ** 2).mean().sqrt()),
+            "residual_rms": float(((action - base_flat).detach() ** 2).mean().sqrt()),
             "q_mean": float(q_a.detach().mean()),
             "q_min": float(q_a.detach().min()),
             "bc_filter_rate": float(bc_keep.mean()),
