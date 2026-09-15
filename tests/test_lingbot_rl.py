@@ -124,10 +124,11 @@ def test_n_step_chunk_return_sparse_terminal():
     model = DiceResidualModel(device="cpu")
     done = torch.tensor([[1.0], [1.0], [1.0]])
     next_state = torch.zeros(3, STATE_DIM)
-    next_action = torch.zeros(3, HORIZON, ACTION_DIM)
+    z_next_all = torch.zeros(3, K_CANDIDATES, HORIZON, ACTION_DIM)
+    a_base_next_all = torch.zeros(3, K_CANDIDATES, HORIZON, ACTION_DIM)
     n_steps = torch.tensor([[3.0], [2.0], [1.0]])
     summed = torch.tensor([[0.99 ** 2], [0.99], [1.0]])
-    target = model.n_step_target(summed, done, next_state, next_action, n_steps)
+    target = model.n_step_target(summed, done, next_state, z_next_all, a_base_next_all, n_steps)
     assert target.shape == (3, 1)
     torch.testing.assert_close(target[2], torch.tensor([1.0]))
     assert target[0].item() == pytest.approx(0.99 ** 2)
@@ -146,8 +147,9 @@ def test_actor_critic_one_step_update_on_random_tensors():
     done = torch.zeros(8, 1)
     n_steps = torch.ones(8, 1) * 3
     next_state = torch.randn(8, STATE_DIM)
-    next_action = mask_unused_dof(torch.randn(8, HORIZON, ACTION_DIM))
-    target = model.n_step_target(reward, done, next_state, next_action, n_steps)
+    z_next_all = torch.randn(8, K_CANDIDATES, HORIZON, ACTION_DIM)
+    a_base_next_all = mask_unused_dof(torch.randn(8, K_CANDIDATES, HORIZON, ACTION_DIM))
+    target = model.n_step_target(reward, done, next_state, z_next_all, a_base_next_all, n_steps)
     before = {k: v.detach().clone() for k, v in model.actor.named_parameters()}
     critic_info = model.update_critic(
         state, apply_residual(a_base, model.actor(state, noise).detach()), target, is_expert)
@@ -1153,3 +1155,22 @@ def test_store_rejects_wrong_candidate_count():
     row["a_base_all"] = np.zeros((2, HORIZON, ACTION_DIM), np.float32)
     with pytest.raises(ValueError, match="candidate"):
         buf.add_online(row)
+
+
+def test_n_step_target_averages_current_policy_over_candidates():
+    torch.manual_seed(11)
+    model = DiceResidualModel(device="cpu")
+    next_state = torch.randn(2, STATE_DIM)
+    z_next_all = torch.randn(2, K_CANDIDATES, HORIZON, ACTION_DIM)
+    a_base_next_all = mask_unused_dof(torch.randn(2, K_CANDIDATES, HORIZON, ACTION_DIM))
+    reward = torch.tensor([[0.0], [1.0]])
+    done = torch.tensor([[0.0], [1.0]])
+    n_steps = torch.tensor([[3.0], [1.0]])
+    target = model.n_step_target(reward, done, next_state, z_next_all, a_base_next_all, n_steps)
+    assert target.shape == (2, 1)
+    with torch.no_grad():
+        qs = torch.stack([
+            model.target_critic(next_state, a_base_next_all[:, k]) for k in range(K_CANDIDATES)
+        ], dim=0).mean(dim=0)
+    torch.testing.assert_close(target[0], (GAMMA ** 3) * qs[0])
+    torch.testing.assert_close(target[1], torch.tensor([1.0]))

@@ -228,7 +228,7 @@ def _update_from_buffer(model, buffer, expert_ratio, device):
     batch_size = min(BATCH, len(buffer))
     sample = _to_model_device(buffer.sample(batch_size, expert_ratio), device)
     target = model.n_step_target(
-        sample["reward"], sample["done"], sample["s_next"], sample["a_next"], sample["n_steps"])
+        sample["reward"], sample["done"], sample["s_next"], sample["z_next_all"], sample["a_base_next_all"], sample["n_steps"])
     critic_info = None
     for _ in range(UTD):
         critic_info = model.update_critic(sample["s"], sample["a"], target, sample["is_expert"])

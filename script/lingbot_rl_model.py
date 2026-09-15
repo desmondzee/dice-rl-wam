@@ -93,9 +93,17 @@ class DiceResidualModel:
         self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=ADAM_LR)
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=ADAM_LR)
 
-    def n_step_target(self, reward, done, next_state, next_action, n_steps):
+    def n_step_target(self, reward, done, next_state, z_next_all, a_base_next_all, n_steps):
         with torch.no_grad():
-            backup = self.target_critic(next_state, next_action)
+            next_state = mlp_float(next_state)
+            z_next_all = mlp_float(z_next_all)
+            a_base_next_all = mlp_float(a_base_next_all)
+            batch, k = z_next_all.shape[0], z_next_all.shape[1]
+            state_k = next_state.unsqueeze(1).expand(batch, k, next_state.shape[-1]).reshape(batch * k, -1)
+            z_flat = z_next_all.reshape(batch * k, HORIZON, ACTION_DIM)
+            base_flat = a_base_next_all.reshape(batch * k, HORIZON, ACTION_DIM)
+            a_next = apply_residual(base_flat, self.actor(state_k, z_flat))
+            backup = self.target_critic(state_k, a_next).reshape(batch, k, 1).mean(dim=1)
             return reward + (GAMMA ** n_steps) * (1.0 - done) * backup
 
     def update_critic(self, state, action, target_q, is_expert):
