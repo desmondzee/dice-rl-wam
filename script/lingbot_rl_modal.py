@@ -102,17 +102,16 @@ def prepare(config):
                 "--prepared-output", str(output),
             ], check=True)
             prepared_path = json.loads(output.read_text())["prepared_path"]
-        if _dataset_root() is None:
-            token = os.environ.get("HF_TOKEN", "").strip()
-            if not token:
-                raise RuntimeError("HF_TOKEN is required in dice-lingbot-hf for CPU asset preparation")
-            subprocess.run([
-                EVAL_PYTHON, "-c",
-                "import os; from script.lingbot_eval import download_snapshot; "
-                "from script.lingbot_sft_config import DATASET_REPO, DATASET_REVISION; "
-                "download_snapshot(DATASET_REPO, repo_type='dataset', revision=DATASET_REVISION, "
-                "cache_dir='/cache/hub', token=os.environ['HF_TOKEN'])",
-            ], check=True)
+        token = os.environ.get("HF_TOKEN", "").strip()
+        if not token:
+            raise RuntimeError("HF_TOKEN is required in dice-lingbot-hf for CPU asset preparation")
+        subprocess.run([
+            EVAL_PYTHON, "-c",
+            "import os; from script.lingbot_eval import download_snapshot; "
+            "from script.lingbot_sft_config import DATASET_REPO, DATASET_REVISION; "
+            "download_snapshot(DATASET_REPO, repo_type='dataset', revision=DATASET_REVISION, "
+            "cache_dir='/cache/hub', token=os.environ['HF_TOKEN'])",
+        ], check=True)
         return prepared_path
     finally:
         cache.commit()
