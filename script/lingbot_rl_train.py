@@ -19,7 +19,7 @@ from script.lingbot_rl_policy import (
 LiberoEnv = None
 RESUME_KEYS = {
     "actor", "critic", "target_critic", "actor_opt", "critic_opt",
-    "replay", "rng", "env_steps", "chunks", "recipe",
+    "replay", "rng", "env_steps", "chunks", "recipe", "evaluated", "wandb_id",
 }
 
 
@@ -88,14 +88,64 @@ def save_inference(path, model):
     _atomic_torch(path, payload)
 
 
-def save_resume(path, model, buffer, env_steps, chunks, recipe):
+def save_inference_checkpoints(output_dir, env_steps, model):
+    output_dir = Path(output_dir)
+    save_inference(output_dir / "residual.pt", model)
+    save_inference(output_dir / "train_eval" / f"step_{int(env_steps):06d}" / "residual.pt", model)
+
+
+def _cpu_byte_rng(state):
+    if isinstance(state, (list, tuple)):
+        return [_cpu_byte_rng(item) for item in state]
+    if torch.is_tensor(state):
+        return state.detach().to(device="cpu", dtype=torch.uint8).contiguous()
+    if isinstance(state, np.ndarray):
+        return torch.from_numpy(np.ascontiguousarray(state, dtype=np.uint8))
+    return torch.as_tensor(state, dtype=torch.uint8, device="cpu")
+
+
+def capture_rng():
+    rng = {
+        "torch": torch.get_rng_state(),
+        "numpy": np.random.get_state(),
+        "python": random.getstate(),
+        "cuda": [],
+    }
+    if torch.cuda.is_available():
+        rng["cuda"] = [state.cpu() for state in torch.cuda.get_rng_state_all()]
+    return rng
+
+
+def restore_rng(rng):
+    torch.set_rng_state(_cpu_byte_rng(rng["torch"]))
+    np.random.set_state(rng["numpy"])
+    if rng.get("python") is not None:
+        random.setstate(rng["python"])
+    if torch.cuda.is_available() and rng.get("cuda"):
+        torch.cuda.set_rng_state_all(_cpu_byte_rng(rng["cuda"]))
+
+
+def _evaluated_from_disk(output_dir):
+    root = Path(output_dir) / "train_eval"
+    if not root.is_dir():
+        return set()
+    found = set()
+    for path in root.glob("step_*"):
+        if path.is_dir():
+            found.add(int(path.name.split("_", 1)[1]))
+    return found
+
+
+def save_resume(path, model, buffer, env_steps, chunks, recipe, evaluated=(), wandb_id=None):
     payload = {
         **model.resume_state_dict(),
         "replay": buffer.state_dict(),
-        "rng": {"torch": torch.get_rng_state(), "numpy": np.random.get_state()},
+        "rng": capture_rng(),
         "env_steps": int(env_steps),
         "chunks": int(chunks),
         "recipe": recipe,
+        "evaluated": sorted(int(point) for point in evaluated),
+        "wandb_id": wandb_id,
     }
     if "transformer" in payload or set(payload) - RESUME_KEYS:
         raise ValueError("Resume payload includes disallowed keys")
@@ -103,6 +153,7 @@ def save_resume(path, model, buffer, env_steps, chunks, recipe):
 
 
 def load_resume(path, model, buffer, recipe):
+    path = Path(path)
     try:
         payload = torch.load(path, map_location=model.device, weights_only=False)
     except Exception as exc:
@@ -114,9 +165,12 @@ def load_resume(path, model, buffer, recipe):
     model.load_resume_state_dict(payload)
     buffer.load_state_dict(payload["replay"])
     if payload.get("rng"):
-        torch.set_rng_state(payload["rng"]["torch"])
-        np.random.set_state(payload["rng"]["numpy"])
-    return int(payload["env_steps"]), int(payload.get("chunks", 0))
+        restore_rng(payload["rng"])
+    if "evaluated" in payload:
+        evaluated = {int(point) for point in payload["evaluated"]}
+    else:
+        evaluated = _evaluated_from_disk(path.resolve().parent.parent)
+    return int(payload["env_steps"]), int(payload.get("chunks", 0)), evaluated, payload.get("wandb_id")
 
 
 def _read_prepared(path):
@@ -256,7 +310,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     policy.residual_model = model
     buffer = ChunkReplay()
     tasks = prepared["tasks"]
-    if prepared.get("checkpoint"):
+    if prepared.get("checkpoint") and not resume:
         cache_path = output_dir / "expert_features.pt"
         if dataset_root:
             task_to_id = {task["instruction"]: task["task_id"] for task in tasks}
@@ -275,20 +329,30 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         tasks = suite_tasks
     env_steps = 0
     chunks = 0
+    evaluated = set()
+    wandb_id = None
     resume_path = output_dir / "resume" / "latest.pt"
     if resume:
-        env_steps, chunks = load_resume(resume_path, model, buffer, recipe)
+        env_steps, chunks, evaluated, wandb_id = load_resume(resume_path, model, buffer, recipe)
     if max_env_steps is None and env_steps == 0:
         if not any(float(row["is_expert"]) == 1.0 for row in buffer.rows()):
             raise RuntimeError("Expert features missing; RLPD requires the 300 SFT demos")
     _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe})
-    run = wandb.init(
-        project=config.wandb_project, entity=config.wandb_entity, name=run_name or config.default_run_name,
-        config=config.to_dict(), resume="allow" if resume else None,
-    )
+    wandb_kwargs = {
+        "project": config.wandb_project,
+        "entity": config.wandb_entity,
+        "name": run_name or config.default_run_name,
+        "config": config.to_dict(),
+    }
+    if resume and wandb_id:
+        wandb_kwargs["id"] = wandb_id
+        wandb_kwargs["resume"] = "must"
+    elif resume:
+        wandb_kwargs["resume"] = "allow"
+    run = wandb.init(**wandb_kwargs)
+    wandb_id = getattr(run, "id", None) or wandb_id
     budget = config.online_env_steps if max_env_steps is None else max_env_steps
     eval_schedule = train_eval_schedule(budget, config.train_eval_every)
-    evaluated = set()
     do_train_eval = max_env_steps is None
 
     def maybe_eval():
@@ -318,8 +382,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             finally:
                 env.close()
                 policy.reset()
-            save_inference(output_dir / "residual.pt", model)
-            save_resume(resume_path, model, buffer, env_steps, chunks, recipe)
+            save_inference_checkpoints(output_dir, env_steps, model)
+            save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
             if commit is not None:
                 commit()
 
@@ -408,12 +472,12 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             env.close()
         maybe_eval()
         save_inference(output_dir / "residual.pt", model)
-        save_resume(resume_path, model, buffer, env_steps, chunks, recipe)
+        save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
         if commit is not None:
             commit()
     maybe_eval()
     save_inference(output_dir / "residual.pt", model)
-    save_resume(resume_path, model, buffer, env_steps, chunks, recipe)
+    save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
     _write_json(output_dir / "summary.json", {"env_steps": env_steps, "chunks": chunks})
     if commit is not None:
         commit()

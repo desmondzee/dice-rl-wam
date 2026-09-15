@@ -1,4 +1,5 @@
 import io
+import random
 import zipfile
 from dataclasses import replace
 from pathlib import Path
@@ -680,6 +681,236 @@ def test_expert_n_step_is_three_chunks():
     assert float(rows[0]["reward"]) == pytest.approx(GAMMA ** 2)
 
 
+def _resume_buffer():
+    buf = ChunkReplay(capacity=32)
+    buf.add_expert(_replay_row(1, 1, expert=True))
+    buf.finalize_episode()
+    return buf
+
+
+def test_save_load_resume_roundtrips_rng_evaluated_and_wandb_id(tmp_path):
+    from script.lingbot_rl_train import load_resume, save_resume
+
+    recipe = RLConfig().protocol()
+    path = tmp_path / "resume" / "latest.pt"
+    model = DiceResidualModel(device="cpu")
+    buffer = _resume_buffer()
+    torch.manual_seed(123)
+    np.random.seed(123)
+    random.seed(123)
+    save_resume(
+        path, model, buffer, 0, 0, recipe,
+        evaluated={0}, wandb_id="8otkv33a",
+    )
+    torch.manual_seed(999)
+    np.random.seed(999)
+    random.seed(999)
+    restored = DiceResidualModel(device="cpu")
+    buffer = ChunkReplay()
+    env_steps, chunks, evaluated, wandb_id = load_resume(path, restored, buffer, recipe)
+    assert env_steps == 0
+    assert chunks == 0
+    assert evaluated == {0}
+    assert wandb_id == "8otkv33a"
+    assert any(float(row["is_expert"]) == 1.0 for row in buffer.rows())
+    got_t = torch.rand(4)
+    got_n = np.random.rand()
+    got_p = random.random()
+    torch.manual_seed(123)
+    np.random.seed(123)
+    random.seed(123)
+    torch.testing.assert_close(got_t, torch.rand(4))
+    assert got_n == np.random.rand()
+    assert got_p == random.random()
+
+
+def test_load_resume_restores_rng_from_non_byte_mapped_tensor(tmp_path):
+    from script.lingbot_rl_train import load_resume, save_resume
+
+    recipe = RLConfig().protocol()
+    path = tmp_path / "resume" / "latest.pt"
+    model = DiceResidualModel(device="cpu")
+    torch.manual_seed(7)
+    save_resume(
+        path, model, _resume_buffer(), 12, 3, recipe,
+        evaluated={0}, wandb_id="abc",
+    )
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload["rng"]["torch"] = payload["rng"]["torch"].to(dtype=torch.int32)
+    torch.save(payload, path)
+    torch.manual_seed(0)
+    env_steps, chunks, evaluated, wandb_id = load_resume(
+        path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
+    assert env_steps == 12
+    assert chunks == 3
+    assert evaluated == {0}
+    assert wandb_id == "abc"
+    got = torch.rand(3)
+    torch.manual_seed(7)
+    torch.testing.assert_close(got, torch.rand(3))
+
+
+def test_load_resume_rejects_recipe_mismatch(tmp_path):
+    from script.lingbot_rl_train import load_resume, save_resume
+
+    recipe = RLConfig().protocol()
+    path = tmp_path / "latest.pt"
+    save_resume(path, DiceResidualModel(device="cpu"), _resume_buffer(), 0, 0, recipe, evaluated={0})
+    with pytest.raises(ValueError, match="recipe fingerprint"):
+        load_resume(path, DiceResidualModel(device="cpu"), ChunkReplay(), {**recipe, "beta": 1.0})
+
+
+def test_load_resume_infers_evaluated_from_train_eval_dirs(tmp_path):
+    from script.lingbot_rl_train import load_resume, save_resume
+
+    recipe = RLConfig().protocol()
+    path = tmp_path / "resume" / "latest.pt"
+    save_resume(path, DiceResidualModel(device="cpu"), _resume_buffer(), 0, 0, recipe, evaluated={0})
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload.pop("evaluated")
+    torch.save(payload, path)
+    (tmp_path / "train_eval" / "step_000000").mkdir(parents=True)
+    _, _, evaluated, _ = load_resume(path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
+    assert evaluated == {0}
+
+
+def test_load_resume_accepts_legacy_torch_numpy_rng(tmp_path):
+    from script.lingbot_rl_train import load_resume, save_resume
+
+    recipe = RLConfig().protocol()
+    path = tmp_path / "resume" / "latest.pt"
+    save_resume(path, DiceResidualModel(device="cpu"), _resume_buffer(), 0, 0, recipe, evaluated={0})
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload["rng"] = {
+        "torch": payload["rng"]["torch"].to(dtype=torch.int32),
+        "numpy": payload["rng"]["numpy"],
+    }
+    payload.pop("evaluated")
+    payload.pop("wandb_id")
+    torch.save(payload, path)
+    (tmp_path / "train_eval" / "step_000000").mkdir(parents=True)
+    env_steps, _, evaluated, wandb_id = load_resume(
+        path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
+    assert env_steps == 0
+    assert evaluated == {0}
+    assert wandb_id is None
+
+
+def test_train_resume_reuses_wandb_id_and_skips_ingest(tmp_path, monkeypatch):
+    import sys
+
+    import script.lingbot_rl_train as train
+
+    recipe = RLConfig().protocol()
+    train.save_resume(
+        tmp_path / "resume" / "latest.pt",
+        DiceResidualModel(device="cpu"),
+        _resume_buffer(),
+        12,
+        1,
+        recipe,
+        evaluated={0},
+        wandb_id="run-from-checkpoint",
+    )
+
+    def boom(*args, **kwargs):
+        raise AssertionError("resume must not re-featurize experts")
+
+    wandb_calls = []
+
+    class Run:
+        id = "run-from-checkpoint"
+
+        def log(self, *args, **kwargs):
+            return None
+
+        def finish(self, **kwargs):
+            return None
+
+        summary = {}
+
+    class StubPolicy:
+        def reset(self):
+            self._executed_actions = None
+
+        def extract_critic_state(self, batch):
+            return torch.zeros(1, STATE_DIM)
+
+        def decode_candidates(self, batch, k=4, **kwargs):
+            z = torch.zeros(k, HORIZON, ACTION_DIM)
+            a_base = torch.zeros(k, HORIZON, ACTION_DIM)
+            return {
+                "s": torch.zeros(1, STATE_DIM),
+                "z": z,
+                "a_base": a_base,
+                "video_noise": torch.zeros(1),
+                "first_chunk": True,
+            }
+
+        def commit_executed(self, chunk, first_chunk=False):
+            self._executed_actions = chunk
+
+        def select_action(self, batch):
+            return torch.zeros(1, 7)
+
+        def observe_env_step(self, batch):
+            return None
+
+    class StubEnv:
+        def __init__(self, **kwargs):
+            self.steps = 0
+
+        def reset(self, seed=None):
+            self.steps = 0
+            zeros = np.zeros((128, 128, 3), np.uint8)
+            return {"pixels": {"image": zeros, "image2": zeros}}, {}
+
+        def step(self, action):
+            self.steps += 1
+            done = self.steps >= 12
+            return self.reset()[0], 0.0, done, False, {"is_success": False}
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(train, "featurize_experts", boom)
+    monkeypatch.setattr(train, "load_manifest_episodes", boom)
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: StubPolicy())
+    monkeypatch.setattr(train, "LiberoEnv", StubEnv)
+    monkeypatch.setitem(
+        sys.modules,
+        "wandb",
+        type("W", (), {
+            "init": staticmethod(lambda **k: wandb_calls.append(k) or Run()),
+            "finish": staticmethod(lambda **k: None),
+        })(),
+    )
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir()
+    (ckpt / "dataset_manifest.json").write_text("{}")
+    prepared = {
+        "tasks": [{"task_id": task_id, "instruction": f"task-{task_id}", "initial_state_count": 50} for task_id in range(10)],
+        "normalization": {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23},
+        "checkpoint": str(ckpt),
+        "model_path": None,
+        "architecture": {},
+        "source_run": "libero30-sft",
+        "checkpoint_step": 600,
+    }
+    prepared_path = tmp_path / "prepared.json"
+    prepared_path.write_text(__import__("json").dumps(prepared))
+    monkeypatch.setattr(
+        "script.lingbot_eval.read_checkpoint_metadata",
+        lambda path: {"architecture": {}, "normalization": prepared["normalization"]},
+    )
+    train.train(
+        output_dir=tmp_path, run_name="unit", resume=True, max_env_steps=24,
+        prepared_path=prepared_path, dataset_root=tmp_path / "dataset",
+    )
+    assert wandb_calls[0]["id"] == "run-from-checkpoint"
+    assert wandb_calls[0]["resume"] == "must"
+
+
 def test_train_mocked_step_logs_and_saves_small_weights(tmp_path, monkeypatch):
     import sys
 
@@ -754,6 +985,38 @@ def test_train_mocked_step_logs_and_saves_small_weights(tmp_path, monkeypatch):
     assert "transformer" not in resume
     assert "env_steps" in resume
     assert "recipe" in resume
+    assert "evaluated" in resume
+    assert "python" in resume["rng"]
+    assert "cuda" in resume["rng"]
+
+
+def test_save_inference_checkpoints_keeps_latest_and_step_copy(tmp_path):
+    from script.lingbot_rl_train import save_inference_checkpoints
+
+    model = DiceResidualModel(device="cpu")
+    with torch.no_grad():
+        model.actor.net[0].bias.fill_(0.25)
+    save_inference_checkpoints(tmp_path, 50291, model)
+    latest = tmp_path / "residual.pt"
+    step = tmp_path / "train_eval" / "step_050291" / "residual.pt"
+    assert latest.is_file()
+    assert step.is_file()
+    loaded_latest = torch.load(latest, map_location="cpu", weights_only=True)
+    loaded_step = torch.load(step, map_location="cpu", weights_only=True)
+    assert set(loaded_latest) == {"actor", "critic", "target_critic"}
+    assert set(loaded_step) == {"actor", "critic", "target_critic"}
+    torch.testing.assert_close(loaded_latest["actor"]["net.0.bias"], loaded_step["actor"]["net.0.bias"])
+    assert "transformer" not in loaded_latest
+    assert "replay" not in loaded_latest
+
+
+def test_train_eval_writes_step_residual_not_only_latest():
+    import script.lingbot_rl_train as train
+
+    source = Path(train.__file__).read_text()
+    block = source.split("def maybe_eval", 1)[1].split("maybe_eval()", 1)[0]
+    assert "save_inference_checkpoints" in block
+    assert 'output_dir / "residual.pt"' not in block
 
 
 def test_sharpening_metrics_not_residual_rms():
