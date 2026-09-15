@@ -69,6 +69,12 @@ def test_config_pins_released_libero_sampler_and_step_600():
     assert proto["comparison_seed"] == 42
     assert proto["checkpoint_step"] == 600
     assert proto["source_run"] == "libero30-sft"
+    assert proto["version"] == 2
+    assert proto["multi_sample_candidates"] == 4
+    assert proto["bc_filter_anchor"] == "mc_return"
+    assert proto["utd_sampling"] == "fresh_minibatch_per_step"
+    assert proto["actor_final_init"] == "zeros"
+    assert proto["eval_best_of_n"] == 4
 
 
 @pytest.mark.parametrize("changes", [

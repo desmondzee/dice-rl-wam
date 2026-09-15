@@ -54,7 +54,7 @@ class RLConfig:
     def protocol(self):
         self.validate()
         return {
-            "version": 1,
+            "version": 2,
             "suite": "libero_10",
             "task_ids": list(TASK_IDS),
             "max_policy_steps": 520,
@@ -88,6 +88,11 @@ class RLConfig:
             "k_candidates": self.k_candidates,
             "online_env_steps": self.online_env_steps,
             "residual_input": "z",
+            "multi_sample_candidates": self.k_candidates,
+            "bc_filter_anchor": "mc_return",
+            "utd_sampling": "fresh_minibatch_per_step",
+            "actor_final_init": "zeros",
+            "eval_best_of_n": self.k_candidates,
             "mlp_hidden": [1024, 1024, 1024],
             "critic_ensemble": 10,
             "beta": 100.0,
