@@ -224,14 +224,19 @@ def _to_model_device(sample, device):
     return moved
 
 
+def _sample_batch(buffer, expert_ratio, device):
+    return _to_model_device(buffer.sample(min(BATCH, len(buffer)), expert_ratio), device)
+
+
 def _update_from_buffer(model, buffer, expert_ratio, device):
-    batch_size = min(BATCH, len(buffer))
-    sample = _to_model_device(buffer.sample(batch_size, expert_ratio), device)
-    target = model.n_step_target(
-        sample["reward"], sample["done"], sample["s_next"], sample["z_next_all"], sample["a_base_next_all"], sample["n_steps"])
     critic_info = None
     for _ in range(UTD):
+        sample = _sample_batch(buffer, expert_ratio, device)
+        target = model.n_step_target(
+            sample["reward"], sample["done"], sample["s_next"],
+            sample["z_next_all"], sample["a_base_next_all"], sample["n_steps"])
         critic_info = model.update_critic(sample["s"], sample["a"], target, sample["is_expert"])
+    sample = _sample_batch(buffer, expert_ratio, device)
     actor_info = model.update_actor(
         sample["s"], sample["z_all"], sample["a_base_all"], sample["is_expert"], sample["mc_return"])
     return critic_info, actor_info
@@ -443,6 +448,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     "s": s_cpu,
                     "z": _host_array(noise[star]),
                     "a_base": _host_array(a_base[star]),
+                    "z_all": _host_array(noise),
+                    "a_base_all": _host_array(a_base),
                     "a": _host_array(chosen)[0],
                     "reward": np.float32(chunk_reward),
                     "done": np.float32(done),

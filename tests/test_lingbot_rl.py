@@ -1205,3 +1205,26 @@ def test_update_actor_consumes_candidate_sets_and_mc_return():
     assert torch.isfinite(torch.tensor(info["actor_loss"]))
     assert 0.0 <= info["bc_filter_rate"] <= 1.0
     assert any(not torch.equal(before[k], v) for k, v in model.actor.named_parameters())
+
+
+def test_update_from_buffer_samples_a_fresh_minibatch_per_gradient_step():
+    from script.lingbot_rl_train import _update_from_buffer
+
+    torch.manual_seed(7)
+    model = DiceResidualModel(device="cpu")
+    buf = ChunkReplay(capacity=32)
+    for reward, done in ((0, 0), (0, 0), (1, 1)):
+        buf.add_online(_replay_row(reward, done))
+    buf.finalize_episode()
+    calls = []
+    original = buf.sample
+
+    def spy(batch_size, expert_ratio):
+        calls.append(batch_size)
+        return original(batch_size, expert_ratio)
+
+    buf.sample = spy
+    critic_info, actor_info = _update_from_buffer(model, buf, expert_ratio=0.0, device="cpu")
+    assert len(calls) == UTD + 1
+    assert torch.isfinite(torch.tensor(critic_info["critic_loss"]))
+    assert torch.isfinite(torch.tensor(actor_info["actor_loss"]))
