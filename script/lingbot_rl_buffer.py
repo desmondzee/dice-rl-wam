@@ -1,9 +1,12 @@
 import numpy as np
 import torch
 
-from script.lingbot_rl_model import GAMMA, N_STEP_CHUNKS, REPLAY_CAPACITY
+from script.lingbot_rl_model import GAMMA, K_CANDIDATES, N_STEP_CHUNKS, REPLAY_CAPACITY
 
-FLOAT_KEYS = ("s", "z", "a_base", "a", "reward", "done", "s_next", "a_next", "n_steps", "is_expert")
+FLOAT_KEYS = (
+    "s", "z", "a_base", "a", "reward", "done", "s_next", "a_next", "n_steps", "is_expert",
+    "z_all", "a_base_all", "z_next_all", "a_base_next_all", "mc_return",
+)
 
 
 def _host_float(value):
@@ -17,6 +20,7 @@ def _host_float(value):
 KEYS = (
     "s", "z", "a_base", "a", "reward", "done", "s_next", "a_next",
     "n_steps", "is_expert", "task_id", "n_env_actions",
+    "z_all", "a_base_all", "z_next_all", "a_base_next_all", "mc_return",
 )
 
 
@@ -44,6 +48,16 @@ class ChunkReplay:
         stored.setdefault("a_next", stored["a"])
         stored.setdefault("n_steps", np.float32(1.0))
         stored.setdefault("s_next", stored["s"])
+        stored.setdefault(
+            "z_all", np.repeat(_host_float(stored["z"])[None], K_CANDIDATES, axis=0))
+        stored.setdefault(
+            "a_base_all", np.repeat(_host_float(stored["a_base"])[None], K_CANDIDATES, axis=0))
+        if _host_float(stored["z_all"]).shape[0] != K_CANDIDATES or \
+                _host_float(stored["a_base_all"]).shape[0] != K_CANDIDATES:
+            raise ValueError(f"Rows must carry exactly {K_CANDIDATES} candidate proposals")
+        stored.setdefault("z_next_all", np.array(stored["z_all"], copy=True))
+        stored.setdefault("a_base_next_all", np.array(stored["a_base_all"], copy=True))
+        stored.setdefault("mc_return", np.float32(0.0))
         for key in FLOAT_KEYS:
             stored[key] = _host_float(stored[key])
         stored["task_id"] = int(stored["task_id"])
@@ -94,6 +108,9 @@ class ChunkReplay:
         view["n_steps"] = np.float32(used)
         view["s_next"] = np.array(episode[nxt]["s"], copy=True)
         view["a_next"] = np.array(episode[nxt]["a"], copy=True)
+        view["z_next_all"] = np.array(episode[nxt]["z_all"], copy=True)
+        view["a_base_next_all"] = np.array(episode[nxt]["a_base_all"], copy=True)
+        view["mc_return"] = np.float32(0.0)
         return view
 
     def finalize_episode(self):
@@ -101,6 +118,11 @@ class ChunkReplay:
         length = len(episode)
         rewards = [float(row["reward"]) for row in episode]
         dones = [float(row["done"]) for row in episode]
+        mc_returns = [0.0] * length
+        running = 0.0
+        for index in range(length - 1, -1, -1):
+            running = rewards[index] + GAMMA * running
+            mc_returns[index] = running
         for index, row in enumerate(episode):
             n_steps = min(N_STEP_CHUNKS, length - index)
             ret = 0.0
@@ -115,6 +137,9 @@ class ChunkReplay:
             row["n_steps"] = np.float32(n_steps)
             row["s_next"] = np.array(episode[nxt]["s"], copy=True)
             row["a_next"] = np.array(episode[nxt]["a"], copy=True)
+            row["z_next_all"] = np.array(episode[nxt]["z_all"], copy=True)
+            row["a_base_next_all"] = np.array(episode[nxt]["a_base_all"], copy=True)
+            row["mc_return"] = np.float32(mc_returns[index])
         self._episode_start = len(self._data)
 
     def sample(self, batch_size, expert_ratio):
@@ -136,7 +161,7 @@ class ChunkReplay:
             if key in FLOAT_KEYS:
                 stacked = np.asarray(stacked, dtype=np.float32)
             tensor = torch.from_numpy(np.ascontiguousarray(stacked)).to(self.device)
-            if key in ("reward", "done", "n_steps", "is_expert") and tensor.ndim == 1:
+            if key in ("reward", "done", "n_steps", "is_expert", "mc_return") and tensor.ndim == 1:
                 tensor = tensor.unsqueeze(-1)
             batch[key] = tensor
         return batch

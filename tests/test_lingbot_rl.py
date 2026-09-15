@@ -13,7 +13,7 @@ from script.lingbot_rl_buffer import ChunkReplay
 from script.lingbot_rl_config import RLConfig
 from script.lingbot_rl_model import (
     ACTION_DIM, ADAM_LR, BETA, ENSEMBLE, EPSILON, GAMMA, HIDDEN, HORIZON,
-    N_STEP_CHUNKS, STATE_DIM, TAU, USED_DOF, UTD, DiceResidualModel, apply_residual,
+    K_CANDIDATES, N_STEP_CHUNKS, STATE_DIM, TAU, USED_DOF, UTD, DiceResidualModel, apply_residual,
     mask_unused_dof,
 )
 from script.lingbot_rl_policy import (
@@ -639,7 +639,8 @@ def test_replay_sample_converts_bf16_tensors_to_float32():
     buf.add_online(row)
     buf.finalize_episode()
     batch = buf.sample(1, expert_ratio=0.0)
-    for key in ("s", "z", "a_base", "a", "s_next", "a_next"):
+    for key in ("s", "z", "a_base", "a", "s_next", "a_next",
+                "z_all", "a_base_all", "z_next_all", "a_base_next_all", "mc_return"):
         assert batch[key].dtype == torch.float32, key
         assert torch.isfinite(batch[key]).all()
 
@@ -1099,3 +1100,56 @@ def test_residual_actor_initializes_to_zero_so_policy_starts_at_prior():
     torch.testing.assert_close(residual, torch.zeros(5, HORIZON, ACTION_DIM))
     a_base = mask_unused_dof(torch.randn(5, HORIZON, ACTION_DIM))
     torch.testing.assert_close(apply_residual(a_base, residual), a_base)
+
+
+def test_finalize_stores_monte_carlo_return_and_next_candidates():
+    buf = ChunkReplay(capacity=32)
+    for step, (reward, done) in enumerate(((0, 0), (0, 0), (1, 1))):
+        row = _replay_row(reward, done)
+        row["z_all"] = np.full((K_CANDIDATES, HORIZON, ACTION_DIM), float(step), np.float32)
+        row["a_base_all"] = np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 10.0 + step, np.float32)
+        buf.add_online(row)
+    buf.finalize_episode()
+    rows = buf.rows()
+    assert [float(row["mc_return"]) for row in rows] == pytest.approx([GAMMA ** 2, GAMMA, 1.0])
+    np.testing.assert_array_equal(
+        rows[0]["z_next_all"], np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 2.0, np.float32))
+    np.testing.assert_array_equal(
+        rows[0]["a_base_next_all"], np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 12.0, np.float32))
+
+
+def test_store_defaults_repeat_single_candidate_for_experts():
+    buf = ChunkReplay(capacity=8)
+    row = _replay_row(0, 1, expert=True)
+    row["z"] = np.full((HORIZON, ACTION_DIM), 7.0, np.float32)
+    row["a_base"] = np.full((HORIZON, ACTION_DIM), 8.0, np.float32)
+    buf.add_expert(row)
+    buf.finalize_episode()
+    stored = buf.rows()[0]
+    assert stored["z_all"].shape == (K_CANDIDATES, HORIZON, ACTION_DIM)
+    np.testing.assert_array_equal(stored["z_all"][3], row["z"])
+    np.testing.assert_array_equal(stored["a_base_all"][0], stored["a_base_all"][3])
+
+
+def test_open_episode_view_has_zero_mc_return_and_successor_candidates():
+    buf = ChunkReplay(capacity=32)
+    first = _replay_row(0, 0)
+    second = _replay_row(0, 0)
+    second["z_all"] = np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 5.0, np.float32)
+    buf.add_online(first)
+    buf.add_online(second)
+    batch = buf.sample(1, expert_ratio=0.0)
+    assert batch["mc_return"].shape == (1, 1)
+    assert float(batch["mc_return"][0]) == 0.0
+    assert batch["z_all"].shape == (1, K_CANDIDATES, HORIZON, ACTION_DIM)
+    np.testing.assert_array_equal(
+        batch["z_next_all"][0].numpy(), np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 5.0, np.float32))
+
+
+def test_store_rejects_wrong_candidate_count():
+    buf = ChunkReplay(capacity=8)
+    row = _replay_row(0, 0)
+    row["z_all"] = np.zeros((2, HORIZON, ACTION_DIM), np.float32)
+    row["a_base_all"] = np.zeros((2, HORIZON, ACTION_DIM), np.float32)
+    with pytest.raises(ValueError, match="candidate"):
+        buf.add_online(row)

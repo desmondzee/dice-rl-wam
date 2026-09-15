@@ -19,6 +19,7 @@ TAU = 0.01
 ADAM_LR = 1e-4
 BATCH = 256
 REPLAY_CAPACITY = 100_000
+K_CANDIDATES = 4
 
 
 def mlp_float(tensor):
