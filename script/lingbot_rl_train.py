@@ -313,6 +313,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture)
     model = DiceResidualModel(device=device)
     policy.residual_model = model
+    policy.eval_candidates = config.k_candidates
     buffer = ChunkReplay()
     tasks = prepared["tasks"]
     if prepared.get("checkpoint") and not resume:
@@ -519,6 +520,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     except Exception as exc:
         raise RuntimeError(f"Failed to load residual weights {residual_path}: {exc}") from exc
     policy.residual_model = model
+    policy.eval_candidates = config.k_candidates
     suite, tasks = describe_suite(prepared["assets_path"])
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

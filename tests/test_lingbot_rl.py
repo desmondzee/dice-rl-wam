@@ -1228,3 +1228,64 @@ def test_update_from_buffer_samples_a_fresh_minibatch_per_gradient_step():
     assert len(calls) == UTD + 1
     assert torch.isfinite(torch.tensor(critic_info["critic_loss"]))
     assert torch.isfinite(torch.tensor(actor_info["actor_loss"]))
+
+
+def test_predict_action_chunk_executes_highest_q_candidate():
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    torch.manual_seed(9)
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy.eval_candidates = 4
+    model = DiceResidualModel(device="cpu")
+    for parameter in model.critic.parameters():
+        torch.nn.init.normal_(parameter, std=0.05)
+    policy.residual_model = model
+    decoded = {
+        "s": torch.zeros(1, STATE_DIM),
+        "z": torch.randn(4, HORIZON, ACTION_DIM),
+        "a_base": mask_unused_dof(torch.randn(4, HORIZON, ACTION_DIM)),
+        "first_chunk": False,
+        "latents": torch.zeros(1),
+    }
+    captured = {}
+
+    def fake_decode(batch, k):
+        captured["k"] = k
+        return decoded
+
+    def fake_apply(dec, index):
+        captured["index"] = index
+        return torch.zeros(1, 12, USED_DOF)
+
+    policy.decode_candidates = fake_decode
+    policy._apply_residual_choice = fake_apply
+    policy.predict_action_chunk({"task": ["t"]})
+    state = decoded["s"].expand(4, -1)
+    executed = apply_residual(decoded["a_base"], model.actor(state, decoded["z"]))
+    expected = int(model.critic(state, executed).reshape(-1).argmax())
+    assert captured["k"] == 4
+    assert captured["index"] == expected
+
+
+def test_predict_action_chunk_stays_single_candidate_without_residual_model():
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy.eval_candidates = 4
+    policy.residual_model = None
+    captured = {}
+
+    def fake_decode(batch, k):
+        captured["k"] = k
+        return {"s": torch.zeros(1, STATE_DIM), "z": torch.zeros(1, HORIZON, ACTION_DIM),
+                "a_base": torch.zeros(1, HORIZON, ACTION_DIM), "first_chunk": False}
+
+    def fake_apply(dec, index):
+        captured["index"] = index
+        return torch.zeros(1, 16, USED_DOF)
+
+    policy.decode_candidates = fake_decode
+    policy._apply_residual_choice = fake_apply
+    policy.predict_action_chunk({"task": ["t"]})
+    assert captured["k"] == 1
+    assert captured["index"] == 0

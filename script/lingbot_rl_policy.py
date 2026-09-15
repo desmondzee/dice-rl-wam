@@ -108,6 +108,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self.residual_model = None
         self._last_real_latent = None
         self._critic_cache_ready = False
+        self.eval_candidates = 4
 
     def _get_t5_prompt_embeds(self, prompt, max_sequence_length):
         key = (tuple([prompt] if isinstance(prompt, str) else prompt), max_sequence_length)
@@ -445,8 +446,18 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
 
     @torch.no_grad()
     def predict_action_chunk(self, batch, **kwargs):
-        decoded = self.decode_candidates(batch, k=1)
-        return self._apply_residual_choice(decoded, 0)
+        k = self.eval_candidates if self.residual_model is not None else 1
+        decoded = self.decode_candidates(batch, k=k)
+        index = 0
+        if self.residual_model is not None and decoded["a_base"].shape[0] > 1:
+            a_base = decoded["a_base"].float()
+            noise = decoded["z"].float()
+            state = decoded["s"].float()
+            if state.shape[0] != a_base.shape[0]:
+                state = state[:1].expand(a_base.shape[0], -1)
+            executed = apply_residual(a_base, self.residual_model.actor(state, noise))
+            index = int(self.residual_model.critic(state, executed).reshape(-1).argmax())
+        return self._apply_residual_choice(decoded, index)
 
 
 def load_residual_policy(checkpoint, model_path, architecture):
