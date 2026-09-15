@@ -1117,6 +1117,7 @@ def test_finalize_stores_monte_carlo_return_and_next_candidates():
     buf = ChunkReplay(capacity=32)
     for step, (reward, done) in enumerate(((0, 0), (0, 0), (1, 1))):
         row = _replay_row(reward, done)
+        row["s"] = np.full(STATE_DIM, float(step), np.float32)
         row["z_all"] = np.full((K_CANDIDATES, HORIZON, ACTION_DIM), float(step), np.float32)
         row["a_base_all"] = np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 10.0 + step, np.float32)
         buf.add_online(row)
@@ -1127,6 +1128,11 @@ def test_finalize_stores_monte_carlo_return_and_next_candidates():
         rows[0]["z_next_all"], np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 2.0, np.float32))
     np.testing.assert_array_equal(
         rows[0]["a_base_next_all"], np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 12.0, np.float32))
+    expected_returns = {0: GAMMA ** 2, 1: GAMMA, 2: 1.0}
+    batch = buf.sample(12, expert_ratio=0.0)
+    for i in range(batch["mc_return"].shape[0]):
+        s_val = int(batch["s"][i][0].item())
+        assert float(batch["mc_return"][i].item()) == pytest.approx(expected_returns[s_val])
 
 
 def test_store_defaults_repeat_single_candidate_for_experts():
