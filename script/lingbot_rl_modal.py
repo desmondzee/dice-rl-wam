@@ -239,10 +239,18 @@ def run_eval(config, prepared_path, run_names, resume=False):
         results.reload()
         processes = []
         for name in run_names:
-            (Path("/rl") / name).mkdir(parents=True, exist_ok=True)
+            output = Path("/rl") / name
+            (output / "eval").mkdir(parents=True, exist_ok=True)
             command = eval_command(asdict(cfg), prepared_path, name, resume)
-            processes.append((name, subprocess.Popen(command, env=env)))
-        failed = [name for name, process in processes if process.wait() != 0]
+            log_handle = (output / "eval" / "subprocess.log").open("ab")
+            processes.append((name, subprocess.Popen(
+                command, env=env, stdout=log_handle, stderr=subprocess.STDOUT), log_handle))
+        failed = []
+        for name, process, log_handle in processes:
+            code = process.wait()
+            log_handle.close()
+            if code != 0:
+                failed.append(f"{name} (exit {code})")
         if failed:
             raise RuntimeError(f"Eval failed for {', '.join(failed)}")
         summaries = {}
