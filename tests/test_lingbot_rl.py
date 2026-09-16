@@ -1301,3 +1301,51 @@ def test_predict_action_chunk_stays_single_candidate_without_residual_model():
     policy.predict_action_chunk({"task": ["t"]})
     assert captured["k"] == 1
     assert captured["index"] == 0
+
+
+def test_parse_run_names_splits_validates_and_rejects_duplicates():
+    from script.lingbot_rl_modal import parse_run_names
+
+    assert parse_run_names("a-1,b-2,c-3") == ["a-1", "b-2", "c-3"]
+    assert parse_run_names("solo") == ["solo"]
+    with pytest.raises(ValueError):
+        parse_run_names("a-1,a-1")
+    with pytest.raises(ValueError):
+        parse_run_names("bad name")
+    with pytest.raises(ValueError):
+        parse_run_names("")
+
+
+def test_eval_command_targets_each_run_directory():
+    from script.lingbot_rl_modal import eval_command
+
+    command = eval_command({"seed": 42}, "/cache/prep.json", "run-a", resume=True)
+    assert command[command.index("--output-dir") + 1] == "/rl/run-a"
+    assert command[command.index("--run-name") + 1] == "run-a"
+    assert command[command.index("--residual-path") + 1] == "/rl/run-a/residual.pt"
+    assert command[-1] == "--resume"
+    assert "--resume" not in eval_command({"seed": 42}, "/cache/prep.json", "run-a", resume=False)
+
+
+def test_eval_stage_fans_out_multiple_run_names(tmp_path, monkeypatch):
+    import script.lingbot_rl_modal as module
+
+    called = []
+
+    def fn(name, result=None):
+        def remote(*args, **kwargs):
+            called.append((name, args))
+            return result
+        return type("Fn", (), {"remote": staticmethod(remote)})()
+
+    monkeypatch.setattr(module, "prepare", fn("prepare", "/cache/prep.json"))
+    monkeypatch.setattr(module, "run_eval", fn("eval", {"a-1": {}, "b-2": {}}))
+    monkeypatch.setattr(module, "download_inference", lambda run_name, download_dir: called.append(("download", run_name)) or "out")
+    module.main(stage="eval", run_name="a-1,b-2", download_dir=str(tmp_path / "dl"))
+    eval_calls = [c for c in called if c[0] == "eval"]
+    assert len(eval_calls) == 1
+    assert eval_calls[0][1][2] == ["a-1", "b-2"]
+    assert [c[1] for c in called if c[0] == "download"] == ["a-1", "b-2"]
+    (tmp_path / "dl" / "b-2").mkdir(parents=True)
+    with pytest.raises(FileExistsError):
+        module.main(stage="eval", run_name="a-1,b-2", download_dir=str(tmp_path / "dl"))

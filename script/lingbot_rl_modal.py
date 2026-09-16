@@ -87,6 +87,31 @@ def _release(run_name, owner):
         locks.pop(run_name)
 
 
+def parse_run_names(value):
+    names = [validate_name(part) for part in value.split(",") if part] if value else []
+    if not names:
+        raise ValueError("At least one run name is required")
+    if len(set(names)) != len(names):
+        raise ValueError("Duplicate run names")
+    return names
+
+
+def eval_command(config_dict, prepared_path, run_name, resume):
+    output = Path("/rl") / run_name
+    command = [
+        EVAL_PYTHON, "-m", "script.lingbot_rl_train", "eval",
+        "--config-json", json.dumps(config_dict),
+        "--prepared-path", prepared_path,
+        "--output-dir", str(output),
+        "--run-name", run_name,
+        "--residual-path", str(output / "residual.pt"),
+        "--result-volume", RESULT_VOLUME,
+    ]
+    if resume:
+        command.append("--resume")
+    return command
+
+
 @app.function(image=image, cpu=8, memory=32768, timeout=10800, retries=0,
               volumes={"/cache": cache, "/sft": source.read_only()}, secrets=[hf_secret], max_containers=1)
 def prepare(config):
@@ -193,41 +218,46 @@ def run_smoke(config, prepared_path, run_name):
             _release(run_name, owner)
 
 
-@app.function(image=image, gpu="H100", cpu=16, memory=98304, timeout=21600, retries=0,
+@app.function(image=image, gpu="H100", cpu=16, memory=98304, timeout=43200, retries=0,
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/rl": results},
               secrets=[wandb_secret], max_containers=1)
-def run_eval(config, prepared_path, run_name, resume=False):
+def run_eval(config, prepared_path, run_names, resume=False):
     cfg = RLConfig(**config).validate()
-    validate_name(run_name)
-    owner = _acquire(f"{run_name}-eval")
+    if isinstance(run_names, str):
+        run_names = [run_names]
+    for name in run_names:
+        validate_name(name)
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
     env["TRANSFORMERS_OFFLINE"] = "1"
+    owners = {}
     try:
+        for name in run_names:
+            owners[name] = _acquire(f"{name}-eval")
         cache.reload()
         source.reload()
         results.reload()
-        output = Path("/rl") / run_name
-        command = [
-            EVAL_PYTHON, "-m", "script.lingbot_rl_train", "eval",
-            "--config-json", json.dumps(asdict(cfg)),
-            "--prepared-path", prepared_path,
-            "--output-dir", str(output),
-            "--run-name", run_name,
-            "--residual-path", str(output / "residual.pt"),
-            "--result-volume", RESULT_VOLUME,
-        ]
-        if resume:
-            command.append("--resume")
-        subprocess.run(command, check=True, env=env)
-        status = {"stage": "eval", "run_name": run_name, "complete": True}
-        (output / "status.json").write_text(json.dumps(status, indent=2) + "\n")
-        return json.loads((output / "eval" / "summary.json").read_text())
+        processes = []
+        for name in run_names:
+            (Path("/rl") / name).mkdir(parents=True, exist_ok=True)
+            command = eval_command(asdict(cfg), prepared_path, name, resume)
+            processes.append((name, subprocess.Popen(command, env=env)))
+        failed = [name for name, process in processes if process.wait() != 0]
+        if failed:
+            raise RuntimeError(f"Eval failed for {', '.join(failed)}")
+        summaries = {}
+        for name in run_names:
+            output = Path("/rl") / name
+            status = {"stage": "eval", "run_name": name, "complete": True}
+            (output / "status.json").write_text(json.dumps(status, indent=2) + "\n")
+            summaries[name] = json.loads((output / "eval" / "summary.json").read_text())
+        return summaries
     finally:
         try:
             results.commit()
         finally:
-            _release(f"{run_name}-eval", owner)
+            for name, owner in owners.items():
+                _release(f"{name}-eval", owner)
 
 
 def download_inference(run_name, download_dir):
@@ -270,23 +300,29 @@ def main(stage: str = "train", run_name: str = "", resume: bool = False,
         wandb_project=wandb_project, wandb_entity=wandb_entity or None,
     ).validate()
     if stage == "smoke":
-        run_name = validate_name(run_name or "libero30-dice-smoke")
+        run_names = [validate_name(run_name or "libero30-dice-smoke")]
+    elif stage in ("eval", "download"):
+        run_names = parse_run_names(run_name) if run_name else [rl_cfg.default_run_name]
     else:
-        run_name = validate_name(run_name or rl_cfg.default_run_name)
+        run_names = [validate_name(run_name or rl_cfg.default_run_name)]
     if stage == "download":
-        print(download_inference(run_name, download_dir))
+        for name in run_names:
+            print(download_inference(name, download_dir))
         return
-    if stage != "prepare" and (Path(download_dir) / run_name).exists():
-        raise FileExistsError("Local result directory exists; choose a different --download-dir")
+    if stage != "prepare":
+        for name in run_names:
+            if (Path(download_dir) / name).exists():
+                raise FileExistsError("Local result directory exists; choose a different --download-dir")
     prepared_path = prepare.remote(asdict(eval_cfg))
     if stage == "prepare":
         print(prepared_path)
         return
     if stage == "train":
-        summary = run_train.remote(asdict(rl_cfg), prepared_path, run_name, resume)
+        summary = run_train.remote(asdict(rl_cfg), prepared_path, run_names[0], resume)
     elif stage == "smoke":
-        summary = run_smoke.remote(asdict(rl_cfg), prepared_path, run_name)
+        summary = run_smoke.remote(asdict(rl_cfg), prepared_path, run_names[0])
     else:
-        summary = run_eval.remote(asdict(rl_cfg), prepared_path, run_name, resume)
+        summary = run_eval.remote(asdict(rl_cfg), prepared_path, run_names, resume)
     print(json.dumps(summary, indent=2))
-    print(download_inference(run_name, download_dir))
+    for name in run_names:
+        print(download_inference(name, download_dir))
