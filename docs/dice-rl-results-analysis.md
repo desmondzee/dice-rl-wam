@@ -1,128 +1,133 @@
-# Why DICE-RL matched, but did not beat, the SFT baseline
+# DICE-RL on LingBot-VA: configurations and results of all four evaluations
 
-Analysis of `result/lingbot-eval/libero30-sft-step000600-eval` (SFT) and
-`result/lingbot-rl/libero30-dice-baseline` + `result/lingbot-rl-eval/libero30-dice-baseline` (RL),
-against the DICE-RL paper (arXiv 2603.10263v2, read in full).
+Reference: DICE-RL paper (arXiv 2603.10263v2). All evaluations use the same pinned protocol:
+LIBERO-10 (LIBERO-Long), 20 episodes/task × 10 tasks = 200 episodes, init-state offset 1, seed 42,
+max 520 env steps/episode, 128×128 two-camera pixels, relative control at 20 Hz.
 
-## What the runs show
+## 1. Results
 
-Both the SFT checkpoint and the RL policy after 100,000 env steps score exactly 69.0% macro
-success on the pinned 200-episode protocol (20 episodes × 10 LIBERO-10 tasks, seed 42). The tie
-hides real movement: RL improved tasks 0, 1, 3, 5 (e.g. task 0: 60→80%, task 1: 80→95%) and
-regressed tasks 2, 6, 7, 8, 9 (task 7: 90→75%, task 8: 10→0%) by an exactly offsetting amount.
+### Macro success (200 episodes each)
 
-The training-time evals (1 episode/task, fixed seeds, `train_eval/step_*`) tell the more
-important story:
+| eval | checkpoint | macro | vs SFT |
+|---|---|---|---|
+| SFT baseline | `libero30-sft/step_000600` | **69.0%** (138/200) | — |
+| v1 RL, endpoint | `libero30-dice-baseline` @ 100k env steps | 69.0% (138/200) | ±0 |
+| v2 RL, mid-run | `libero30-dice-v2` @ 50,454 env steps | **63.0%** (126/200) | **−6.0** |
+| v2 RL, endpoint | `libero30-dice-v2` @ 100k env steps | 69.5% (139/200) | +0.5 |
 
-| env steps | 0 | 25,204 | 50,291 | 75,359 | 100,000 |
+200-episode 95% CI ≈ ±6.5pp on the macro rate; per-task (n=20) ≈ ±20pp.
+
+### Per-task successes /20
+
+| task | description | SFT | v1@100k | v2@50k | v2@100k |
 |---|---|---|---|---|---|
-| successes /10 | 1 | 7 | 9 | 9 | 5 |
+| 0 | soup + sauce in basket | 12 | 16 | 12 | 11 |
+| 1 | cream cheese + butter in basket | 16 | 19 | 16 | 19 |
+| 2 | stove on + moka pot | 17 | 16 | 14 | 19 |
+| 3 | bowl in drawer + close | 17 | 18 | **20** | 18 |
+| 4 | two mugs on plates | 13 | 13 | **6** | 12 |
+| 5 | book in caddy | 18 | 19 | 18 | 18 |
+| 6 | mug on plate + pudding | 16 | 14 | 15 | 18 |
+| 7 | soup + cream cheese in basket | 18 | 15 | 17 | 15 |
+| 8 | both moka pots on stove | 2 | 0 | 1 | 2 |
+| 9 | mug in microwave + close | 9 | 8 | 7 | 7 |
 
-Three observations follow. First, the run *was* learning: 9/10 at 50k–75k versus an expected
-~6.9/10 for the base policy on these seeds. Second, the policy **degraded between 75k and 100k
-steps**, and the 200-episode eval measured only the degraded final checkpoint — intermediate
-`residual.pt` snapshots were not saved by that run (the per-step checkpointing in the current
-uncommitted `lingbot_rl_train.py` changes was added afterwards). Third, the step-0 result of
-1/10 is far below the base policy (P(≤1 success | SFT per-task rates) < 1e-4), meaning the
-freshly initialized residual policy was substantially *worse* than the frozen prior it wraps.
+### Train-time evals during RL (1 episode/task, fixed seeds — noisy, ±1–2)
 
-So the correct framing is not "RL learned nothing" but "RL learned, destabilized late, and we
-evaluated the endpoint of the instability".
+| env steps | 0 | ~25k | ~50k | ~75k | 100k |
+|---|---|---|---|---|---|
+| v1 successes /10 | 1 | 7 | 9 | 9 | 5 |
+| v2 successes /10 | 5 | 5 | 8 | 6 | 5 |
 
-## Implementation deviations from the paper, ranked by likely impact
+v1's step-0 = 1/10 reflects its random-init residual corrupting the initial policy; v2's step-0 = 5/10 ≈ prior.
+The v2@50k 8/10 train-eval did not survive the 200-episode protocol (63.0%): single-episode
+train-evals are unreliable for checkpoint selection.
 
-**1. The frozen prior is never sampled inside the update loop, so multi-sample expectation
-training (paper Eq. 4–5, K=16) is absent.** The paper forms the critic target by averaging
-Q over K fresh candidates `π_pre(s_{t+h}, z'_k) + s_θ(s_{t+h}, z'_k)` drawn with the *current*
-residual, and maximizes the actor's Q averaged over K fresh candidates at the current state.
-Our `n_step_target` bootstraps from the single **stored executed next chunk** (`a_next` in
-`lingbot_rl_buffer.py`), and `update_actor` optimizes the single stored `(z, a_base)` pair —
-n-step SARSA on stale behavior actions rather than an expectation under the improving policy.
-Expert rows additionally use `z = 0` with `a_base` set to the demo action, a pairing the actor
-never sees at inference. This was a deliberate design choice (training without the 5B prior),
-but it removes the paper's central mechanism: Fig. 15 shows K=1 is markedly slower and less
-stable than K=16, and stale SARSA targets progressively mis-value the policy as the residual
-drifts from the behavior that generated the buffer — consistent with the late-run regression.
+## 2. Common stack (all runs)
 
-**2. The BC-loss filter is anchored to the bootstrapped TD target instead of a Monte-Carlo
-return.** Paper Eq. 6 relaxes the BC penalty only when the edited action improves on the base
-action *and* its predicted value does not exceed a Monte-Carlo return estimate Ĝ(s) from
-replay — explicitly to stop the actor exploiting critic overestimation. `update_actor` uses
-`target_q` (the n-step target, itself bootstrapped from the target critic on stale `a_next`)
-in place of Ĝ. When the target critic inflates at next states, the guard is checked against
-the inflated quantity, so the BC penalty can be switched off exactly where overestimation is
-worst. The buffer already computes discounted n-step returns; extending that to a
-full-episode return-to-go per chunk would restore the paper's anchor.
+### Base model and SFT prior
 
-**3. UTD is implemented as 10 critic gradient steps on one fixed minibatch with one fixed
-target.** `_update_from_buffer` samples a single batch, computes the target once, then takes
-10 critic steps toward it (with a Polyak update after each), plus one actor step, per collected
-chunk. The paper's 10–20 gradient steps per update are standard fresh-minibatch updates.
-Repeating one batch against a frozen target acts like a 10× critic learning rate with local
-overfitting, and yields only ~6.4k actor updates over the whole run (one per chunk).
+| variable | value |
+|---|---|
+| backbone | LingBot-VA (`robbyant/lingbot-va-base`), ~5B video-action world model (WAM), AR video context via KV cache |
+| paper's counterpart | flow-matching BC 1D U-Net (Robomimic) / π₀ VLA (LIBERO appendix) |
+| SFT data | 30 demos/task × 10 LIBERO-10 tasks (300 total), precomputed VAE latents |
+| SFT training | full transformer, effective batch 80, ≤1000 optimizer updates; **checkpoint step 600** pinned (no checkpoint sweep) |
+| frozen during RL | entire transformer, VAE, text encoder |
 
-**4. The residual actor's output layer is not zero-initialized.** `ResidualActor` uses default
-`nn.Linear` init, so at step 0 the policy adds a random residual of roughly 0.3–0.5 std to every
-normalized action dimension, including the gripper. The 1/10 step-0 eval confirms the initial
-policy was badly corrupted relative to the 69% prior. Consequences: the earliest replay data
-comes from a broken policy, and part of the 100k-step budget is spent shrinking the random
-residual (via β=100 BC) back to the prior instead of improving on it. Residual-RL practice
-(and the paper's premise that finetuning starts *at* the prior) implies the initial residual
-should be exactly zero.
+### Inference sampler (identical in SFT eval and all RL runs — "the 69% sampler")
 
-**5. Value-guided best-of-N is used for collection (K=4) but not at evaluation.** All evals —
-training-time and final — go through `predict_action_chunk(batch, k=1)`: one latent, no critic
-ranking. The measured policy therefore omits one of DICE-RL's three components, which the paper
-finds accelerates convergence and improves peak performance (Fig. 16). Collection also uses
-K=4 candidates against the paper's K=16.
+| variable | value | LingBot vanilla? |
+|---|---|---|
+| video denoise steps | 20, guidance 5.0, snr_shift 5.0 | released defaults |
+| action denoise steps | 50, guidance 1.0, action_snr_shift 0.05 | released defaults |
+| video_exec_step | −1 (full video decode each chunk) | released default |
+| action chunk | frame_chunk 4 × action_per_frame 4 = 16 env actions (12 on first chunk) | native |
+| action space | 30-dim padded, 7 DOF used, normalized q01/q99 → [−1,1] | native |
+| attention | torch backend, window 30, bf16 | native |
+| cameras | 2 × 128×128, width-concat, native vertical flip | pinned to SFT eval |
+| text encoder | CPU | pinned |
 
-## Non-implementation factors
+### RL-specific machinery (both v1 and v2)
 
-**Budget.** 100k env steps ≈ 6,418 chunks ≈ ~300 online episodes spread over 10 tasks. The
-paper's LIBERO-10 runs use ~1.1M env steps (Fig. 10–11), and their curves show only small gains
-by the 100k mark. Our mid-run 9/10 evals suggest budget was not the binding constraint yet —
-stability was — but even a fully faithful implementation would be expected to show modest gains
-at a tenth of the paper's budget with a single seed.
+| variable | value | paper |
+|---|---|---|
+| critic state `s` | 3072-d mean-pool of pre-proj_out video tokens + text tokens, single isolated frame encode, frozen | π₀ variant: 2048-d pooled transformer latent, frozen (same idea) |
+| residual actor | MLP 1024×1024×1024, GELU+LayerNorm, input (s, z flattened), output 16×30 chunk residual | same widths, GELU |
+| critic | ensemble 10 × MLP 1024³ on (s, action chunk), min-ensemble | ensemble 10, min |
+| reward | sparse terminal 1.0 at first success, per-chunk, γ=0.99 per chunk | same |
+| n-step | 3 chunks | 3–5 per task |
+| RLPD expert data | the same 300 SFT demos, featurized; ratio 0.5 → 0.1 linear over full run | 0.5→0.1 over warm-start window |
+| optimizer | Adam 1e-4, batch 256, τ=0.01, β=100, ε=−0.5, replay 100k chunks | same value ranges (β 50–100, ε −0.25..−0.75) |
+| environments | 1 (sequential), random task per episode | 4–8 parallel (Robomimic); LIBERO random task/iteration |
+| online budget | 100,000 env steps ≈ 6.4k chunks ≈ **~30 episodes/task** | LIBERO: ~1.1M env steps ≈ ~300+ episodes/task |
 
-**Evaluation power.** With 200 episodes, the 95% CI on the macro rate is roughly ±6.5pp, and
-per-task rates at 20 episodes move ±15pp by noise alone. The per-task "regressions" are
-individually within noise; the 75k→100k drop across two independent eval protocols is the
-signal that is not.
+## 3. What differed between v1 and v2 (and vs the paper)
 
-**Prior quality on the failing tasks (not our bug).** The paper's finetunability analysis
-(§5.2) predicts exactly what task 8 shows: DICE-RL contracts the action distribution *within
-the prior's support* and cannot create modes the prior essentially never samples. The SFT
-policy succeeds at "put both moka pots on the stove" 2/20 times (all 18 failures hit the step
-limit) — low good-mode coverage — and RL took it to 0/20. Task 9 (45% SFT) similarly stagnated.
-Improving these two likely requires a better prior (more/better demos, different SFT
-checkpoint epoch per the paper's Fig. 4) rather than more RL.
+| variable | v1 (`libero30-dice-baseline`) | v2 (`libero30-dice-v2`) | DICE-RL paper |
+|---|---|---|---|
+| residual init | default Linear init (random ~0.4σ output) | **zero-init output layer** (starts at prior) | starts at prior (implied) |
+| critic target (Eq. 4) | 1-sample SARSA: stored executed next chunk `a_next` | mean over **stored K=4** next-state candidates, residual recomputed with current actor | mean over **K=16 fresh** prior samples drawn in-loop |
+| actor objective (Eq. 5) | single stored (z, a_base) | mean over stored K=4 candidate set | mean over K=16 fresh samples |
+| BC filter anchor Ĝ (Eq. 6) | bootstrapped n-step TD target | **Monte-Carlo return-to-go** from episode finalize | Monte-Carlo return from replay |
+| UTD=10 | 10 critic steps on ONE frozen batch+target | 10 × fresh minibatch + fresh target, +1 actor batch | fresh minibatches |
+| collection | best-of-4, critic argmax | same (best-of-4) | best-of-16 |
+| eval-time selection | none (k=1, single prior sample + residual) | **best-of-4, critic argmax** | best-of-N used during interaction |
+| checkpoints kept | final only | every train-eval point | n/a (stable curves, endpoint reported) |
+| recipe version | 1 | 2 | — |
 
-## Verdict
+### Remaining deviations from the paper after v2
 
-The implementation is a recognizable DICE-RL, and the mid-training evals prove the overall
-loop (residual actor, chunk critic, RLPD mixing, sparse reward plumbing) can lift the policy
-well above the prior. But the answer to "is it our implementation?" is largely yes, in the
-specific sense that the three stabilizing mechanisms the paper leans on — multi-sample
-expectation targets, the MC-anchored BC filter, and (at eval) best-of-N — are respectively
-replaced by stale single-sample SARSA targets, a bootstrap-anchored filter, and disabled;
-combined with the non-zero residual init and same-batch UTD, these plausibly produced the
-late-training destabilization, and the eval protocol then measured only the destabilized
-endpoint at one tenth of the paper's step budget.
+| deviation | status / reason |
+|---|---|
+| K=4 not 16 | pinned for GPU memory of batched action denoise; paper ablation: 16 > 4 > 1 (mostly sample efficiency) |
+| stored candidates, never redrawn | fresh in-loop sampling infeasible: prior needs the AR video KV context, unstorable per replay row (WAM tax). Per-state sampling error is fixed, not averaged away across updates |
+| 1 env, 100k steps | ~1/10 the paper's LIBERO budget → ~30 online episodes/task |
+| truncation at 520 = terminal (no bootstrap) | pre-existing; paper silent |
+| single SFT checkpoint (step 600) | paper: intermediate BC checkpoints finetune best (GoodCov/BadEnt tradeoff, Fig. 4); never swept |
 
-## Recommended next steps, in order
+## 4. Reading of the results
 
-1. Re-run with per-eval-point checkpoints (already in the uncommitted changes) and evaluate
-   the 25k/50k/75k checkpoints on the full 200-episode protocol — cheapest test of the
-   "peaked then collapsed" reading, since the old run's intermediate weights were not saved.
-2. Zero-initialize the residual actor's final layer.
-3. Sample a fresh minibatch (and recompute the target) for each of the 10 critic steps.
-4. Anchor the BC filter to a Monte-Carlo return-to-go stored per chunk at episode
-   finalization, per Eq. 6.
-5. Evaluate with critic-ranked best-of-N (k=4, matching collection) so the measured policy
-   includes value-guided selection.
-6. If prior inference in the trainer stays off the table, approximate Eq. 4–5 by storing all
-   K=4 collected candidates per chunk and averaging targets/actor objectives over them; that
-   recovers most of the multi-sample benefit without new prior calls.
-7. Check the W&B run (`dice-lingbot-va-rl`, `libero30-dice-baseline`): `residual_rms` and
-   `bc_filter_rate` rising while `q_mean` inflates over the last quarter of training would
-   directly confirm the drift mechanism in findings 1–3.
+- v1 (4 implementation bugs + endpoint-only eval): net zero. Fixed in v2.
+- v2 trains *healthily* (calibrated Q, residual RMS ~0.017 ≈ half of v1, no q_min pathology) but the
+  200-episode evals bracket the baseline: 63.0% at 50k, 69.5% at 100k.
+- The 50k eval kills two hypotheses at once: "peak then fade" (the peak was train-eval noise) and
+  "policy never leaves the prior" (task 3 → 20/20 while task 4 → 6/20 — the residual moves behavior
+  strongly, in both directions). Diagnosis: the critic is decisive but unreliable per task at
+  ~30 episodes/task, and best-of-4 selection amplifies its mistakes where it is miscalibrated.
+- Paper comparison: on LIBERO the paper's early gains are modest (+3–5pp by ~100k steps of a 1.1M run)
+  but its curves **never dip below the pretrained baseline**. Our 50k dip below baseline is a
+  qualitative mismatch not explainable by budget alone; the paper's stabilizers we lack are fresh
+  K=16 sampling (candidate-set staleness) and data density.
+- Task 8 (prior 2/20) never moved in any run: contraction cannot create modes the prior does not
+  sample — a prior-quality problem (SFT checkpoint/data), not an RL problem.
+
+## 5. Candidate next experiments
+
+| experiment | cost | what it discriminates |
+|---|---|---|
+| single-task RL (task 9, 45% prior), same recipe, 100k steps | ~11 H100-h + config change | paper's Robomimic regime (~10× per-task data): steep early gains ⇒ data starvation was binding; flat/dip ⇒ candidate staleness is binding |
+| re-eval v2@50k task 4 with best-of-N off (k=1) | ~40 min | whether critic-argmax selection actively harms miscalibrated tasks |
+| store 16 candidates at collection, subsample 4 fresh per gradient step | ~1.3× rollout cost | restores update-to-update sampling variation (closest feasible analog of fresh K=16) |
+| 300k-step multitask run | ~35 H100-h | pure budget test at 3× per-task data |
+| SFT checkpoint sweep (400/600/800) probed with GoodCov-style metric | cheap, offline | prior finetunability, esp. tasks 8/9 (paper Fig. 4 lever) |
