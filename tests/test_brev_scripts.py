@@ -59,13 +59,19 @@ def test_train_dry_run_builds_single_task_command_and_resumes_when_state_exists(
     assert "MODAL_PROFILE='desmond-zee'" in first.stdout
     assert "DICE_DATA='" + env["DICE_DATA"] + "'" in first.stdout
     assert "--config-json" in first.stdout
+    assert "source '" + env["DICE_REPO"] + "/brev/env.sh'" in first.stdout
+    assert "modal volume ls dice-lingbot-rl-runs unit-t4/resume" in first.stdout
     run_dir = Path(env["DICE_DATA"]) / "runs" / "unit-t4"
     assert (run_dir / "run.sh").is_file()
     assert '"task_ids": [4]' in (run_dir / "config.json").read_text()
+    fresh = _run("train.sh", ["unit-t4", "4", "--fresh"], env)
+    assert fresh.returncode == 0, fresh.stderr
+    assert "modal volume ls dice-lingbot-rl-runs" not in fresh.stdout
     (run_dir / "resume").mkdir()
     (run_dir / "resume" / "latest.pt").write_text("")
     second = _run("train.sh", ["unit-t4", "4"], env)
     assert "--resume" in second.stdout
+    assert "modal volume ls dice-lingbot-rl-runs" not in second.stdout
     smoke = _run("train.sh", ["smoke", "0", "--max-env-steps", "32"], env)
     assert "--max-env-steps 32" in smoke.stdout
     assert '"wandb_entity": null' in smoke.stdout
