@@ -1759,3 +1759,72 @@ def test_n_envs_is_validated_and_absent_from_protocol():
     for bad in (0, 9, 2.0, "2"):
         with pytest.raises(ValueError, match="n_envs"):
             RLConfig(task_ids=(0,), n_envs=bad).validate()
+
+
+def _stream_row(stream, step, reward=0, done=0):
+    row = _replay_row(reward, done)
+    row["s"] = np.full(STATE_DIM, 10.0 * stream + step, np.float32)
+    row["a"] = np.full((HORIZON, ACTION_DIM), 10.0 * stream + step, np.float32)
+    return row
+
+
+def test_replay_keeps_one_open_episode_per_stream():
+    buf = ChunkReplay(capacity=64)
+    buf.add_online(_stream_row(0, 0), stream=0)
+    buf.add_online(_stream_row(1, 0), stream=1)
+    assert len(buf) == 2
+    assert not buf.has_ready_online()
+    buf.add_online(_stream_row(0, 1), stream=0)
+    assert buf.has_ready_online()
+    views = [buf.sample(1, expert_ratio=0.0) for _ in range(8)]
+    assert all(float(view["s"][0][0]) == 0.0 for view in views)
+    assert all(float(view["s_next"][0][0]) == 1.0 for view in views)
+    assert all(float(view["n_steps"][0]) == 2.0 for view in views)
+    buf.add_online(_stream_row(1, 1, reward=1, done=1), stream=1)
+    buf.finalize_episode(stream=1)
+    stored = buf.rows()
+    assert [float(row["s"][0]) for row in stored[:2]] == [10.0, 11.0]
+    assert [float(row["mc_return"]) for row in stored[:2]] == pytest.approx([GAMMA, 1.0])
+    assert float(stored[0]["s_next"][0]) == 11.0
+    assert len(buf) == 4
+    buf.add_online(_stream_row(0, 2, reward=1, done=1), stream=0)
+    buf.finalize_episode(stream=0)
+    stored = buf.rows()
+    assert [float(row["s"][0]) for row in stored] == [10.0, 11.0, 0.0, 1.0, 2.0]
+    assert [float(row["n_steps"]) for row in stored[2:]] == [3.0, 2.0, 1.0]
+    assert float(stored[2]["mc_return"]) == pytest.approx(GAMMA ** 2)
+    assert buf.sample(4, expert_ratio=0.0)["s"].shape == (4, STATE_DIM)
+
+
+def test_replay_state_dict_keeps_single_stream_layout():
+    buf = ChunkReplay(capacity=64)
+    buf.add_online(_stream_row(0, 0, reward=1, done=1))
+    buf.finalize_episode()
+    buf.add_online(_stream_row(0, 5))
+    buf.add_online(_stream_row(0, 6))
+    payload = buf.state_dict()
+    assert set(payload) == {"capacity", "episode_start", "data"}
+    assert payload["episode_start"] == 1
+    assert [float(row["s"][0]) for row in payload["data"]] == [0.0, 5.0, 6.0]
+    restored = ChunkReplay(capacity=8)
+    restored.load_state_dict(payload)
+    assert len(restored) == 3
+    assert restored.has_ready_online()
+    view = restored.sample(1, expert_ratio=0.0)
+    assert float(view["s"][0][0]) in (0.0, 5.0)
+    restored.add_online(_stream_row(0, 7, reward=1, done=1))
+    restored.finalize_episode()
+    assert [float(row["mc_return"]) for row in restored.rows()] == pytest.approx([1.0, GAMMA ** 2, GAMMA, 1.0])
+    assert restored.state_dict()["episode_start"] == 4
+
+
+def test_replay_trim_counts_open_rows_against_capacity():
+    buf = ChunkReplay(capacity=4)
+    for step in range(4):
+        buf.add_online(_stream_row(0, step))
+    buf.finalize_episode()
+    buf.add_online(_stream_row(1, 0), stream=1)
+    buf.add_online(_stream_row(1, 1), stream=1)
+    assert len(buf) == 4
+    assert [float(row["s"][0]) for row in buf.rows()] == [2.0, 3.0, 10.0, 11.0]
+    assert buf.state_dict()["episode_start"] == 2

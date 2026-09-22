@@ -29,21 +29,23 @@ class ChunkReplay:
         self.capacity = capacity
         self.device = device
         self._data = []
-        self._episode_start = 0
+        self._open = {}
 
     def __len__(self):
-        return len(self._data)
+        return len(self._data) + sum(len(rows) for rows in self._open.values())
+
+    def _open_rows(self):
+        return [row for stream in sorted(self._open) for row in self._open[stream]]
 
     def rows(self):
-        return self._data
+        return self._data + self._open_rows()
 
     def _trim(self):
-        extra = len(self._data) - self.capacity
+        extra = len(self) - self.capacity
         if extra > 0:
             self._data = self._data[extra:]
-            self._episode_start = max(0, self._episode_start - extra)
 
-    def _store(self, row, is_expert):
+    def _store(self, row, is_expert, stream):
         stored = {**row, "is_expert": np.float32(is_expert)}
         stored.setdefault("a_next", stored["a"])
         stored.setdefault("n_steps", np.float32(1.0))
@@ -62,46 +64,48 @@ class ChunkReplay:
             stored[key] = _host_float(stored[key])
         stored["task_id"] = int(stored["task_id"])
         stored["n_env_actions"] = int(stored["n_env_actions"])
-        self._data.append(stored)
+        self._open.setdefault(int(stream), []).append(stored)
         self._trim()
 
-    def add_online(self, row):
-        self._store(row, 0.0)
+    def add_online(self, row, stream=0):
+        self._store(row, 0.0, stream)
 
-    def add_expert(self, row):
-        self._store(row, 1.0)
+    def add_expert(self, row, stream=0):
+        self._store(row, 1.0, stream)
 
-    def _is_incomplete_last(self, index):
-        return (
-            index >= self._episode_start
-            and index == len(self._data) - 1
-            and float(self._data[index]["done"]) != 1.0
-        )
+    def _ready(self):
+        ready = [(None, index) for index in range(len(self._data))]
+        for stream in sorted(self._open):
+            episode = self._open[stream]
+            for index, row in enumerate(episode):
+                if index == len(episode) - 1 and float(row["done"]) != 1.0:
+                    continue
+                ready.append((stream, index))
+        return ready
 
-    def ready_indices(self):
-        return [index for index in range(len(self._data)) if not self._is_incomplete_last(index)]
+    def _row(self, stream, index):
+        return self._data[index] if stream is None else self._open[stream][index]
 
     def has_ready_online(self):
-        return any(float(self._data[index]["is_expert"]) == 0.0 for index in self.ready_indices())
+        return any(float(self._row(stream, index)["is_expert"]) == 0.0 for stream, index in self._ready())
 
-    def _n_step_view(self, index):
-        row = self._data[index]
-        if index < self._episode_start:
+    def _n_step_view(self, stream, index):
+        row = self._row(stream, index)
+        if stream is None:
             return row
-        episode = self._data[self._episode_start:]
-        local = index - self._episode_start
+        episode = self._open[stream]
         length = len(episode)
-        n_steps = min(N_STEP_CHUNKS, length - local)
+        n_steps = min(N_STEP_CHUNKS, length - index)
         ret = 0.0
         done_n = 0.0
         used = n_steps
         for lag in range(n_steps):
-            ret += (GAMMA ** lag) * float(episode[local + lag]["reward"])
-            if float(episode[local + lag]["done"]) == 1.0:
+            ret += (GAMMA ** lag) * float(episode[index + lag]["reward"])
+            if float(episode[index + lag]["done"]) == 1.0:
                 done_n = 1.0
                 used = lag + 1
                 break
-        nxt = local + used if local + used < length else length - 1
+        nxt = index + used if index + used < length else length - 1
         view = dict(row)
         view["reward"] = np.float32(ret)
         view["done"] = np.float32(done_n)
@@ -113,8 +117,8 @@ class ChunkReplay:
         view["mc_return"] = np.float32(0.0)
         return view
 
-    def finalize_episode(self):
-        episode = self._data[self._episode_start:]
+    def finalize_episode(self, stream=0):
+        episode = self._open.pop(int(stream), [])
         length = len(episode)
         rewards = [float(row["reward"]) for row in episode]
         dones = [float(row["done"]) for row in episode]
@@ -140,12 +144,12 @@ class ChunkReplay:
             row["z_next_all"] = np.array(episode[nxt]["z_all"], copy=True)
             row["a_base_next_all"] = np.array(episode[nxt]["a_base_all"], copy=True)
             row["mc_return"] = np.float32(mc_returns[index])
-        self._episode_start = len(self._data)
+        self._data.extend(episode)
 
     def sample(self, batch_size, expert_ratio):
-        ready = self.ready_indices()
-        online = [i for i in ready if float(self._data[i]["is_expert"]) == 0.0]
-        expert = [i for i in ready if float(self._data[i]["is_expert"]) == 1.0]
+        ready = self._ready()
+        online = [i for i, key in enumerate(ready) if float(self._row(*key)["is_expert"]) == 0.0]
+        expert = [i for i, key in enumerate(ready) if float(self._row(*key)["is_expert"]) == 1.0]
         if not online:
             raise ValueError("Replay has no online chunks")
         n_expert = int(round(batch_size * expert_ratio)) if expert else 0
@@ -154,7 +158,7 @@ class ChunkReplay:
         indices = list(np.random.choice(online, size=n_online, replace=len(online) < n_online))
         if n_expert:
             indices += list(np.random.choice(expert, size=n_expert, replace=len(expert) < n_expert))
-        views = [self._n_step_view(i) for i in indices]
+        views = [self._n_step_view(*ready[i]) for i in indices]
         batch = {}
         for key in KEYS:
             stacked = np.stack([view[key] for view in views])
@@ -169,11 +173,13 @@ class ChunkReplay:
     def state_dict(self):
         return {
             "capacity": self.capacity,
-            "episode_start": self._episode_start,
-            "data": self._data,
+            "episode_start": len(self._data),
+            "data": self._data + list(self._open.get(0, [])),
         }
 
     def load_state_dict(self, payload):
         self.capacity = payload["capacity"]
-        self._episode_start = payload["episode_start"]
-        self._data = payload["data"]
+        start = int(payload["episode_start"])
+        data = list(payload["data"])
+        self._data = data[:start]
+        self._open = {0: data[start:]} if data[start:] else {}
