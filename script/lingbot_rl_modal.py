@@ -10,7 +10,7 @@ from pathlib import Path
 import modal
 
 from script.lingbot_eval_config import EvalConfig, LEROBOT_REVISION, validate_name
-from script.lingbot_rl_config import RLConfig
+from script.lingbot_rl_config import RLConfig, eval_dir_name, residual_step
 from script.lingbot_sft_config import DATASET_REPO, DATASET_REVISION
 
 
@@ -96,7 +96,7 @@ def parse_run_names(value):
     return names
 
 
-def eval_command(config_dict, prepared_path, run_name, resume):
+def eval_command(config_dict, prepared_path, run_name, resume, stage="heldout", k=4, task_ids=(), residual_path=None):
     output = Path("/rl") / run_name
     command = [
         EVAL_PYTHON, "-m", "script.lingbot_rl_train", "eval",
@@ -104,9 +104,13 @@ def eval_command(config_dict, prepared_path, run_name, resume):
         "--prepared-path", prepared_path,
         "--output-dir", str(output),
         "--run-name", run_name,
-        "--residual-path", str(output / "residual.pt"),
+        "--residual-path", residual_path or str(output / "residual.pt"),
         "--result-volume", RESULT_VOLUME,
+        "--eval-stage", stage,
+        "--eval-k", str(k),
     ]
+    if task_ids:
+        command.extend(["--task-ids", ",".join(str(task) for task in task_ids)])
     if resume:
         command.append("--resume")
     return command
@@ -221,28 +225,32 @@ def run_smoke(config, prepared_path, run_name):
 @app.function(image=image, gpu="H100", cpu=16, memory=98304, timeout=43200, retries=0,
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/rl": results},
               secrets=[wandb_secret], max_containers=1)
-def run_eval(config, prepared_path, run_names, resume=False):
+def run_eval(config, prepared_path, run_names, resume=False, stage="heldout", k=4, task_ids=(), residual=None):
     cfg = RLConfig(**config).validate()
     if isinstance(run_names, str):
         run_names = [run_names]
     for name in run_names:
         validate_name(name)
+    eval_dir = eval_dir_name(stage, k, residual_step(residual))
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
     env["TRANSFORMERS_OFFLINE"] = "1"
     owners = {}
     try:
         for name in run_names:
-            owners[name] = _acquire(f"{name}-eval")
+            owners[name] = _acquire(f"{name}-eval-{eval_dir}")
         cache.reload()
         source.reload()
         results.reload()
+        residual_path = f"/rl/{residual}" if residual else None
+        if residual_path and not Path(residual_path).is_file():
+            raise FileNotFoundError(f"{residual} is not on {RESULT_VOLUME}; run script.copy_checkpoint first")
         processes = []
         for name in run_names:
-            output = Path("/rl") / name
-            (output / "eval").mkdir(parents=True, exist_ok=True)
-            command = eval_command(asdict(cfg), prepared_path, name, resume)
-            log_handle = (output / "eval" / "subprocess.log").open("ab")
+            output = Path("/rl") / name / "eval" / eval_dir
+            output.mkdir(parents=True, exist_ok=True)
+            command = eval_command(asdict(cfg), prepared_path, name, resume, stage, k, task_ids, residual_path)
+            log_handle = (output / "subprocess.log").open("ab")
             processes.append((name, subprocess.Popen(
                 command, env=env, stdout=log_handle, stderr=subprocess.STDOUT), log_handle))
         failed = []
@@ -255,25 +263,35 @@ def run_eval(config, prepared_path, run_names, resume=False):
             raise RuntimeError(f"Eval failed for {', '.join(failed)}")
         summaries = {}
         for name in run_names:
-            output = Path("/rl") / name
-            status = {"stage": "eval", "run_name": name, "complete": True}
+            output = Path("/rl") / name / "eval" / eval_dir
+            status = {"stage": "eval", "run_name": name, "eval_dir": eval_dir, "complete": True}
             (output / "status.json").write_text(json.dumps(status, indent=2) + "\n")
-            summaries[name] = json.loads((output / "eval" / "summary.json").read_text())
+            summaries[name] = json.loads((output / "summary.json").read_text())
         return summaries
     finally:
         try:
             results.commit()
         finally:
             for name, owner in owners.items():
-                _release(f"{name}-eval", owner)
+                _release(f"{name}-eval-{eval_dir}", owner)
 
 
-def download_inference(run_name, download_dir):
+def download_inference(run_name, download_dir, eval_dir=None):
     validate_name(run_name)
     destination = Path(download_dir) / run_name
+    if eval_dir:
+        destination = destination / "eval" / eval_dir
     if destination.exists():
         raise FileExistsError(f"Refusing to overwrite {destination}")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if eval_dir:
+        subprocess.run([
+            sys.executable, "-m", "modal", "volume", "get", RESULT_VOLUME,
+            f"{run_name}/eval/{eval_dir}", str(destination.parent),
+        ], check=True)
+        if not (destination / "summary.json").is_file():
+            raise FileNotFoundError("Eval download is missing summary.json")
+        return str(destination)
     for name in INFERENCE_PATHS:
         subprocess.run([
             sys.executable, "-m", "modal", "volume", "get", RESULT_VOLUME,
@@ -285,17 +303,14 @@ def download_inference(run_name, download_dir):
             source_path = destination.parent / name
             if source_path.exists():
                 source_path.rename(destination / name)
-    eval_dir = destination / "eval"
-    if eval_dir.is_dir():
-        from script.lingbot_eval_report import create_report
-        create_report(eval_dir)
     if not (destination / "residual.pt").is_file():
         raise FileNotFoundError("Inference download is missing residual.pt")
     return str(destination)
 
 
 @app.local_entrypoint()
-def main(stage: str = "train", run_name: str = "", resume: bool = False,
+def main(stage: str = "train", run_name: str = "", resume: bool = False, residual: str = "",
+         eval_stage: str = "heldout", eval_k: int = 4, tasks: str = "",
          wandb_project: str = "dice-lingbot-va-rl", wandb_entity: str = "",
          download_dir: str = "result/lingbot-rl"):
     if stage not in ("prepare", "train", "eval", "smoke", "download"):
@@ -307,8 +322,12 @@ def main(stage: str = "train", run_name: str = "", resume: bool = False,
     rl_cfg = RLConfig(
         wandb_project=wandb_project, wandb_entity=wandb_entity or None,
     ).validate()
+    task_ids = tuple(int(task) for task in tasks.split(",")) if tasks else ()
+    eval_dir = eval_dir_name(eval_stage, eval_k, residual_step(residual)) if stage == "eval" else None
     if stage == "smoke":
         run_names = [validate_name(run_name or "libero30-dice-smoke")]
+    elif stage == "eval" and residual:
+        run_names = [validate_name(run_name or residual.split("/")[0])]
     elif stage in ("eval", "download"):
         run_names = parse_run_names(run_name) if run_name else [rl_cfg.default_run_name]
     else:
@@ -319,7 +338,8 @@ def main(stage: str = "train", run_name: str = "", resume: bool = False,
         return
     if stage != "prepare":
         for name in run_names:
-            if (Path(download_dir) / name).exists():
+            local = Path(download_dir) / name
+            if (local / "eval" / eval_dir if eval_dir else local).exists():
                 raise FileExistsError("Local result directory exists; choose a different --download-dir")
     prepared_path = prepare.remote(asdict(eval_cfg))
     if stage == "prepare":
@@ -330,7 +350,7 @@ def main(stage: str = "train", run_name: str = "", resume: bool = False,
     elif stage == "smoke":
         summary = run_smoke.remote(asdict(rl_cfg), prepared_path, run_names[0])
     else:
-        summary = run_eval.remote(asdict(rl_cfg), prepared_path, run_names, resume)
+        summary = run_eval.remote(asdict(rl_cfg), prepared_path, run_names, resume, eval_stage, eval_k, task_ids, residual or None)
     print(json.dumps(summary, indent=2))
     for name in run_names:
-        print(download_inference(name, download_dir))
+        print(download_inference(name, download_dir, eval_dir))

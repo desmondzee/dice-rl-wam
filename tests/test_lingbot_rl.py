@@ -1363,13 +1363,13 @@ def test_eval_stage_fans_out_multiple_run_names(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "prepare", fn("prepare", "/cache/prep.json"))
     monkeypatch.setattr(module, "run_eval", fn("eval", {"a-1": {}, "b-2": {}}))
-    monkeypatch.setattr(module, "download_inference", lambda run_name, download_dir: called.append(("download", run_name)) or "out")
+    monkeypatch.setattr(module, "download_inference", lambda run_name, download_dir, eval_dir=None: called.append(("download", run_name, eval_dir)) or "out")
     module.main(stage="eval", run_name="a-1,b-2", download_dir=str(tmp_path / "dl"))
     eval_calls = [c for c in called if c[0] == "eval"]
     assert len(eval_calls) == 1
-    assert eval_calls[0][1][2] == ["a-1", "b-2"]
-    assert [c[1] for c in called if c[0] == "download"] == ["a-1", "b-2"]
-    (tmp_path / "dl" / "b-2").mkdir(parents=True)
+    assert eval_calls[0][1][2:] == (["a-1", "b-2"], False, "heldout", 4, (), None)
+    assert [c[1:] for c in called if c[0] == "download"] == [("a-1", "heldout-k4"), ("b-2", "heldout-k4")]
+    (tmp_path / "dl" / "b-2" / "eval" / "heldout-k4").mkdir(parents=True)
     with pytest.raises(FileExistsError):
         module.main(stage="eval", run_name="a-1,b-2", download_dir=str(tmp_path / "dl"))
 
@@ -2125,3 +2125,94 @@ def test_eval_cli_plumbs_stage_k_and_task_ids(monkeypatch, capsys):
     assert str(args[4]) == "/rl/dice-t0/train_eval/step_080000/residual.pt"
     assert kwargs == {"stage": "heldout", "task_ids": (0,), "k": 1}
     assert __import__("json").loads(capsys.readouterr().out) == {"ok": True}
+
+
+def test_eval_command_carries_stage_k_tasks_and_residual():
+    from script.lingbot_rl_modal import eval_command
+
+    command = eval_command({"seed": 42}, "/cache/prep.json", "dice-t0", False, "heldout", 1, (0,),
+                           "/rl/dice-t0/train_eval/step_080000/residual.pt")
+    assert command[command.index("--residual-path") + 1] == "/rl/dice-t0/train_eval/step_080000/residual.pt"
+    assert command[command.index("--eval-stage") + 1] == "heldout"
+    assert command[command.index("--eval-k") + 1] == "1"
+    assert command[command.index("--task-ids") + 1] == "0"
+    default = eval_command({"seed": 42}, "/cache/prep.json", "run-a", False)
+    assert "--task-ids" not in default and default[default.index("--eval-k") + 1] == "4"
+
+
+def test_eval_stage_with_residual_targets_one_checkpoint_directory(tmp_path, monkeypatch):
+    import script.lingbot_rl_modal as module
+
+    called = []
+
+    def fn(name, result=None):
+        def remote(*args, **kwargs):
+            called.append((name, args))
+            return result
+        return type("Fn", (), {"remote": staticmethod(remote)})()
+
+    monkeypatch.setattr(module, "prepare", fn("prepare", "/cache/prep.json"))
+    monkeypatch.setattr(module, "run_eval", fn("eval", {"dice-t0": {}}))
+    monkeypatch.setattr(module, "download_inference",
+                        lambda run_name, download_dir, eval_dir=None: called.append(("download", run_name, eval_dir)) or "out")
+    residual = "dice-t0/train_eval/step_080000/residual.pt"
+    module.main(stage="eval", residual=residual, eval_k=1, tasks="0", download_dir=str(tmp_path / "dl"))
+    (_, args), = [c for c in called if c[0] == "eval"]
+    assert args[2:] == (["dice-t0"], False, "heldout", 1, (0,), residual)
+    assert [c for c in called if c[0] == "download"] == [("download", "dice-t0", "heldout-k1-step080000")]
+    (tmp_path / "dl" / "dice-t0" / "eval" / "heldout-k1-step080000").mkdir(parents=True)
+    with pytest.raises(FileExistsError):
+        module.main(stage="eval", residual=residual, eval_k=1, tasks="0", download_dir=str(tmp_path / "dl"))
+    module.main(stage="eval", residual=residual, eval_k=4, tasks="0", download_dir=str(tmp_path / "dl"))
+    assert called[-1] == ("download", "dice-t0", "heldout-k4-step080000")
+
+
+def test_download_inference_fetches_only_the_eval_directory(tmp_path, monkeypatch):
+    import script.lingbot_rl_modal as module
+
+    calls = []
+
+    def download(command, check):
+        calls.append(command)
+        dest = Path(command[-1]) / "heldout-k4-step080000"
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "summary.json").write_text("{}")
+
+    monkeypatch.setattr(module.subprocess, "run", download)
+    out = module.download_inference("dice-t0", tmp_path / "result/lingbot-rl", "heldout-k4-step080000")
+    assert out == str(tmp_path / "result/lingbot-rl/dice-t0/eval/heldout-k4-step080000")
+    assert len(calls) == 1 and calls[0][-2] == "dice-t0/eval/heldout-k4-step080000"
+    with pytest.raises(FileExistsError):
+        module.download_inference("dice-t0", tmp_path / "result/lingbot-rl", "heldout-k4-step080000")
+
+
+def test_copy_checkpoint_skips_present_and_copies_via_profiles(tmp_path, monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+
+    from script import copy_checkpoint as module
+
+    remote = "dice-t0/train_eval/step_080000/residual.pt"
+    present = {"nobel": True}
+    calls = []
+
+    def run(command, env=None, **kwargs):
+        args = command[command.index("volume") + 1:]
+        calls.append((env["MODAL_PROFILE"], args))
+        if args[0] == "ls":
+            listed = present[env["MODAL_PROFILE"]]
+            return SimpleNamespace(returncode=0 if listed else 1, stdout=f"{remote}\n" if listed else "")
+        if args[0] == "get":
+            (Path(args[-1]) / "residual.pt").write_bytes(b"w")
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert module.copy_checkpoint(remote, "desmond-zee", "nobel") == "present"
+    assert [profile for profile, _ in calls] == ["nobel"]
+    calls.clear()
+    present["nobel"] = False
+    assert module.copy_checkpoint(remote, "desmond-zee", "nobel") == "copied"
+    assert [(profile, args[0]) for profile, args in calls] == [("nobel", "ls"), ("nobel", "create"), ("desmond-zee", "get"), ("nobel", "put")]
+    assert calls[2][1][1:3] == ["dice-lingbot-rl-runs", remote]
+    assert calls[3][1][-1] == remote and calls[3][1][-2].endswith("residual.pt")
+    assert all("token" not in " ".join(args) for _, args in calls)
