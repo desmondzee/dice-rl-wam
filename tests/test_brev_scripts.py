@@ -137,7 +137,7 @@ def test_pull_fetches_run_from_modal_volume(tmp_path):
 def test_push_syncs_repo_without_heavy_dirs(tmp_path):
     plain = _run("push.sh", ["box"], {}, cwd=ROOT)
     assert plain.returncode == 0, plain.stderr
-    for excluded in (".venv", ".cache", "checkpoints", "result", ".git", "brev/env.sh"):
+    for excluded in (".venv", ".cache", "checkpoints", "result", ".git", "brev/env.sh", "wandb"):
         assert f"--exclude {excluded}" in plain.stdout
     assert "box:dice-rl-wam/" in plain.stdout
     assert _run("push.sh", [], {}, cwd=ROOT).returncode != 0

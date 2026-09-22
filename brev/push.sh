@@ -8,5 +8,5 @@ HOST="${1:?usage: push.sh <ssh-host>}"
 REPO="$(cd "$HERE/.." && pwd)"
 run() { if [ "${DICE_DRY_RUN:-0}" = "1" ]; then echo "$*"; else "$@"; fi; }
 run rsync -az --delete --exclude .venv --exclude .cache --exclude checkpoints --exclude result --exclude .git \
-  --exclude __pycache__ --exclude '*.pyc' --exclude .pytest_cache --exclude .superpowers --exclude brev/env.sh \
+  --exclude __pycache__ --exclude '*.pyc' --exclude .pytest_cache --exclude .superpowers --exclude brev/env.sh --exclude wandb \
   "$REPO/" "$HOST:$DICE_REMOTE_REPO/"
