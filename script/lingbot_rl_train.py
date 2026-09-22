@@ -569,7 +569,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                             "q_min": actor_info["q_min"], "bc_filter_rate": actor_info["bc_filter_rate"],
                             "expert_ratio": expert_ratio, "episode_return": stat["return"],
                             "episode_success": stat["success"], "episode_length": stat["length"],
-                            "delta_v": delta_v[position],
+                            "chunk_delta_v": delta_v[position],
                         }
                         run.log(log)
                 ended = [position for position in range(len(live)) if over[position]]
