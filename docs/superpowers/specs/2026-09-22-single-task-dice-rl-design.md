@@ -172,15 +172,15 @@ checkpoint-0 gate must land before either run reaches 80k (~9 h in).
   - `make_env(task_id, suite, init_states)`; the training env is built once
     per run with `init_states=False` and reused across episodes.
   - task draw removed; `tasks` filtered to `config.task_ids`.
-  - episode end: `done=1` only on success or env `terminated`. Today `:443`
+  - episode end: `done=1` only on success or env `terminated`. Today the loop
     also sets it on `truncated`, `episode_length >= 520`, and budget
     exhaustion; those rows keep `done=0` and bootstrap from the final
     observed state (the buffer already points the tail's `s_next` at the
-    last row). `finalize_episode` already runs after every episode (`:478`), so the only
+    last row). `finalize_episode` already runs after every episode, so the only
     change is which rows carry `done=1`.
   - `_train_eval` → procedural inits, `train_eval_episodes_per_task`
     episodes, best-of-4.
-  - checkpoint every `train_eval_every`: `checkpoints/step_XXXXXX/residual.pt`
+  - checkpoint every `train_eval_every`: `train_eval/step_XXXXXX/residual.pt`
     plus `resume/latest.pt`, and at the final step; if `DICE_SYNC_CMD` is set
     in the environment it runs after each save (non-fatal on failure).
   - `evaluate` accepts a `stage`, `task_ids`, and `k` (1 or 4) instead of
