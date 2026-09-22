@@ -1746,3 +1746,16 @@ def test_critic_cache_is_allocated_outside_inference_mode(monkeypatch):
     with torch.no_grad():
         cache[:, 0].add_(1.0)
     assert policy._critic_cache_ready
+
+
+def test_n_envs_is_validated_and_absent_from_protocol():
+    baseline = RLConfig(task_ids=(0,)).validate()
+    batched = RLConfig(task_ids=(0,), n_envs=4).validate()
+    assert baseline.n_envs == 1
+    assert batched.n_envs == 4
+    assert batched.protocol() == baseline.protocol()
+    assert "n_envs" not in batched.protocol()
+    assert batched.to_dict()["n_envs"] == 4
+    for bad in (0, 9, 2.0, "2"):
+        with pytest.raises(ValueError, match="n_envs"):
+            RLConfig(task_ids=(0,), n_envs=bad).validate()

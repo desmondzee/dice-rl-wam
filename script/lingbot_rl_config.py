@@ -23,6 +23,7 @@ class RLConfig:
     rlpd_t_ratio: int = 320_000
     train_eval_every: int = 80_000
     train_eval_episodes_per_task: int = 10
+    n_envs: int = 1
 
     def __post_init__(self):
         object.__setattr__(self, "task_ids", tuple(int(task) for task in self.task_ids))
@@ -50,6 +51,8 @@ class RLConfig:
             raise ValueError("train_eval_episodes_per_task must be positive")
         if type(self.seed) is not int or not 0 <= self.seed < 2**32:
             raise ValueError("Invalid seed")
+        if type(self.n_envs) is not int or not 1 <= self.n_envs <= 8:
+            raise ValueError("n_envs must lie in [1, 8]")
         if not self.wandb_project:
             raise ValueError("W&B project is required")
         return self
