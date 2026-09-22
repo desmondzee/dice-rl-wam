@@ -75,7 +75,7 @@ class RLConfig:
             "suite": "libero_10",
             "task_ids": list(self.task_ids),
             "training_init_states": "procedural",
-            "truncation": "bootstrap",
+            "truncation": "terminal",
             "max_policy_steps": 520,
             "settling_steps": 10,
             "control_freq": 20,

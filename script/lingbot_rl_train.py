@@ -527,9 +527,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                             rewards[position] = 1.0
                             stat["saw_success"] = True
                             stat["success"] = 1.0
-                        if stat["saw_success"] or terminated:
+                        if stat["saw_success"] or terminated or truncated or stat["length"] >= 520:
                             dones[position] = 1.0
-                        if dones[position] or truncated or stat["length"] >= 520:
                             over[position] = True
                         if env_steps >= budget:
                             over[:] = [True] * len(live)

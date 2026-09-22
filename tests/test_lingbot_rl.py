@@ -69,7 +69,7 @@ def test_config_pins_released_libero_sampler_and_step_600():
     assert proto["task_ids"] == list(range(10))
     assert proto["rlpd_t_ratio"] == 320_000
     assert proto["training_init_states"] == "procedural"
-    assert proto["truncation"] == "bootstrap"
+    assert proto["truncation"] == "terminal"
     assert proto["comparison_episodes_per_task"] == 20
     assert proto["comparison_initial_state_offset"] == 1
     assert proto["comparison_seed"] == 42
@@ -1616,7 +1616,7 @@ def test_train_rejects_prepared_without_configured_task(tmp_path, monkeypatch):
                     max_env_steps=12, prepared_path=_prepared(tmp_path, tasks=(0, 1)))
 
 
-def test_truncated_episode_rows_are_not_terminal(tmp_path, monkeypatch):
+def test_truncated_episode_row_is_terminal(tmp_path, monkeypatch):
     import script.lingbot_rl_train as train
 
     logs = []
@@ -1628,7 +1628,7 @@ def test_truncated_episode_rows_are_not_terminal(tmp_path, monkeypatch):
     resume = torch.load(tmp_path / "resume" / "latest.pt", map_location="cpu", weights_only=False)
     rows = [row for row in resume["replay"]["data"] if float(row["is_expert"]) == 0.0]
     assert rows
-    assert all(float(row["done"]) == 0.0 for row in rows)
+    assert float(rows[-1]["done"]) == 1.0
     assert all(float(row["mc_return"]) == 0.0 for row in rows)
 
 
@@ -2034,7 +2034,7 @@ def test_two_envs_collect_in_lockstep_with_unique_seeds(tmp_path, monkeypatch):
     assert policy.dropped == []
     rows = _online_rows(tmp_path)
     assert [row["n_env_actions"] for row in rows] == [12, 12, 12, 12]
-    assert all(float(row["done"]) == 0.0 for row in rows)
+    assert all(float(row["done"]) == 1.0 for row in rows)
 
 
 def test_stream_that_ends_early_is_dropped_and_the_rest_continue(tmp_path, monkeypatch):

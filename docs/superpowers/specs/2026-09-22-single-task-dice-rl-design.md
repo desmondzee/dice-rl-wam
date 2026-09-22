@@ -125,7 +125,7 @@ Unchanged from v2 unless listed.
 | training inits | canonical state 0 (bug) | procedural (`init_states=False`) | §2.1; paper's Robomimic held-out regime |
 | `online_env_steps` | 100,000 | 660,000 | §2.2 |
 | `rlpd_t_ratio` | = `online_env_steps` | 320,000 | paper: decay spans the warm-start only (Transport/Square) |
-| truncation at 520 | terminal | `done=0`, bootstrap from the final observed state | paper silent; matters at 2,000 episodes |
+| truncation at 520 | terminal | terminal (kept) — a bootstrap variant was tried on 2026-09-22 and let the critic ratchet past the reward bound (`q_mean` 0.9 → 2.5 by 15k steps) through the self-loop at stuck tails; reverted | paper silent |
 | `train_eval_every` | 25,000 | 80,000 | matches checkpoint cadence |
 | `train_eval_episodes_per_task` | 1 on state 0 | 10 on procedural inits | §5.5 |
 | checkpoints | every train-eval point | every 80k, `residual.pt` + resume state | eval cadence, transport |
