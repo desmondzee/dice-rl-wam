@@ -1828,3 +1828,171 @@ def test_replay_trim_counts_open_rows_against_capacity():
     assert len(buf) == 4
     assert [float(row["s"][0]) for row in buf.rows()] == [2.0, 3.0, 10.0, 11.0]
     assert buf.state_dict()["episode_start"] == 2
+
+
+def test_expand_conditional_kv_repeats_each_conditional_row_k_times():
+    from types import SimpleNamespace
+
+    from script.lingbot_rl_policy import expand_conditional_kv
+
+    rows = torch.tensor([10.0, 20.0, 30.0, 40.0]).reshape(4, 1, 1, 1)
+    block = SimpleNamespace(attn1=SimpleNamespace(attn_caches={"pos": {"k": rows.clone(), "v": -rows}}))
+    expand_conditional_kv(SimpleNamespace(blocks=[block]), 2, 2)
+    cache = block.attn1.attn_caches["pos"]
+    torch.testing.assert_close(cache["k"].flatten(), torch.tensor([10.0, 10.0, 20.0, 20.0]))
+    torch.testing.assert_close(cache["v"].flatten(), torch.tensor([-10.0, -10.0, -20.0, -20.0]))
+
+
+def test_drop_stream_removes_its_rows_from_every_per_stream_state():
+    from types import SimpleNamespace
+
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    rows = torch.arange(4.0).reshape(4, 1, 1, 1)
+    block = SimpleNamespace(attn1=SimpleNamespace(attn_caches={"pos": {"k": rows.clone(), "v": rows.clone(), "mask": torch.ones(1)}}))
+    vae = SimpleNamespace(feat_cache=[torch.arange(4.0).reshape(4, 1, 1, 1, 1), None])
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy.config = SimpleNamespace(obs_cam_keys=["a", "b"])
+    policy.transformer = SimpleNamespace(blocks=[block])
+    policy._frozen = {"streaming_vae": vae}
+    policy._prompt_embeds = torch.tensor([[0.0], [1.0]])
+    policy._init_latent = torch.tensor([[0.0], [1.0]])
+    policy._executed_actions = torch.tensor([[0.0], [1.0]])
+    policy._obs_buffer = [{"a": torch.tensor([[0.0], [1.0]]), "b": torch.tensor([[0.0], [1.0]])}]
+    policy.drop_stream(0)
+    torch.testing.assert_close(block.attn1.attn_caches["pos"]["k"].flatten(), torch.tensor([1.0, 3.0]))
+    torch.testing.assert_close(vae.feat_cache[0].flatten(), torch.tensor([1.0, 3.0]))
+    assert vae.feat_cache[1] is None
+    for value in (policy._prompt_embeds, policy._init_latent, policy._executed_actions,
+                  policy._obs_buffer[0]["a"], policy._obs_buffer[0]["b"]):
+        torch.testing.assert_close(value, torch.tensor([[1.0]]))
+    torch.testing.assert_close(block.attn1.attn_caches["pos"]["mask"], torch.ones(1))
+
+
+def test_critic_cache_is_reallocated_per_batch_size(monkeypatch):
+    from types import SimpleNamespace
+
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    monkeypatch.setattr(ResidualLingBotPolicy, "_latent_hw", property(lambda self: (16, 32)))
+    sizes = []
+
+    class Transformer:
+        def create_empty_cache(self, name, window, latent_tokens, action_tokens, device, dtype, batch_size):
+            sizes.append(batch_size)
+
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy._critic_cache_ready = False
+    policy.config = SimpleNamespace(patch_size=(1, 2, 2), frame_chunk_size=4, action_per_frame=4, attn_window=30, device="cpu")
+    policy.dtype = torch.float32
+    policy.transformer = Transformer()
+    policy._ensure_critic_cache(2)
+    policy._ensure_critic_cache(2)
+    policy._ensure_critic_cache(1)
+    assert sizes == [2, 1]
+
+
+class _FakeStreamingVAE:
+    def __init__(self):
+        self.clear_cache()
+
+    def clear_cache(self):
+        self.feat_cache = [None]
+
+    def encode_chunk(self, x):
+        pooled = torch.nn.functional.avg_pool3d(x, (1, 16, 16))
+        frames = pooled.shape[2]
+        cached = self.feat_cache[0]
+        if cached is None:
+            latents = [pooled[:, :, :1]] + [pooled[:, :, i:i + 4].mean(2, keepdim=True) for i in range(1, frames, 4)]
+        else:
+            latents = [pooled[:, :, i:i + 4].mean(2, keepdim=True) + 0.5 * cached for i in range(0, frames, 4)]
+        self.feat_cache[0] = pooled[:, :, -1:].clone()
+        return torch.cat(latents, 2).repeat(1, 32, 1, 1, 1)
+
+
+def _tiny_policy():
+    from types import SimpleNamespace
+
+    from lerobot.configs.types import FeatureType, PolicyFeature
+    from lerobot.policies.lingbot_va.configuration_lingbot_va import LingBotVAConfig
+
+    from script.lingbot_eval_config import CAMERAS
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    torch.manual_seed(0)
+    config = LingBotVAConfig(
+        num_layers=1, num_attention_heads=2, attention_head_dim=12, text_dim=8, freq_dim=8, ffn_dim=16,
+        height=32, width=32, dtype="float32", device="cpu", num_inference_steps=2, action_num_inference_steps=2,
+        max_sequence_length=3, wan_pretrained_path="none",
+        input_features={key: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 32, 32)) for key in CAMERAS},
+        output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))},
+    )
+    policy = ResidualLingBotPolicy(config)
+    vae = torch.nn.Linear(1, 1)
+    vae.config = SimpleNamespace(latents_mean=[0.1] * 48, latents_std=[0.9] * 48)
+    policy._frozen = {"vae": vae, "streaming_vae": _FakeStreamingVAE(), "text_encoder": None, "tokenizer": None}
+    embeds = torch.nn.Embedding(4, 8)
+    policy._get_t5_prompt_embeds = lambda prompt, length: torch.stack(
+        [embeds.weight[len(p) % 4].repeat(length, 1) for p in ([prompt] if isinstance(prompt, str) else prompt)]).detach()
+    return policy
+
+
+def _tiny_obs(seed, n=1):
+    from script.lingbot_eval_config import CAMERAS
+
+    generator = torch.Generator().manual_seed(seed)
+    batch = {"task": ["tiny-task"] * n}
+    for key in CAMERAS:
+        batch[key] = torch.rand(n, 3, 32, 32, generator=generator)
+    return batch
+
+
+def test_batched_decode_matches_independent_single_streams(monkeypatch):
+    from script.lingbot_eval_config import CAMERAS
+
+    monkeypatch.setattr("script.lingbot_rl_policy.pool_critic_state", lambda video, text: torch.cat([video, text], 1).mean(1))
+    k = 2
+    chunks = 3
+    steps = [12, 16]
+    generator = torch.Generator().manual_seed(3)
+    video = [torch.randn(2, 48, 4, 2, 4, generator=generator) for _ in range(chunks)]
+    action = [torch.randn(2 * k, 30, 4, 4, 1, generator=generator) for _ in range(chunks)]
+    frames = {(stream, step): _tiny_obs(100 * stream + step) for stream in range(2) for step in range(sum(steps) + 1)}
+
+    def stack(step, streams):
+        rows = [frames[(stream, step)] for stream in streams]
+        return {"task": ["tiny-task"] * len(rows), **{key: torch.cat([row[key] for row in rows]) for key in CAMERAS}}
+
+    def run(policy, streams):
+        policy.reset()
+        outputs = []
+        step = 0
+        for chunk in range(chunks):
+            rows = [stream for stream in streams]
+            decoded = policy.decode_candidates(
+                stack(step, rows), k=k, video_noise=video[chunk][rows], action_noise=action[chunk][[s * k + j for s in rows for j in range(k)]])
+            outputs.append(decoded)
+            if chunk == len(steps):
+                break
+            policy.commit_executed(decoded["a_base"][0::k], first_chunk=decoded["first_chunk"])
+            for _ in range(steps[chunk]):
+                step += 1
+                policy.observe_env_step(stack(step, rows))
+            if chunk == 1 and len(streams) == 2:
+                policy.drop_stream(0)
+                streams.pop(0)
+        return outputs
+
+    policy = _tiny_policy()
+    singles = [run(policy, [stream]) for stream in range(2)]
+    batched = run(policy, [0, 1])
+    for chunk in range(chunks):
+        expected = singles if chunk < 2 else singles[1:]
+        assert batched[chunk]["s"].shape[0] == len(expected)
+        assert batched[chunk]["a_base"].shape[0] == len(expected) * k
+        for row, single in enumerate(expected):
+            for key in ("s",):
+                torch.testing.assert_close(batched[chunk][key][row:row + 1], single[chunk][key], atol=1e-4, rtol=1e-4)
+            for key in ("z", "a_base"):
+                torch.testing.assert_close(batched[chunk][key][row * k:(row + 1) * k], single[chunk][key], atol=1e-4, rtol=1e-4)

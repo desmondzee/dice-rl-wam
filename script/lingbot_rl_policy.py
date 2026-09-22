@@ -86,19 +86,22 @@ def reraise_action_batch_failure(exc):
     raise RuntimeError("action candidate batching failed") from exc
 
 
-def expand_conditional_kv(transformer, k):
-    """Repeat video-CFG batch index 0 to K. Never expand the uncond row (that would be batch 8)."""
+def expand_conditional_kv(transformer, k, n=1):
     for block in transformer.blocks:
         cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
-        if cache is None or "k" not in cache or cache["k"].shape[0] < 1:
+        if cache is None or "k" not in cache or cache["k"].shape[0] < n:
             raise RuntimeError("action candidate batching failed")
         for key in ("k", "v"):
-            cond = cache[key][:1]
-            cache[key] = cond.repeat(k, *([1] * (cond.ndim - 1)))
+            cache[key] = cache[key][:n].repeat_interleave(k, dim=0)
 
 
 def _clone_cache(cache):
-    return {key: value.clone() if torch.is_tensor(value) else value for key, value in cache.items()}
+    return {key: value.clone() if torch.is_tensor(value) and key not in ("k", "v") else value
+            for key, value in cache.items()}
+
+
+def _without_stream(tensor, n, index):
+    return tensor[[row for row in range(tensor.shape[0]) if row % n != index]]
 
 
 class ResidualLingBotPolicy(LingBotVAPolicy):
@@ -106,7 +109,6 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         super().__init__(config)
         self._text_cache = {}
         self.residual_model = None
-        self._last_real_latent = None
         self._critic_cache_ready = False
         self.eval_candidates = 4
 
@@ -117,9 +119,69 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         return self._text_cache[key].clone()
 
     def _encode_frames(self, raw_frames):
-        latent = super()._encode_frames(raw_frames)
-        self._last_real_latent = latent
-        return latent
+        keys = self.config.obs_cam_keys
+        videos = torch.cat([
+            torch.cat([self._camera_frame(frame, key) for frame in raw_frames], dim=2) for key in keys
+        ], dim=0)
+        vae_device = next(self._vae.parameters()).device
+        mu_norm = self._normalize_vae_latent(self._streaming_vae.encode_chunk(videos.to(vae_device).to(self.dtype)))
+        return torch.cat(mu_norm.split(mu_norm.shape[0] // len(keys), dim=0), dim=-1).to(self.config.device)
+
+    def _maybe_init_prompt(self, batch):
+        if self._prompt_embeds is not None or batch is None:
+            return
+        task = batch.get("task")
+        self._prompt = list(task) if isinstance(task, (list, tuple)) else [task or ""]
+        self._prompt_embeds, self._negative_prompt_embeds = self._encode_prompt(self._prompt)
+
+    def _repeat_input_for_cfg(self, input_dict):
+        rows = input_dict["noisy_latents"].shape[0]
+        if self._use_cfg:
+            input_dict["noisy_latents"] = input_dict["noisy_latents"].repeat(2, 1, 1, 1, 1)
+            input_dict["text_emb"] = torch.cat([
+                self._prompt_embeds, self._negative_prompt_embeds.expand(rows, -1, -1),
+            ]).to(self.dtype).clone()
+            rows *= 2
+        input_dict["grid_id"] = input_dict["grid_id"][None].repeat(rows, 1, 1)
+        input_dict["timesteps"] = input_dict["timesteps"][None].repeat(rows, 1)
+        return input_dict
+
+    def _create_cache(self, name, batch_size):
+        cfg = self.config
+        latent_h, latent_w = self._latent_hw
+        patch = cfg.patch_size
+        latent_token_per_chunk = (cfg.frame_chunk_size * latent_h * latent_w) // (patch[0] * patch[1] * patch[2])
+        action_token_per_chunk = cfg.frame_chunk_size * cfg.action_per_frame
+        with torch.inference_mode(False):
+            self.transformer.create_empty_cache(
+                name, cfg.attn_window, latent_token_per_chunk, action_token_per_chunk,
+                device=self.config.device, dtype=self.dtype, batch_size=batch_size,
+            )
+
+    def _init_streaming_cache(self, init_latent):
+        self._create_cache("pos", init_latent.shape[0] * (2 if self._use_cfg else 1))
+
+    def drop_stream(self, index):
+        n = self._prompt_embeds.shape[0]
+        self._prompt_embeds = _without_stream(self._prompt_embeds, n, index)
+        if getattr(self, "_init_latent", None) is not None:
+            self._init_latent = _without_stream(self._init_latent, n, index)
+        if self._executed_actions is not None:
+            self._executed_actions = _without_stream(self._executed_actions, n, index)
+        self._obs_buffer = [
+            {key: _without_stream(value, n, index) for key, value in obs.items()} for obs in self._obs_buffer
+        ]
+        for block in self.transformer.blocks:
+            cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
+            if cache is not None:
+                for key in ("k", "v"):
+                    cache[key] = _without_stream(cache[key], n, index)
+        for key in ("streaming_vae", "streaming_vae_half"):
+            vae = (self._frozen or {}).get(key)
+            if vae is not None:
+                vae.feat_cache = [
+                    _without_stream(item, n, index) if torch.is_tensor(item) else item for item in vae.feat_cache
+                ]
 
     def commit_executed(self, mlp_chunk, first_chunk=False):
         chunk = mask_unused_dof(mlp_chunk)
@@ -134,25 +196,11 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._prev_j = self._exec_step % self.config.action_per_frame
         self._exec_step += 1
 
-    def _ensure_critic_cache(self):
-        if self._critic_cache_ready:
+    def _ensure_critic_cache(self, batch_size=1):
+        if self._critic_cache_ready == batch_size:
             return
-        cfg = self.config
-        latent_h, latent_w = self._latent_hw
-        patch = cfg.patch_size
-        latent_token_per_chunk = (cfg.frame_chunk_size * latent_h * latent_w) // (patch[0] * patch[1] * patch[2])
-        action_token_per_chunk = cfg.frame_chunk_size * cfg.action_per_frame
-        with torch.inference_mode(False):
-            self.transformer.create_empty_cache(
-                "critic",
-                cfg.attn_window,
-                latent_token_per_chunk,
-                action_token_per_chunk,
-                device=self.config.device,
-                dtype=self.dtype,
-                batch_size=1,
-            )
-        self._critic_cache_ready = True
+        self._create_cache("critic", batch_size)
+        self._critic_cache_ready = batch_size
 
     @torch.no_grad()
     def extract_critic_state(self, batch):
@@ -175,7 +223,8 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
 
     @torch.no_grad()
     def _pool_from_latent(self, latent):
-        self._ensure_critic_cache()
+        rows = latent.shape[0]
+        self._ensure_critic_cache(rows)
         captured = []
 
         def hook(module, inputs, output):
@@ -184,8 +233,8 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         handle = self.transformer.proj_out.register_forward_hook(hook)
         try:
             payload = self._prepare_latent_input(latent, None, 0, 0, None, None, frame_st_id=0)["latent_res_lst"]
-            payload["grid_id"] = payload["grid_id"][None]
-            payload["timesteps"] = payload["timesteps"][None]
+            payload["grid_id"] = payload["grid_id"][None].repeat(rows, 1, 1)
+            payload["timesteps"] = payload["timesteps"][None].repeat(rows, 1)
             self.transformer(payload, update_cache=0, cache_name="critic", action_mode=False)
             if not captured:
                 raise RuntimeError("Failed to capture pre-proj_out video tokens")
@@ -208,7 +257,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
 
     def _restore_kv(self, snaps):
         for block, snap in zip(self.transformer.blocks, snaps):
-            block.attn1.attn_caches["pos"] = _clone_cache(snap)
+            block.attn1.attn_caches["pos"] = snap
 
     def _start_raw_obs(self, batch):
         """Live batch on collection; `select_action` later chunks pass `None` and use the last keyframe."""
@@ -299,18 +348,19 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         device = self.config.device
         latent_h, latent_w = self._latent_hw
         frame_chunk_size = cfg.frame_chunk_size
+        n = self._prompt_embeds.shape[0]
         latents = (
             video_noise if video_noise is not None else torch.randn(
-                1, 48, frame_chunk_size, latent_h, latent_w, device=device, dtype=self.dtype
+                n, 48, frame_chunk_size, latent_h, latent_w, device=device, dtype=self.dtype
             )
         ).clone()
         if action_noise is None:
             actions = torch.randn(
-                k, cfg.action_dim, frame_chunk_size, cfg.action_per_frame, 1, device=device, dtype=self.dtype
+                n * k, cfg.action_dim, frame_chunk_size, cfg.action_per_frame, 1, device=device, dtype=self.dtype
             )
         else:
             actions = action_noise.to(device=device, dtype=self.dtype).clone()
-            k = actions.shape[0]
+            k = actions.shape[0] // n
         video_used = latents.clone()
         z_used = actions.clone()
 
@@ -344,63 +394,26 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
                     frame_chunk_size,
                     latent_h,
                     latent_w,
-                    batch_size=2 if self._use_cfg else 1,
+                    batch_size=2 * n if self._use_cfg else n,
                 )
                 if cfg.guidance_scale > 1:
-                    video_noise_pred = video_noise_pred[1:] + cfg.guidance_scale * (
-                        video_noise_pred[:1] - video_noise_pred[1:]
+                    video_noise_pred = video_noise_pred[n:] + cfg.guidance_scale * (
+                        video_noise_pred[:n] - video_noise_pred[n:]
                     )
                 else:
-                    video_noise_pred = video_noise_pred[:1]
+                    video_noise_pred = video_noise_pred[:n]
                 latents = self._scheduler.step(video_noise_pred, t, latents, return_dict=False)
             if frame_st_id == 0 and latent_cond is not None:
                 latents[:, :, 0:1] = latent_cond
 
-        if k == 1:
-            for i, t in enumerate(action_timesteps):
-                last_step = i == len(action_timesteps) - 1
-                action_cond = (
-                    torch.zeros(
-                        [1, cfg.action_dim, 1, cfg.action_per_frame, 1], device=device, dtype=self.dtype
-                    )
-                    if frame_st_id == 0
-                    else None
-                )
-                input_dict = self._prepare_latent_input(
-                    None, actions[:1], t, t, None, action_cond, frame_st_id=frame_st_id
-                )
-                action_noise_pred = self.transformer(
-                    self._repeat_input_for_cfg(input_dict["action_res_lst"]),
-                    update_cache=1 if last_step else 0,
-                    cache_name="pos",
-                    action_mode=True,
-                )
-                if not last_step:
-                    action_noise_pred = rearrange(
-                        action_noise_pred, "b (f n) c -> b c f n 1", f=frame_chunk_size
-                    )
-                    if cfg.action_guidance_scale > 1:
-                        action_noise_pred = action_noise_pred[1:] + cfg.action_guidance_scale * (
-                            action_noise_pred[:1] - action_noise_pred[1:]
-                        )
-                    else:
-                        action_noise_pred = action_noise_pred[:1]
-                    actions = self._action_scheduler.step(
-                        action_noise_pred, t, actions[:1], return_dict=False
-                    )
-                if frame_st_id == 0 and action_cond is not None:
-                    actions[:, :, 0:1] = action_cond
-            actions[:, ~self._action_mask] *= 0
-            return actions, latents, z_used[:1], video_used
-
         post_video = self._snapshot_kv()
         try:
-            expand_conditional_kv(self.transformer, k)
+            expand_conditional_kv(self.transformer, k, n)
             for i, t in enumerate(action_timesteps):
                 last_step = i == len(action_timesteps) - 1
                 action_cond = (
                     torch.zeros(
-                        [k, cfg.action_dim, 1, cfg.action_per_frame, 1], device=device, dtype=self.dtype
+                        [n * k, cfg.action_dim, 1, cfg.action_per_frame, 1], device=device, dtype=self.dtype
                     )
                     if frame_st_id == 0
                     else None
@@ -409,9 +422,9 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
                     None, actions, t, t, None, action_cond, frame_st_id=frame_st_id
                 )
                 payload = input_dict["action_res_lst"]
-                payload["text_emb"] = self._prompt_embeds.to(self.dtype).expand(k, -1, -1).clone()
-                payload["grid_id"] = payload["grid_id"][None].repeat(k, 1, 1)
-                payload["timesteps"] = payload["timesteps"][None].repeat(k, 1)
+                payload["text_emb"] = self._prompt_embeds.to(self.dtype).repeat_interleave(k, dim=0).clone()
+                payload["grid_id"] = payload["grid_id"][None].repeat(n * k, 1, 1)
+                payload["timesteps"] = payload["timesteps"][None].repeat(n * k, 1)
                 action_noise_pred = self.transformer(
                     payload, update_cache=1 if last_step else 0, cache_name="pos", action_mode=True
                 )
