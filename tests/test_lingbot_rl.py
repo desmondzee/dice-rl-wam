@@ -35,7 +35,9 @@ def test_config_pins_released_libero_sampler_and_step_600():
     assert cfg.source_run == "libero30-sft"
     assert cfg.wandb_project == "dice-lingbot-va-rl"
     assert cfg.k_candidates == 4
-    assert cfg.online_env_steps == 100_000
+    assert cfg.online_env_steps == 660_000
+    assert cfg.task_ids == tuple(range(10))
+    assert cfg.rlpd_t_ratio == 320_000
     assert proto["snr_shift"] == 5.0
     assert proto["action_snr_shift"] == 0.05
     assert proto["dtype"] == "bfloat16"
@@ -62,14 +64,18 @@ def test_config_pins_released_libero_sampler_and_step_600():
     assert proto["rlpd_start"] == 0.5
     assert proto["rlpd_end"] == 0.1
     assert proto["replay_capacity"] == 100_000
-    assert proto["train_eval_every"] == 25_000
-    assert proto["train_eval_episodes_per_task"] == 1
+    assert proto["train_eval_every"] == 80_000
+    assert proto["train_eval_episodes_per_task"] == 10
+    assert proto["task_ids"] == list(range(10))
+    assert proto["rlpd_t_ratio"] == 320_000
+    assert proto["training_init_states"] == "procedural"
+    assert proto["truncation"] == "bootstrap"
     assert proto["comparison_episodes_per_task"] == 20
     assert proto["comparison_initial_state_offset"] == 1
     assert proto["comparison_seed"] == 42
     assert proto["checkpoint_step"] == 600
     assert proto["source_run"] == "libero30-sft"
-    assert proto["version"] == 2
+    assert proto["version"] == 3
     assert proto["multi_sample_candidates"] == 4
     assert proto["bc_filter_anchor"] == "mc_return"
     assert proto["utd_sampling"] == "fresh_minibatch_per_step"
@@ -84,20 +90,35 @@ def test_config_pins_released_libero_sampler_and_step_600():
     {"checkpoint_step": 400},
     {"source_run": "other-run"},
     {"k_candidates": 16},
-    {"train_eval_every": 5_000},
-    {"train_eval_episodes_per_task": 20},
+    {"train_eval_every": 0},
+    {"train_eval_every": 700_000},
+    {"train_eval_episodes_per_task": 0},
+    {"online_env_steps": 0},
+    {"rlpd_t_ratio": 0},
+    {"rlpd_t_ratio": 700_000},
+    {"task_ids": ()},
+    {"task_ids": (10,)},
+    {"task_ids": (0, 0)},
 ])
 def test_config_rejects_sampler_and_recipe_drift(changes):
     with pytest.raises(ValueError):
         replace(RLConfig(), **changes).validate()
 
 
-def test_rlpd_ratio_anneals_over_env_steps():
+def test_rlpd_ratio_anneals_over_t_ratio_then_holds():
     cfg = RLConfig().validate()
     assert cfg.rlpd_expert_ratio(0) == pytest.approx(0.5)
-    assert cfg.rlpd_expert_ratio(50_000) == pytest.approx(0.3)
-    assert cfg.rlpd_expert_ratio(100_000) == pytest.approx(0.1)
-    assert cfg.rlpd_expert_ratio(120_000) == pytest.approx(0.1)
+    assert cfg.rlpd_expert_ratio(160_000) == pytest.approx(0.3)
+    assert cfg.rlpd_expert_ratio(320_000) == pytest.approx(0.1)
+    assert cfg.rlpd_expert_ratio(660_000) == pytest.approx(0.1)
+
+
+def test_config_single_task_from_json_list_and_run_name():
+    cfg = RLConfig(task_ids=[4]).validate()
+    assert cfg.task_ids == (4,)
+    assert cfg.default_run_name == "libero30-sft-dice-task4"
+    assert RLConfig().default_run_name == "libero30-sft-dice-baseline"
+    assert RLConfig(**{k: v for k, v in cfg.to_dict().items() if k != "protocol"}).validate().task_ids == (4,)
 
 
 def test_model_hyperparameters_match_baseline_protocol():

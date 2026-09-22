@@ -18,9 +18,14 @@ class RLConfig:
     action_steps: int = 50
     video_exec_step: int = -1
     k_candidates: int = 4
-    online_env_steps: int = 100_000
-    train_eval_every: int = 25_000
-    train_eval_episodes_per_task: int = 1
+    task_ids: tuple = tuple(TASK_IDS)
+    online_env_steps: int = 660_000
+    rlpd_t_ratio: int = 320_000
+    train_eval_every: int = 80_000
+    train_eval_episodes_per_task: int = 10
+
+    def __post_init__(self):
+        object.__setattr__(self, "task_ids", tuple(int(task) for task in self.task_ids))
 
     def validate(self):
         validate_name(self.source_run)
@@ -32,10 +37,17 @@ class RLConfig:
             raise ValueError("RL must use the released 20/50 full-video sampler")
         if self.k_candidates != 4:
             raise ValueError("Collection K is pinned to 4")
-        if self.online_env_steps != 100_000:
-            raise ValueError("Online budget is 100,000 env action steps")
-        if self.train_eval_every != 25_000 or self.train_eval_episodes_per_task != 1:
-            raise ValueError("Train-time eval is 1 rollout/task every 25,000 env steps")
+        if not self.task_ids or len(set(self.task_ids)) != len(self.task_ids) \
+                or any(task not in TASK_IDS for task in self.task_ids):
+            raise ValueError("task_ids must be distinct LIBERO-10 task ids")
+        if type(self.online_env_steps) is not int or self.online_env_steps < 1:
+            raise ValueError("online_env_steps must be a positive integer")
+        if type(self.rlpd_t_ratio) is not int or not 1 <= self.rlpd_t_ratio <= self.online_env_steps:
+            raise ValueError("rlpd_t_ratio must lie in [1, online_env_steps]")
+        if type(self.train_eval_every) is not int or not 1 <= self.train_eval_every <= self.online_env_steps:
+            raise ValueError("train_eval_every must lie in [1, online_env_steps]")
+        if type(self.train_eval_episodes_per_task) is not int or self.train_eval_episodes_per_task < 1:
+            raise ValueError("train_eval_episodes_per_task must be positive")
         if type(self.seed) is not int or not 0 <= self.seed < 2**32:
             raise ValueError("Invalid seed")
         if not self.wandb_project:
@@ -44,19 +56,22 @@ class RLConfig:
 
     @property
     def default_run_name(self):
+        if len(self.task_ids) == 1:
+            return f"{self.source_run}-dice-task{self.task_ids[0]}"
         return f"{self.source_run}-dice-baseline"
 
     def rlpd_expert_ratio(self, env_steps):
-        span = self.online_env_steps
-        t = min(max(env_steps, 0), span) / span
+        t = min(max(env_steps, 0), self.rlpd_t_ratio) / self.rlpd_t_ratio
         return 0.5 + (0.1 - 0.5) * t
 
     def protocol(self):
         self.validate()
         return {
-            "version": 2,
+            "version": 3,
             "suite": "libero_10",
-            "task_ids": list(TASK_IDS),
+            "task_ids": list(self.task_ids),
+            "training_init_states": "procedural",
+            "truncation": "bootstrap",
             "max_policy_steps": 520,
             "settling_steps": 10,
             "control_freq": 20,
@@ -105,6 +120,7 @@ class RLConfig:
             "batch_size": 256,
             "rlpd_start": 0.5,
             "rlpd_end": 0.1,
+            "rlpd_t_ratio": self.rlpd_t_ratio,
             "replay_capacity": 100_000,
             "train_eval_every": self.train_eval_every,
             "train_eval_episodes_per_task": self.train_eval_episodes_per_task,
