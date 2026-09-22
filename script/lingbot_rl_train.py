@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -31,11 +32,11 @@ def _env_class():
     return LiberoEnv
 
 
-def make_env(task_id, suite=None):
+def make_env(task_id, suite=None, init_states=True):
     return _env_class()(
         task_suite=suite, task_id=task_id, task_suite_name="libero_10",
         episode_length=520, observation_height=128, observation_width=128, obs_type="pixels",
-        init_states=True, n_envs=1, num_steps_wait=10, control_freq=20, control_mode="relative",
+        init_states=init_states, n_envs=1, num_steps_wait=10, control_freq=20, control_mode="relative",
         hard_reset=True,
     )
 
@@ -59,7 +60,19 @@ def recipe_of(config):
 def train_eval_schedule(budget, every):
     if every < 1:
         raise ValueError("train_eval_every must be positive")
-    return list(range(0, budget + 1, every))
+    points = set(range(0, budget + 1, every))
+    points.add(int(budget))
+    return sorted(points)
+
+
+def train_eval_plan(task_id, episodes, seed=42):
+    plan = []
+    for index in range(int(episodes)):
+        identity = ["libero_10_procedural", int(seed), int(task_id), index]
+        digest = hashlib.sha256(json.dumps(identity).encode()).digest()[:4]
+        plan.append({"task_id": int(task_id), "episode_index": index, "init_state_id": index,
+                     "seed": int.from_bytes(digest, "big")})
+    return plan
 
 
 def due_train_evals(env_steps, schedule, evaluated):
@@ -242,26 +255,29 @@ def _update_from_buffer(model, buffer, expert_ratio, device):
     return critic_info, actor_info
 
 
-def _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir):
+def _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir, episodes):
     from script.lingbot_eval import run_episode
 
-    eval_cfg = EvalConfig(stage="smoke", seed=42)
     rows = []
     for task in tasks:
-        plan = episode_plan(eval_cfg, task["task_id"], task.get("initial_state_count", 50))
-        env = make_env(task["task_id"], suite)
+        env = make_env(task["task_id"], suite, init_states=False)
         try:
-            row = run_episode(policy, env, plan[0], task["instruction"], norm, device)
+            for entry in train_eval_plan(task["task_id"], episodes):
+                row = run_episode(policy, env, entry, task["instruction"], norm, device)
+                rows.append(row)
+                _write_json(
+                    Path(output_dir) / "train_eval" / f"step_{env_steps:06d}" / f"task_{task['task_id']:02d}"
+                    / f"episode_{entry['episode_index']:03d}.json",
+                    row,
+                )
         finally:
             env.close()
-        rows.append(row)
-        _write_json(
-            Path(output_dir) / "train_eval" / f"step_{env_steps:06d}" / f"task_{task['task_id']:02d}.json",
-            row,
-        )
-    successes = {str(row["task_id"]): bool(row["success"]) for row in rows}
-    return {"env_steps": env_steps, "per_task_success": successes,
-            "macro_success_rate": float(np.mean([row["success"] for row in rows]))}
+    per_task = {}
+    for task in tasks:
+        task_rows = [row for row in rows if int(row["task_id"]) == task["task_id"]]
+        per_task[str(task["task_id"])] = float(np.mean([bool(row["success"]) for row in task_rows]))
+    return {"env_steps": env_steps, "per_task_success": per_task,
+            "macro_success_rate": float(np.mean([bool(row["success"]) for row in rows]))}
 
 
 def _maybe_sharpen(model, policy, batch, device):
@@ -315,24 +331,28 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     policy.residual_model = model
     policy.eval_candidates = config.k_candidates
     buffer = ChunkReplay()
-    tasks = prepared["tasks"]
+    tasks = [task for task in prepared["tasks"] if task["task_id"] in config.task_ids]
     if prepared.get("checkpoint") and not resume:
         cache_path = output_dir / "expert_features.pt"
         if dataset_root:
-            task_to_id = {task["instruction"]: task["task_id"] for task in tasks}
+            task_to_id = {task["instruction"]: task["task_id"] for task in prepared["tasks"]}
             episodes = load_manifest_episodes(
                 dataset_root, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"),
-                task_to_id, norm)
+                task_to_id, norm, task_ids=config.task_ids)
             _ingest_experts(buffer, featurize_experts(
-                policy, episodes, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm, cache_path))
+                policy, episodes, read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm,
+                cache_path, task_ids=config.task_ids))
         elif cache_path.is_file():
             _ingest_experts(buffer, featurize_experts(
-                policy, [], read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm, cache_path))
+                policy, [], read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json"), norm,
+                cache_path, task_ids=config.task_ids))
     suite = None
     if prepared.get("assets_path"):
         from script.lingbot_eval import describe_suite
         suite, suite_tasks = describe_suite(prepared["assets_path"])
-        tasks = suite_tasks
+        tasks = [task for task in suite_tasks if task["task_id"] in config.task_ids]
+    if not tasks:
+        raise ValueError("Prepared tasks do not cover the configured task_ids")
     env_steps = 0
     chunks = 0
     evaluated = set()
@@ -342,7 +362,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         env_steps, chunks, evaluated, wandb_id = load_resume(resume_path, model, buffer, recipe)
     if max_env_steps is None and env_steps == 0:
         if not any(float(row["is_expert"]) == 1.0 for row in buffer.rows()):
-            raise RuntimeError("Expert features missing; RLPD requires the 300 SFT demos")
+            raise RuntimeError("Expert features missing; RLPD requires the SFT demos for task_ids")
     _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe})
     wandb_kwargs = {
         "project": config.wandb_project,
@@ -370,14 +390,15 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         due = due_train_evals(env_steps, eval_schedule, evaluated)
         if due:
             evaluated.update(due)
-            summary = _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir)
+            summary = _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir,
+                                  config.train_eval_episodes_per_task)
             logged = {f"train_eval/{key}": value for key, value in summary.items() if key != "per_task_success"}
             logged["env_steps"] = env_steps
             run.log(logged)
             for task_id, success in summary["per_task_success"].items():
                 run.log({f"train_eval/task_{task_id}_success": float(success), "env_steps": env_steps})
             task = tasks[0]
-            env = make_env(task["task_id"], suite)
+            env = make_env(task["task_id"], suite, init_states=False)
             try:
                 observation, _ = env.reset(seed=0)
                 policy.reset()
@@ -398,9 +419,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     episode_success = 0.0
     episode_length = 0
     while env_steps < budget:
-        task_id = int(np.random.randint(0, 10))
-        task = next(item for item in tasks if item["task_id"] == task_id)
-        env = make_env(task_id, suite)
+        task = tasks[int(np.random.randint(len(tasks)))]
+        task_id = task["task_id"]
+        env = make_env(task_id, suite, init_states=False)
         policy.reset()
         observation, _ = env.reset(seed=config.seed + env_steps)
         episode_return = 0.0
@@ -428,6 +449,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 n_env = env_actions.shape[1]
                 chunk_reward = 0.0
                 done = 0.0
+                episode_over = False
                 executed_n = 0
                 for index in range(n_env):
                     action = decode_action(env_actions[:, index, :].reshape(1, 7), norm)
@@ -440,8 +462,10 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         chunk_reward = 1.0
                         saw_success = True
                         episode_success = 1.0
-                    if saw_success or terminated or truncated or episode_length >= 520 or env_steps >= budget:
+                    if saw_success or terminated:
                         done = 1.0
+                    if done or truncated or episode_length >= 520 or env_steps >= budget:
+                        episode_over = True
                         break
                 episode_return += chunk_reward
                 s_cpu = _host_array(state)[0]
@@ -473,7 +497,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         "episode_success": episode_success, "episode_length": episode_length,
                     }
                     run.log(log)
-                if done:
+                if episode_over:
                     break
             buffer.finalize_episode()
         finally:

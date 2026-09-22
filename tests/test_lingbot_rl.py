@@ -635,7 +635,9 @@ def test_train_eval_fires_after_crossing_chunk_stride():
     assert due_train_evals(25_012, schedule, evaluated) == [25_000]
     evaluated.update([25_000])
     assert due_train_evals(50_016, schedule, evaluated) == [50_000]
-    assert train_eval_schedule(12, 25_000) == [0]
+    assert train_eval_schedule(12, 25_000) == [0, 12]
+    assert train_eval_schedule(660_000, 80_000)[-3:] == [560_000, 640_000, 660_000]
+    assert train_eval_schedule(640_000, 80_000)[-2:] == [560_000, 640_000]
 
 
 def test_host_array_converts_bfloat16():
@@ -1429,3 +1431,193 @@ def test_featurize_experts_cache_keyed_by_task_ids(tmp_path):
     assert np.array_equal(cached[0]["a"], rows[0]["a"])
     assert float(cached[0]["done"]) == 1.0
     assert featurize_experts(Policy(), [], {"fingerprint": "abc"}, norm, cache, task_ids=(0,)) == []
+
+
+def _stub_policy(success_state=None):
+    class StubPolicy:
+        def reset(self):
+            self._executed_actions = None
+
+        def extract_critic_state(self, batch):
+            return torch.zeros(1, STATE_DIM)
+
+        def decode_candidates(self, batch, k=4, **kwargs):
+            return {
+                "s": torch.zeros(1, STATE_DIM),
+                "z": torch.zeros(k, HORIZON, ACTION_DIM),
+                "a_base": torch.zeros(k, HORIZON, ACTION_DIM),
+                "video_noise": torch.zeros(1),
+                "first_chunk": True,
+            }
+
+        def commit_executed(self, chunk, first_chunk=False):
+            self._executed_actions = chunk
+
+        def select_action(self, batch):
+            return torch.zeros(1, 7)
+
+        def observe_env_step(self, batch):
+            return None
+
+    return StubPolicy()
+
+
+class _StubEnv:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.steps = 0
+        self.init_state_id = 0
+        self.seeds = []
+        _StubEnv.instances.append(self)
+
+    def _frame(self, seed):
+        frame = np.full((128, 128, 3), ((seed or 0) * 7) % 251, np.uint8)
+        return {"pixels": {"image": frame, "image2": frame}}
+
+    def reset(self, seed=None):
+        self.steps = 0
+        self.seeds.append(seed)
+        return self._frame(seed), {}
+
+    def step(self, action):
+        self.steps += 1
+        return self._frame(self.seeds[-1]), 0.0, False, self.steps >= 12, {"is_success": False}
+
+    def close(self):
+        return None
+
+
+def _fake_wandb(monkeypatch, logs):
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wandb",
+        type("W", (), {
+            "init": staticmethod(lambda **k: type("R", (), {
+                "id": "unit-run", "log": logs.append, "summary": {}, "finish": lambda **k: None,
+            })()),
+            "finish": staticmethod(lambda **k: None),
+        })(),
+    )
+
+
+def _prepared(tmp_path, tasks=range(10)):
+    prepared = {
+        "tasks": [{"task_id": task, "instruction": f"task-{task}", "initial_state_count": 50} for task in tasks],
+        "normalization": {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23},
+        "checkpoint": None, "model_path": None, "architecture": {}, "assets_path": None,
+        "source_run": "libero30-sft", "checkpoint_step": 600,
+    }
+    path = tmp_path / "prepared.json"
+    path.write_text(__import__("json").dumps(prepared))
+    return path
+
+
+def test_make_env_passes_init_states_flag(monkeypatch):
+    import script.lingbot_rl_train as train
+
+    _StubEnv.instances.clear()
+    monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+    train.make_env(3, None)
+    train.make_env(3, None, init_states=False)
+    assert _StubEnv.instances[0].kwargs["init_states"] is True
+    assert _StubEnv.instances[1].kwargs["init_states"] is False
+    assert _StubEnv.instances[1].kwargs["hard_reset"] is True
+    assert _StubEnv.instances[1].kwargs["task_id"] == 3
+
+
+def test_train_eval_plan_is_fixed_across_calls_and_distinct_per_episode():
+    from script.lingbot_rl_train import train_eval_plan
+
+    plan = train_eval_plan(4, 10)
+    assert [entry["episode_index"] for entry in plan] == list(range(10))
+    assert all(entry["task_id"] == 4 for entry in plan)
+    assert len({entry["seed"] for entry in plan}) == 10
+    assert plan == train_eval_plan(4, 10)
+    assert plan[0]["seed"] != train_eval_plan(0, 1)[0]["seed"]
+
+
+def test_train_single_task_uses_procedural_envs_and_only_that_task(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+
+    _StubEnv.instances.clear()
+    logs = []
+    _fake_wandb(monkeypatch, logs)
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _stub_policy())
+    monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+    config = RLConfig(task_ids=(4,))
+    train.train(config=config, output_dir=tmp_path, run_name="unit", max_env_steps=24,
+                prepared_path=_prepared(tmp_path))
+    assert _StubEnv.instances
+    assert {env.kwargs["task_id"] for env in _StubEnv.instances} == {4}
+    assert all(env.kwargs["init_states"] is False for env in _StubEnv.instances)
+    assert len({seed for env in _StubEnv.instances for seed in env.seeds}) == len(_StubEnv.instances)
+
+
+def test_train_rejects_prepared_without_configured_task(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+
+    logs = []
+    _fake_wandb(monkeypatch, logs)
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _stub_policy())
+    monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+    with pytest.raises(ValueError, match="task_ids"):
+        train.train(config=RLConfig(task_ids=(4,)), output_dir=tmp_path, run_name="unit",
+                    max_env_steps=12, prepared_path=_prepared(tmp_path, tasks=(0, 1)))
+
+
+def test_truncated_episode_rows_are_not_terminal(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+
+    logs = []
+    _fake_wandb(monkeypatch, logs)
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _stub_policy())
+    monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+    train.train(config=RLConfig(task_ids=(0,)), output_dir=tmp_path, run_name="unit", max_env_steps=12,
+                prepared_path=_prepared(tmp_path))
+    resume = torch.load(tmp_path / "resume" / "latest.pt", map_location="cpu", weights_only=False)
+    rows = [row for row in resume["replay"]["data"] if float(row["is_expert"]) == 0.0]
+    assert rows
+    assert all(float(row["done"]) == 0.0 for row in rows)
+    assert all(float(row["mc_return"]) == 0.0 for row in rows)
+
+
+def test_successful_episode_row_is_terminal(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+
+    class WinEnv(_StubEnv):
+        def step(self, action):
+            self.steps += 1
+            return self._frame(self.seeds[-1]), 0.0, False, False, {"is_success": self.steps >= 5}
+
+    logs = []
+    _fake_wandb(monkeypatch, logs)
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _stub_policy())
+    monkeypatch.setattr(train, "LiberoEnv", WinEnv)
+    train.train(config=RLConfig(task_ids=(0,)), output_dir=tmp_path, run_name="unit", max_env_steps=5,
+                prepared_path=_prepared(tmp_path))
+    resume = torch.load(tmp_path / "resume" / "latest.pt", map_location="cpu", weights_only=False)
+    rows = [row for row in resume["replay"]["data"] if float(row["is_expert"]) == 0.0]
+    assert float(rows[-1]["done"]) == 1.0
+    assert float(rows[-1]["reward"]) == 1.0
+    assert float(rows[-1]["mc_return"]) == 1.0
+
+
+def test_train_eval_runs_configured_procedural_episodes(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+
+    _StubEnv.instances.clear()
+    monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+    monkeypatch.setattr("script.lingbot_eval.run_episode",
+                        lambda policy, env, entry, instruction, norm, device: {**entry, "success": entry["episode_index"] % 2 == 0})
+    tasks = [{"task_id": 4, "instruction": "task-4", "initial_state_count": 50}]
+    summary = train._train_eval(_stub_policy(), tasks, {}, "cpu", None, 80_000, tmp_path, 10)
+    assert summary["per_task_success"] == {"4": 0.5}
+    assert summary["macro_success_rate"] == 0.5
+    assert len(_StubEnv.instances) == 1
+    assert _StubEnv.instances[0].kwargs["init_states"] is False
+    assert sorted(path.name for path in (tmp_path / "train_eval" / "step_080000" / "task_04").iterdir()) == \
+        [f"episode_{index:03d}.json" for index in range(10)]
