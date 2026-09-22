@@ -77,7 +77,7 @@ The resulting local directory is `checkpoints/lingbot-sft/libero30-sft/step_0006
 
 ## LingBot evaluation
 
-Evaluation is separate from SFT: `script/lingbot_eval_config.py` defines the fixed LIBERO-10 smoke/20-rollout protocols, `script/lingbot_eval.py` validates and loads native checkpoint tensors into LeRobot and runs deterministic episode plans, and `script/lingbot_eval_modal.py` separates CPU asset preparation from one-H100 evaluation. The checkpoint/cache volumes are read-only on the GPU; only results are writable. Do not change the SFT environment or legacy RL code for evaluation.
+Evaluation is separate from SFT: `script/lingbot_eval_config.py` defines the fixed LIBERO-10 smoke/20-rollout protocols, `script/lingbot_eval.py` validates and loads native checkpoint tensors into LeRobot and runs deterministic episode plans, and `script/lingbot_eval_modal.py` separates CPU asset preparation from one-H100 evaluation. The checkpoint/cache volumes are read-only on the GPU; only results are writable. Do not change the SFT environment or legacy RL code for evaluation. The `heldout` stage (protocol version 2: 50 canonical init states × `policy_seeds=2`, `--tasks` subset, seed index 0 reusing the legacy derivation) was added under the approved single-task spec; the legacy `smoke` and `eval` stages keep protocol version 1 and byte-identical episode plans and seeds, and must stay that way.
 
 Pinned LeRobot checkout: `.cache/lerobot` at `3f2c29ef7e44b1ddccbcda3b6a63939e53639e9e`, Python 3.12. Its existing `uv.lock` supplies the `lingbot_va`, `libero`, and `evaluation` extras (Torch 2.11/CUDA 12.8 on Linux); no FlashAttention build is needed. The local macOS environment intentionally does not install the Linux-only `hf-libero` package.
 

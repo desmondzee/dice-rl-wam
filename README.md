@@ -203,6 +203,15 @@ Use `--checkpoint-step 200` or `400` to evaluate an earlier saved prior. Add `--
 
 The later SFT-vs-DICE-RL benchmark should use 100 rollouts/task as reported in DICE-RL Appendix A; this initial 20-rollout evaluation is for selecting a useful prior, not the final paper-comparison result. Real Linux/EGL rendering, cloud image build, H100 throughput, and rollout success still require the smoke run.
 
+The held-out protocol (`--stage heldout`, protocol version 2) is the SFT-vs-RL comparison set: all 50 canonical initial states (offset 0) × 2 policy seeds = 100 `(state, seed)` pairs per task, identical across every arm so results pair episode-for-episode. Seed index 0 reuses the exact seed derivation of the `smoke`/`eval` stages, so states 1–20 at index 0 are the same episodes behind the 20-rollout numbers above; `smoke` and `eval` themselves are unchanged. `--tasks` restricts the run to a comma-separated task subset (the run name gains a `-tasks0-4` style suffix), and `EvalConfig` exposes `task_ids`, `episodes_per_task`, `initial_state_offset`, and `policy_seeds` explicitly. The task-0 SFT step-600 baseline (k=1, one H100, about 82 s per episode, roughly 2.5 h for 100 episodes) is:
+
+```bash
+MODAL_PROFILE=james-j-carver2 uv run --no-project --with modal==1.1.4 --with click==8.1.8 --with typer==0.16.0 \
+  modal run -m script.lingbot_eval_modal --stage heldout --tasks 0
+```
+
+Use `--tasks 0,4` for both single-task RL tasks in one run; results download to `result/lingbot-eval/libero30-sft-step000600-heldout-tasks0/` and the report gains a seed-index column.
+
 ## Paper comparison and checkpoint selection
 
 - DICE-RL Appendix A uses **30 demos/task for its π0 experiment**. Its flow-policy comparison against DSRL uses 50/task. The exact π0 demo IDs, SFT update budget, and LIBERO chunk horizon are not published there; our subset is reproducible, not an exact reconstruction of theirs.
