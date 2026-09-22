@@ -1125,18 +1125,18 @@ def test_sync_skips_without_modal_credentials_and_puts_step_residual(tmp_path):
 
 
 def test_pull_excludes_resume_unless_requested(tmp_path):
-    env = {"DICE_DATA": "/data/dice"}
+    env = {"DICE_DATA": "/ephemeral/dice"}
     plain = _run("pull.sh", ["box", "r"], env, cwd=tmp_path)
     assert plain.returncode == 0, plain.stderr
     assert "--exclude resume/" in plain.stdout
-    assert "box:/data/dice/runs/r/" in plain.stdout
+    assert "box:/ephemeral/dice/runs/r/" in plain.stdout
     assert str(Path("result/brev/r")) in plain.stdout
     with_resume = _run("pull.sh", ["box", "r", "--resume"], env, cwd=tmp_path)
     assert "--exclude resume/" not in with_resume.stdout
 
 
 def test_push_syncs_repo_without_heavy_dirs_and_sft_on_request(tmp_path):
-    env = {"DICE_DATA": "/data/dice"}
+    env = {"DICE_DATA": "/ephemeral/dice"}
     plain = _run("push.sh", ["box"], env, cwd=ROOT)
     assert plain.returncode == 0, plain.stderr
     for excluded in (".venv", ".cache", "checkpoints", "result", ".git"):
@@ -1144,7 +1144,7 @@ def test_push_syncs_repo_without_heavy_dirs_and_sft_on_request(tmp_path):
     assert "step_000600" not in plain.stdout
     sft = _run("push.sh", ["box", "--sft"], env, cwd=ROOT)
     assert "checkpoints/lingbot-sft/libero30-sft/step_000600/" in sft.stdout
-    assert "box:/data/dice/sft/libero30-sft/checkpoints/step_000600/" in sft.stdout
+    assert "box:/ephemeral/dice/sft/libero30-sft/checkpoints/step_000600/" in sft.stdout
 
 
 def test_setup_dry_run_pins_lerobot_revision_and_prepare_call(tmp_path):
@@ -1171,7 +1171,7 @@ Expected: FAIL — `AssertionError` on `os.access` / `FileNotFoundError` for eve
 `brev/env.example`:
 ```bash
 export DICE_REPO=$HOME/dice-rl-wam
-export DICE_DATA=/data/dice
+export DICE_DATA=/ephemeral/dice
 export WANDB_API_KEY=
 export WANDB_ENTITY=
 export HF_TOKEN=
@@ -1193,7 +1193,7 @@ ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
 HOST="${1:?usage: push.sh <ssh-host> [--sft]}"
 WITH_SFT="${2:-}"
-: "${DICE_DATA:=/data/dice}"
+: "${DICE_DATA:=/ephemeral/dice}"
 : "${DICE_REMOTE_REPO:=dice-rl-wam}"
 REPO="$(cd "$HERE/.." && pwd)"
 run() { if [ "${DICE_DRY_RUN:-0}" = "1" ]; then echo "$*"; else "$@"; fi; }
@@ -1214,7 +1214,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
 : "${DICE_REPO:=$(cd "$HERE/.." && pwd)}"
-: "${DICE_DATA:=/data/dice}"
+: "${DICE_DATA:=/ephemeral/dice}"
 : "${HF_TOKEN:?HF_TOKEN is required}"
 : "${WANDB_API_KEY:?WANDB_API_KEY is required}"
 DRY="${DICE_DRY_RUN:-0}"
@@ -1286,7 +1286,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 : "${DICE_REPO:=$(cd "$HERE/.." && pwd)}"
-: "${DICE_DATA:=/data/dice}"
+: "${DICE_DATA:=/ephemeral/dice}"
 : "${WANDB_API_KEY:?WANDB_API_KEY is required}"
 DRY="${DICE_DRY_RUN:-0}"
 PY="$DICE_DATA/lerobot/.venv/bin/python"
@@ -1337,7 +1337,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
 RUN="${1:?usage: sync.sh <run-name>}"
-: "${DICE_DATA:=/data/dice}"
+: "${DICE_DATA:=/ephemeral/dice}"
 : "${DICE_OUTPUT_DIR:?DICE_OUTPUT_DIR is set by the training hook}"
 : "${DICE_STEP:?DICE_STEP is set by the training hook}"
 DRY="${DICE_DRY_RUN:-0}"
@@ -1367,7 +1367,7 @@ ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 HOST="${1:?usage: pull.sh <ssh-host> <run-name> [--resume]}"
 RUN="${2:?usage: pull.sh <ssh-host> <run-name> [--resume]}"
 WITH_RESUME="${3:-}"
-: "${DICE_DATA:=/data/dice}"
+: "${DICE_DATA:=/ephemeral/dice}"
 DEST="result/brev/$RUN"
 run() { if [ "${DICE_DRY_RUN:-0}" = "1" ]; then echo "$*"; else "$@"; fi; }
 run mkdir -p "$DEST"
@@ -1432,7 +1432,7 @@ Insert before "## Evaluate step 600 on one H100" (or at the end of the RL sectio
 ```markdown
 ## Single-task RL on Brev
 
-Training runs on an on-demand H100 Brev instance; evaluation stays on Modal. Copy `brev/env.example` to `brev/env.sh` (gitignored) and fill in `WANDB_API_KEY`, `HF_TOKEN`, and optionally the Modal token so checkpoints can be pushed to the `dice-lingbot-rl-runs` volume. The box needs ~30 GB on `DICE_DATA` (frozen text encoder/VAE 14 GB, SFT step 600 9.5 GB, demo latents 2.3 GB, LIBERO assets 0.4 GB).
+Training runs on an on-demand H100 Brev instance; evaluation stays on Modal. Copy `brev/env.example` to `brev/env.sh` (gitignored) and fill in `WANDB_API_KEY`, `HF_TOKEN`, and optionally the Modal token so checkpoints can be pushed to the `dice-lingbot-rl-runs` volume. `DICE_DATA` defaults to `/ephemeral/dice`, the instance's 750 GB data disk (the 97 GB root disk is too small to be safe); the box needs ~30 GB there (frozen text encoder/VAE 14 GB, SFT step 600 9.5 GB, demo latents 2.3 GB, LIBERO assets 0.4 GB).
 
 From the Mac, with an ssh alias for the instance:
 
