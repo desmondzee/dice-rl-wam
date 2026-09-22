@@ -1621,3 +1621,63 @@ def test_train_eval_runs_configured_procedural_episodes(tmp_path, monkeypatch):
     assert _StubEnv.instances[0].kwargs["init_states"] is False
     assert sorted(path.name for path in (tmp_path / "train_eval" / "step_080000" / "task_04").iterdir()) == \
         [f"episode_{index:03d}.json" for index in range(10)]
+
+
+def test_sync_hook_runs_after_final_checkpoint_with_step_env(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+
+    marker = tmp_path / "hook.txt"
+    monkeypatch.setenv("DICE_SYNC_CMD", f'printf "%s %s" "$DICE_STEP" "$DICE_OUTPUT_DIR" > "{marker}"')
+    logs = []
+    _fake_wandb(monkeypatch, logs)
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _stub_policy())
+    monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+    train.train(config=RLConfig(task_ids=(0,)), output_dir=tmp_path, run_name="unit", max_env_steps=12,
+                prepared_path=_prepared(tmp_path))
+    assert marker.read_text() == f"12 {tmp_path}"
+
+
+def test_sync_hook_failure_is_reported_not_raised(tmp_path, monkeypatch, capsys):
+    from script.lingbot_rl_train import run_sync_hook
+
+    monkeypatch.delenv("DICE_SYNC_CMD", raising=False)
+    assert run_sync_hook(tmp_path, 5) is None
+    monkeypatch.setenv("DICE_SYNC_CMD", "exit 3")
+    assert run_sync_hook(tmp_path, 5) == 3
+    assert "sync hook exited 3" in capsys.readouterr().err
+
+
+def test_procedural_reset_difference_detects_identical_placements():
+    from script.lingbot_rl_train import procedural_reset_difference
+
+    varied = _StubEnv()
+    assert procedural_reset_difference(varied, seeds=(1, 2)) > 0.5
+    assert varied.seeds == [1, 2]
+
+    class Frozen(_StubEnv):
+        def reset(self, seed=None):
+            self.seeds.append(seed)
+            return self._frame(7), {}
+
+    assert procedural_reset_difference(Frozen(), seeds=(1, 2)) == 0.0
+
+
+def test_check_inits_cli_exits_nonzero_on_frozen_env(tmp_path, monkeypatch, capsys):
+    import script.lingbot_rl_train as train
+
+    class Frozen(_StubEnv):
+        def reset(self, seed=None):
+            self.seeds.append(seed)
+            return self._frame(7), {}
+
+    monkeypatch.setattr(train, "LiberoEnv", Frozen)
+    monkeypatch.setattr("sys.argv", ["prog", "check-inits", "--task-id", "4"])
+    with pytest.raises(SystemExit) as exc:
+        train.main()
+    assert exc.value.code == 1
+    payload = __import__("json").loads(capsys.readouterr().out)
+    assert payload == {"task_id": 4, "mean_abs_pixel_diff": 0.0, "ok": False}
+    monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+    monkeypatch.setattr("sys.argv", ["prog", "check-inits", "--task-id", "4"])
+    train.main()
+    assert __import__("json").loads(capsys.readouterr().out)["ok"] is True

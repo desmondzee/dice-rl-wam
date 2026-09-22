@@ -3,6 +3,8 @@ import hashlib
 import json
 import os
 import random
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -105,6 +107,25 @@ def save_inference_checkpoints(output_dir, env_steps, model):
     output_dir = Path(output_dir)
     save_inference(output_dir / "residual.pt", model)
     save_inference(output_dir / "train_eval" / f"step_{int(env_steps):06d}" / "residual.pt", model)
+
+
+def run_sync_hook(output_dir, env_steps):
+    command = os.environ.get("DICE_SYNC_CMD", "").strip()
+    if not command:
+        return None
+    env = {**os.environ, "DICE_OUTPUT_DIR": str(output_dir), "DICE_STEP": str(int(env_steps))}
+    result = subprocess.run(command, shell=True, env=env)
+    if result.returncode != 0:
+        print(f"sync hook exited {result.returncode}", file=sys.stderr)
+    return result.returncode
+
+
+def procedural_reset_difference(env, seeds=(1, 2)):
+    frames = []
+    for seed in seeds:
+        observation, _ = env.reset(seed=seed)
+        frames.append(np.asarray(observation["pixels"]["image"], dtype=np.float32))
+    return float(np.mean(np.abs(frames[0] - frames[1])))
 
 
 def _cpu_byte_rng(state):
@@ -411,6 +432,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 policy.reset()
             save_inference_checkpoints(output_dir, env_steps, model)
             save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
+            run_sync_hook(output_dir, env_steps)
             if commit is not None:
                 commit()
 
@@ -511,6 +533,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     save_inference(output_dir / "residual.pt", model)
     save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
     _write_json(output_dir / "summary.json", {"env_steps": env_steps, "chunks": chunks})
+    run_sync_hook(output_dir, env_steps)
     if commit is not None:
         commit()
     if hasattr(wandb, "finish"):
@@ -573,7 +596,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("operation", choices=("train", "eval"))
+    parser.add_argument("operation", choices=("train", "eval", "check-inits"))
     parser.add_argument("--config-json")
     parser.add_argument("--prepared-path", type=Path)
     parser.add_argument("--output-dir", type=Path)
@@ -583,7 +606,26 @@ def main():
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--result-volume")
     parser.add_argument("--max-env-steps", type=int)
+    parser.add_argument("--task-id", type=int)
     args = parser.parse_args()
+    if args.operation == "check-inits":
+        if args.task_id is None:
+            parser.error("check-inits requires --task-id")
+        prepared = _read_prepared(args.prepared_path)
+        suite = None
+        if prepared.get("assets_path"):
+            from script.lingbot_eval import describe_suite
+            suite, _ = describe_suite(prepared["assets_path"])
+        env = make_env(args.task_id, suite, init_states=False)
+        try:
+            difference = procedural_reset_difference(env)
+        finally:
+            env.close()
+        ok = difference > 0.5
+        print(json.dumps({"task_id": args.task_id, "mean_abs_pixel_diff": difference, "ok": ok}))
+        if not ok:
+            sys.exit(1)
+        return
     payload = json.loads(args.config_json) if args.config_json else {}
     config = RLConfig(**{key: payload[key] for key in payload if key in RLConfig.__dataclass_fields__}).validate()
     commit = None
