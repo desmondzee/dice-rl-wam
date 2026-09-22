@@ -1551,10 +1551,48 @@ def test_train_single_task_uses_procedural_envs_and_only_that_task(tmp_path, mon
     config = RLConfig(task_ids=(4,))
     train.train(config=config, output_dir=tmp_path, run_name="unit", max_env_steps=24,
                 prepared_path=_prepared(tmp_path))
-    assert _StubEnv.instances
+    assert len(_StubEnv.instances) == 1
     assert {env.kwargs["task_id"] for env in _StubEnv.instances} == {4}
     assert all(env.kwargs["init_states"] is False for env in _StubEnv.instances)
-    assert len({seed for env in _StubEnv.instances for seed in env.seeds}) == len(_StubEnv.instances)
+    assert len(set(_StubEnv.instances[0].seeds)) == 2
+
+
+def test_collection_env_saves_are_throttled_to_every_tenth_episode(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+
+    def run(steps, target):
+        target.mkdir(parents=True)
+        calls = []
+        _fake_wandb(monkeypatch, [])
+        monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _stub_policy())
+        monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+        monkeypatch.setattr(train, "save_resume", lambda *a, **k: calls.append(1))
+        train.train(config=RLConfig(task_ids=(0,)), output_dir=target, run_name="unit",
+                    max_env_steps=steps, prepared_path=_prepared(target))
+        return len(calls)
+
+    assert run(36, tmp_path / "short") == 1
+    assert run(120, tmp_path / "long") == 2
+
+
+def test_collection_stats_reports_replay_episodes_and_mean_length():
+    from script.lingbot_rl_train import collection_stats
+
+    buffer = _resume_buffer()
+    stats = collection_stats(buffer, 3, [10, 20, 30])
+    assert set(stats) == {"replay_size", "episodes", "mean_episode_length"}
+    assert stats == {"replay_size": len(buffer), "episodes": 3, "mean_episode_length": 20.0}
+    assert collection_stats(buffer, 0, [])["mean_episode_length"] == 0.0
+
+
+def test_maybe_sharpen_reports_finite_value_and_entropy_deltas():
+    import script.lingbot_rl_train as train
+
+    model = DiceResidualModel(device="cpu")
+    metrics = train._maybe_sharpen(model, _stub_policy(), {}, "cpu")
+    assert set(metrics) == {"delta_v", "delta_h"}
+    assert np.isfinite(metrics["delta_v"])
+    assert np.isfinite(metrics["delta_h"])
 
 
 def test_train_rejects_prepared_without_configured_task(tmp_path, monkeypatch):

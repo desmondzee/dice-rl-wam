@@ -20,6 +20,7 @@ from script.lingbot_rl_policy import (
 )
 
 LiberoEnv = None
+SAVE_EVERY_EPISODES = 10
 RESUME_KEYS = {
     "actor", "critic", "target_critic", "actor_opt", "critic_opt",
     "replay", "rng", "env_steps", "chunks", "recipe", "evaluated", "wandb_id",
@@ -301,6 +302,14 @@ def _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir, episo
             "macro_success_rate": float(np.mean([bool(row["success"]) for row in rows]))}
 
 
+def collection_stats(buffer, episodes, episode_lengths):
+    return {
+        "replay_size": len(buffer),
+        "episodes": int(episodes),
+        "mean_episode_length": float(np.mean(episode_lengths)) if episode_lengths else 0.0,
+    }
+
+
 def _maybe_sharpen(model, policy, batch, device):
     decoded = policy.decode_candidates(batch, k=8)
     a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
@@ -401,11 +410,11 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     budget = config.online_env_steps if max_env_steps is None else max_env_steps
     eval_schedule = train_eval_schedule(budget, config.train_eval_every)
     do_train_eval = max_env_steps is None
+    envs = {}
+    episodes = 0
+    episode_lengths = []
 
     def maybe_eval():
-        # Episode-boundary only: `_train_eval` / sharpening call `policy.reset()`.
-        # Thresholds, not exact equality, so 12/16-step chunks still hit 25k/50k/75k/100k.
-        # `--max-env-steps` is unit/cloud smoke: skip the 10-task eval so a few chunks stay cheap.
         if not do_train_eval:
             return
         due = due_train_evals(env_steps, eval_schedule, evaluated)
@@ -415,20 +424,33 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                                   config.train_eval_episodes_per_task)
             logged = {f"train_eval/{key}": value for key, value in summary.items() if key != "per_task_success"}
             logged["env_steps"] = env_steps
+            logged.update(collection_stats(buffer, episodes, episode_lengths))
             run.log(logged)
             for task_id, success in summary["per_task_success"].items():
                 run.log({f"train_eval/task_{task_id}_success": float(success), "env_steps": env_steps})
             task = tasks[0]
-            env = make_env(task["task_id"], suite, init_states=False)
+            env = envs.get(task["task_id"])
+            borrowed = env is not None
+            if not borrowed:
+                env = make_env(task["task_id"], suite, init_states=False)
             try:
-                observation, _ = env.reset(seed=0)
-                policy.reset()
-                metrics = _maybe_sharpen(
-                    model, policy, observation_batch(observation, task["instruction"], device), device)
-                if metrics:
-                    run.log({**metrics, "env_steps": env_steps})
+                sharpened = []
+                for entry in train_eval_plan(task["task_id"], 10):
+                    observation, _ = env.reset(seed=entry["seed"])
+                    policy.reset()
+                    metrics = _maybe_sharpen(
+                        model, policy, observation_batch(observation, task["instruction"], device), device)
+                    if metrics:
+                        sharpened.append(metrics)
+                if sharpened:
+                    run.log({
+                        "delta_v": float(np.mean([item["delta_v"] for item in sharpened])),
+                        "delta_h": float(np.mean([item["delta_h"] for item in sharpened])),
+                        "env_steps": env_steps,
+                    })
             finally:
-                env.close()
+                if not borrowed:
+                    env.close()
                 policy.reset()
             save_inference_checkpoints(output_dir, env_steps, model)
             save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
@@ -440,17 +462,19 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     episode_return = 0.0
     episode_success = 0.0
     episode_length = 0
-    while env_steps < budget:
-        task = tasks[int(np.random.randint(len(tasks)))]
-        task_id = task["task_id"]
-        env = make_env(task_id, suite, init_states=False)
-        policy.reset()
-        observation, _ = env.reset(seed=config.seed + env_steps)
-        episode_return = 0.0
-        episode_success = 0.0
-        episode_length = 0
-        saw_success = False
-        try:
+    try:
+        while env_steps < budget:
+            task = tasks[int(np.random.randint(len(tasks)))]
+            task_id = task["task_id"]
+            env = envs.get(task_id)
+            if env is None:
+                env = envs[task_id] = make_env(task_id, suite, init_states=False)
+            policy.reset()
+            observation, _ = env.reset(seed=config.seed + env_steps)
+            episode_return = 0.0
+            episode_success = 0.0
+            episode_length = 0
+            saw_success = False
             while env_steps < budget and episode_length < 520:
                 batch = observation_batch(observation, task["instruction"], device)
                 decoded = policy.decode_candidates(batch, k=config.k_candidates)
@@ -522,13 +546,18 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 if episode_over:
                     break
             buffer.finalize_episode()
-        finally:
-            env.close()
-        maybe_eval()
-        save_inference(output_dir / "residual.pt", model)
-        save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
-        if commit is not None:
-            commit()
+            episodes += 1
+            episode_lengths.append(episode_length)
+            maybe_eval()
+            if episodes % SAVE_EVERY_EPISODES == 0:
+                save_inference(output_dir / "residual.pt", model)
+                save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
+                if commit is not None:
+                    commit()
+    finally:
+        for cached in envs.values():
+            cached.close()
+        envs.clear()
     maybe_eval()
     save_inference(output_dir / "residual.pt", model)
     save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
