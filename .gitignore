@@ -125,3 +125,4 @@ instance/
 *.mo
 *.pot
 local_settings.py
+brev/env.sh
