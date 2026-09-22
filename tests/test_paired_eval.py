@@ -74,3 +74,18 @@ def test_summarize_pairs_arms_per_task_and_writes_curve(tmp_path):
     assert rows[0]["task"] == "0" and rows[1]["arm"] == "rl-k4" and rows[1]["ci_low"] != ""
     with pytest.raises(FileNotFoundError):
         summarize(tmp_path / "missing", [])
+
+
+def test_load_rows_refuses_incomplete_or_duplicate_arms(tmp_path):
+    from analysis.paired_eval import load_rows
+
+    keys = [(0, 0, 0), (0, 1, 0)]
+    arm = _write_arm(tmp_path / "partial", {k: True for k in keys})
+    (arm / "summary.json").write_text(json.dumps({"complete": False}))
+    with pytest.raises(ValueError, match="Incomplete"):
+        load_rows(arm)
+    (arm / "summary.json").write_text(json.dumps({"complete": True}))
+    assert len(load_rows(arm)) == 2
+    (arm / "episodes" / "task_00" / "episode_099.json").write_text(json.dumps({"task_id": 0, "init_state_id": 1, "seed_index": 0, "success": False}))
+    with pytest.raises(ValueError, match="Duplicate"):
+        load_rows(arm)

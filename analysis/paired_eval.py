@@ -12,10 +12,16 @@ BOOTSTRAP_SAMPLES = 10000
 
 
 def load_rows(directory):
+    summary = Path(directory) / "summary.json"
+    if summary.is_file() and not json.loads(summary.read_text()).get("complete", True):
+        raise ValueError(f"Incomplete evaluation under {directory}")
     rows = {}
     for path in sorted(Path(directory).glob("episodes/task_*/episode_*.json")):
         row = json.loads(path.read_text())
-        rows[(int(row["task_id"]), int(row["init_state_id"]), int(row.get("seed_index", 0)))] = bool(row["success"])
+        key = (int(row["task_id"]), int(row["init_state_id"]), int(row.get("seed_index", 0)))
+        if key in rows:
+            raise ValueError(f"Duplicate episode key {key} under {directory}")
+        rows[key] = bool(row["success"])
     if not rows:
         raise FileNotFoundError(f"No episode records under {directory}")
     return rows
