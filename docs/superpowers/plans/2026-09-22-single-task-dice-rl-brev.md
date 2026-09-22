@@ -17,7 +17,7 @@
 - Unchanged hyperparameters: β=100, ε=−0.5, γ=0.99, n-step 3, UTD 10, τ=0.01, LR 1e-4, batch 256, ensemble 10, replay 100k, RLPD 0.5→0.1, zero-init actor, MC-return BC anchor, best-of-4 at collection.
 - Do not edit `.cache/lerobot`, `script/lingbot_eval.py`, or `script/lingbot_eval_config.py` (AGENTS.md; those are Phase B). `EvalConfig` stays 1/20 episodes by stage.
 - No comments or docstrings in new or modified code, including tests and bash (the user wants lean code). Shell scripts may keep a `#!/usr/bin/env bash` shebang and `set -euo pipefail` only.
-- Secrets (`WANDB_API_KEY`, `HF_TOKEN`, `MODAL_TOKEN_ID/SECRET`) come only from the environment or the gitignored `brev/env.sh`; never in the repo, argv echoes, or logs.
+- Secrets (`WANDB_API_KEY`, `HF_TOKEN`) come only from the environment or the gitignored `brev/env.sh`; Modal auth on the box is `modal token new` profiles approved in a browser, never copied token files; nothing secret in the repo, argv echoes, or logs.
 - Verification for every Python task: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py` (72 tests pass today in ~35 s). Bash tasks: `.cache/eval-venv/bin/python -m pytest -q tests/test_brev_scripts.py`.
 - Commit messages: one plain imperative sentence in repo style (e.g. "Store per-chunk candidate sets and Monte-Carlo returns in the DICE-RL replay buffer."), ending with the trailer line `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 - Old `resume/latest.pt` and `expert_features.pt` files from recipe v2 become intentionally unresumable/rebuildable (recipe fingerprint and expert recipe both change). No compatibility shims.
@@ -1018,8 +1018,8 @@ MSG
 - Test: `tests/test_brev_scripts.py` (new)
 
 **Interfaces:**
-- Consumes: `script.lingbot_eval prepare` CLI (`--config-json --cache-root --checkpoint --prepared-output`, needs `LEROBOT_SOURCE_ROOT` and `HF_TOKEN`); `script.lingbot_rl_train train --config-json --prepared-path --output-dir --run-name --dataset-root [--resume] [--max-env-steps]` and `check-inits --task-id --prepared-path` (Task 4); `DICE_SYNC_CMD` env contract `DICE_OUTPUT_DIR`, `DICE_STEP`; constants `LEROBOT_REVISION` (`script/lingbot_eval_config.py`), `DATASET_REPO`/`DATASET_REVISION` (`script/lingbot_sft_config.py`), volumes `dice-lingbot-sft-runs`, `dice-lingbot-rl-runs` (`script/lingbot_rl_modal.py`).
-- Produces: on the box, `$DICE_DATA/{lerobot,cache/hub,sft/libero30-sft/checkpoints/step_000600,prepared.json,dataset_root,libero-config,runs/<run>/}`; `runs/<run>/config.json` (the `RLConfig` overrides), `runs/<run>/run.sh` (the exact training command), `runs/<run>/train.log`; tmux session `dice-<run>`. On the Mac, `result/brev/<run>/`. Every script honours `DICE_DRY_RUN=1` (print the command it would run, exit 0) so the tests can drive them without a box.
+- Consumes: `script.lingbot_eval prepare` CLI (`--config-json --cache-root --checkpoint --prepared-output`, needs `LEROBOT_SOURCE_ROOT` and `HF_TOKEN`); `script.lingbot_rl_train train --config-json --prepared-path --output-dir --run-name --dataset-root [--resume] [--max-env-steps]` and `check-inits --task-id --prepared-path` (Task 4); `DICE_SYNC_CMD` env contract `DICE_OUTPUT_DIR`, `DICE_STEP`; constants `LEROBOT_REVISION` (`script/lingbot_eval_config.py`), `DATASET_REPO`/`DATASET_REVISION` (`script/lingbot_sft_config.py`); Modal volumes `dice-lingbot-sft-runs` (source workspace, read) and `dice-lingbot-rl-runs` (store workspace `desmond-zee`, write). Modal auth on the box is two profiles created by `modal token new --profile <name>` (the person approves each in a browser); the Modal CLI selects a profile from the `MODAL_PROFILE` environment variable.
+- Produces: on the box, `$DICE_DATA/{lerobot,cache/hub,sft/libero30-sft/checkpoints/step_000600,prepared.json,dataset_root,libero-config,runs/<run>/}`; `runs/<run>/config.json` (the `RLConfig` overrides), `runs/<run>/run.sh` (the exact training command), `runs/<run>/train.log`; tmux session `dice-<run>`. On the Modal volume `dice-lingbot-rl-runs` in `desmond-zee`: `<run>/train_eval/step_XXXXXX/` after every checkpoint, plus `<run>/resume/latest.pt`, `summary.json`, `train.log` at run end. On the Mac, `result/brev/<run>/` pulled from that volume. Every script honours `DICE_DRY_RUN=1` (print the command it would run, exit 0) so the tests can drive them without a box or Modal.
 
 All scripts source `brev/env.sh` next to themselves when it exists (override the path with `DICE_ENV_FILE`; the tests point it at `/dev/null` so a real `env.sh` on the Mac cannot leak into them), then apply defaults.
 
@@ -1040,8 +1040,9 @@ SCRIPTS = ("push.sh", "setup.sh", "train.sh", "sync.sh", "pull.sh")
 
 def _run(script, args, env, cwd=None):
     merged = {**os.environ, "DICE_DRY_RUN": "1", "DICE_ENV_FILE": "/dev/null", **env}
-    for name in ("DICE_SYNC_CMD", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET", "WANDB_ENTITY"):
+    for name in ("DICE_SYNC_CMD", "MODAL_PROFILE", "MODAL_SFT_PROFILE", "WANDB_ENTITY"):
         merged.pop(name, None)
+    merged.update(env)
     return subprocess.run(["bash", str(ROOT / "brev" / script), *args], env=merged, cwd=cwd,
                           capture_output=True, text=True)
 
@@ -1055,8 +1056,10 @@ def _box(tmp_path):
     (data / "dataset_root").write_text(str(data / "cache" / "hub" / "snap"))
     (data / "lerobot" / ".venv" / "bin").mkdir(parents=True)
     (data / "lerobot" / ".venv" / "bin" / "python").write_text("")
-    return {"DICE_DATA": str(data), "DICE_REPO": str(ROOT),
-            "WANDB_API_KEY": "wandb-secret-value", "HF_TOKEN": "hf-secret-value"}
+    (data / "lerobot" / ".venv" / "bin" / "modal").write_text("")
+    return {"DICE_DATA": str(data), "DICE_REPO": str(ROOT), "HOME": str(tmp_path),
+            "WANDB_API_KEY": "wandb-secret-value", "HF_TOKEN": "hf-secret-value",
+            "MODAL_PROFILE": "desmond-zee", "MODAL_SFT_PROFILE": "source"}
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
@@ -1068,7 +1071,7 @@ def test_scripts_parse_and_are_executable(script):
 
 def test_env_example_lists_required_variables_without_values():
     text = (ROOT / "brev" / "env.example").read_text()
-    for name in ("DICE_REPO", "DICE_DATA", "WANDB_API_KEY", "HF_TOKEN", "MODAL_TOKEN_ID", "MODAL_TOKEN_SECRET"):
+    for name in ("DICE_REPO", "DICE_DATA", "WANDB_API_KEY", "HF_TOKEN", "MODAL_PROFILE", "MODAL_SFT_PROFILE"):
         assert f"export {name}=" in text
     assert "brev/env.sh" in (ROOT / ".gitignore").read_text()
 
@@ -1083,6 +1086,7 @@ def test_train_dry_run_builds_single_task_command_and_resumes_when_state_exists(
     assert "--resume" not in first.stdout
     assert "tmux new-session -d -s dice-unit-t4" in first.stdout
     assert "DICE_SYNC_CMD" in first.stdout
+    assert "MODAL_PROFILE='desmond-zee'" in first.stdout
     assert "--config-json" in first.stdout
     run_dir = Path(env["DICE_DATA"]) / "runs" / "unit-t4"
     assert (run_dir / "run.sh").is_file()
@@ -1106,59 +1110,76 @@ def test_train_requires_run_name_task_and_prepared(tmp_path):
     assert "prepared.json" in missing.stderr
 
 
-def test_sync_skips_without_modal_credentials_and_puts_step_residual(tmp_path):
+def test_sync_skips_without_profile_and_puts_step_dir_then_final_state(tmp_path):
     env = _box(tmp_path)
     out = Path(env["DICE_DATA"]) / "runs" / "r"
     (out / "train_eval" / "step_080000").mkdir(parents=True)
     (out / "train_eval" / "step_080000" / "residual.pt").write_text("")
     (out / "residual.pt").write_text("")
+    (out / "settings.json").write_text("{}")
     base = {**env, "DICE_OUTPUT_DIR": str(out), "DICE_STEP": "80000"}
-    skipped = _run("sync.sh", ["r"], {**base, "MODAL_TOKEN_ID": "", "MODAL_TOKEN_SECRET": ""})
+    skipped = _run("sync.sh", ["r"], {**base, "MODAL_PROFILE": ""})
     assert skipped.returncode == 0
     assert "skip" in skipped.stdout
-    put = _run("sync.sh", ["r"], {**base, "MODAL_TOKEN_ID": "a", "MODAL_TOKEN_SECRET": "b"})
+    put = _run("sync.sh", ["r"], base)
     assert put.returncode == 0, put.stderr
     assert "modal volume put dice-lingbot-rl-runs" in put.stdout
-    assert "train_eval/step_080000/residual.pt r/train_eval/step_080000/residual.pt" in put.stdout
-    final = _run("sync.sh", ["r"], {**base, "DICE_STEP": "660000", "MODAL_TOKEN_ID": "a", "MODAL_TOKEN_SECRET": "b"})
-    assert "residual.pt r/residual.pt" in final.stdout
+    assert f"{out}/train_eval/step_080000 r/train_eval/step_080000" in put.stdout
+    assert f"{out}/settings.json r/settings.json" in put.stdout
+    assert "resume/latest.pt" not in put.stdout
+    (out / "resume").mkdir()
+    (out / "resume" / "latest.pt").write_text("")
+    (out / "summary.json").write_text("{}")
+    (out / "train.log").write_text("")
+    final = _run("sync.sh", ["r"], {**base, "DICE_STEP": "660000"})
+    assert f"{out}/resume/latest.pt r/resume/latest.pt" in final.stdout
+    assert f"{out}/summary.json r/summary.json" in final.stdout
+    assert f"{out}/train.log r/train.log" in final.stdout
+    assert f"{out}/residual.pt r/residual.pt" in final.stdout
 
 
-def test_pull_excludes_resume_unless_requested(tmp_path):
-    env = {"DICE_DATA": "/ephemeral/dice"}
-    plain = _run("pull.sh", ["box", "r"], env, cwd=tmp_path)
+def test_pull_fetches_run_from_modal_volume(tmp_path):
+    env = {"MODAL_PROFILE": "desmond-zee"}
+    out = _run("pull.sh", ["r"], env, cwd=tmp_path)
+    assert out.returncode == 0, out.stderr
+    assert "modal volume get dice-lingbot-rl-runs r" in out.stdout
+    assert str(Path("result/brev")) in out.stdout
+    assert "MODAL_PROFILE=desmond-zee" in out.stdout
+    assert _run("pull.sh", [], env, cwd=tmp_path).returncode != 0
+
+
+def test_push_syncs_repo_without_heavy_dirs(tmp_path):
+    plain = _run("push.sh", ["box"], {}, cwd=ROOT)
     assert plain.returncode == 0, plain.stderr
-    assert "--exclude resume/" in plain.stdout
-    assert "box:/ephemeral/dice/runs/r/" in plain.stdout
-    assert str(Path("result/brev/r")) in plain.stdout
-    with_resume = _run("pull.sh", ["box", "r", "--resume"], env, cwd=tmp_path)
-    assert "--exclude resume/" not in with_resume.stdout
-
-
-def test_push_syncs_repo_without_heavy_dirs_and_sft_on_request(tmp_path):
-    env = {"DICE_DATA": "/ephemeral/dice"}
-    plain = _run("push.sh", ["box"], env, cwd=ROOT)
-    assert plain.returncode == 0, plain.stderr
-    for excluded in (".venv", ".cache", "checkpoints", "result", ".git"):
+    for excluded in (".venv", ".cache", "checkpoints", "result", ".git", "brev/env.sh"):
         assert f"--exclude {excluded}" in plain.stdout
-    assert "step_000600" not in plain.stdout
-    sft = _run("push.sh", ["box", "--sft"], env, cwd=ROOT)
-    assert "checkpoints/lingbot-sft/libero30-sft/step_000600/" in sft.stdout
-    assert "box:/ephemeral/dice/sft/libero30-sft/checkpoints/step_000600/" in sft.stdout
+    assert "box:dice-rl-wam/" in plain.stdout
+    assert _run("push.sh", [], {}, cwd=ROOT).returncode != 0
 
 
-def test_setup_dry_run_pins_lerobot_revision_and_prepare_call(tmp_path):
+def test_setup_dry_run_pins_lerobot_revision_and_uses_both_modal_profiles(tmp_path):
     env = _box(tmp_path)
+    (tmp_path / ".modal.toml").write_text("[source]\n[desmond-zee]\n")
     out = _run("setup.sh", [], env)
     assert out.returncode == 0, out.stderr
     revision = (ROOT / "script" / "lingbot_eval_config.py").read_text().split('LEROBOT_REVISION = "')[1].split('"')[0]
     assert f"git -C {env['DICE_DATA']}/lerobot checkout {revision}" in out.stdout
     assert "--extra lingbot_va --extra libero --extra evaluation --no-editable" in out.stdout
     assert "modal==1.1.4" in out.stdout
+    assert "modal volume create dice-lingbot-rl-runs" in out.stdout
     assert "script.lingbot_eval prepare" in out.stdout
     assert "script.lingbot_rl_train check-inits --task-id 0" in out.stdout
     assert "hf-secret-value" not in out.stdout + out.stderr
     assert "wandb-secret-value" not in out.stdout + out.stderr
+    Path(env["DICE_DATA"], "sft/libero30-sft/checkpoints/step_000600/norm_stats.json").unlink()
+    pull = _run("setup.sh", [], env)
+    assert pull.returncode == 0, pull.stderr
+    assert "MODAL_PROFILE=source" in pull.stdout
+    assert "modal volume get dice-lingbot-sft-runs libero30-sft/checkpoints/step_000600" in pull.stdout
+    (tmp_path / ".modal.toml").unlink()
+    missing = _run("setup.sh", [], env)
+    assert missing.returncode != 0
+    assert "modal token new" in missing.stderr
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1175,8 +1196,8 @@ export DICE_DATA=/ephemeral/dice
 export WANDB_API_KEY=
 export WANDB_ENTITY=
 export HF_TOKEN=
-export MODAL_TOKEN_ID=
-export MODAL_TOKEN_SECRET=
+export MODAL_PROFILE=desmond-zee
+export MODAL_SFT_PROFILE=source
 ```
 
 Append to `.gitignore`:
@@ -1191,19 +1212,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
-HOST="${1:?usage: push.sh <ssh-host> [--sft]}"
-WITH_SFT="${2:-}"
-: "${DICE_DATA:=/ephemeral/dice}"
+HOST="${1:?usage: push.sh <ssh-host>}"
 : "${DICE_REMOTE_REPO:=dice-rl-wam}"
 REPO="$(cd "$HERE/.." && pwd)"
 run() { if [ "${DICE_DRY_RUN:-0}" = "1" ]; then echo "$*"; else "$@"; fi; }
 run rsync -az --delete --exclude .venv --exclude .cache --exclude checkpoints --exclude result --exclude .git \
-  --exclude '__pycache__' --exclude '*.pyc' --exclude .pytest_cache --exclude 'brev/env.sh' \
+  --exclude __pycache__ --exclude '*.pyc' --exclude .pytest_cache --exclude .superpowers --exclude brev/env.sh \
   "$REPO/" "$HOST:$DICE_REMOTE_REPO/"
-if [ "$WITH_SFT" = "--sft" ]; then
-  run rsync -az --partial --progress "$REPO/checkpoints/lingbot-sft/libero30-sft/step_000600/" \
-    "$HOST:$DICE_DATA/sft/libero30-sft/checkpoints/step_000600/"
-fi
 ```
 
 `brev/setup.sh` (runs on the box):
@@ -1217,10 +1232,13 @@ ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 : "${DICE_DATA:=/ephemeral/dice}"
 : "${HF_TOKEN:?HF_TOKEN is required}"
 : "${WANDB_API_KEY:?WANDB_API_KEY is required}"
+: "${MODAL_PROFILE:=desmond-zee}"
+: "${MODAL_SFT_PROFILE:=source}"
 DRY="${DICE_DRY_RUN:-0}"
 run() { if [ "$DRY" = "1" ]; then echo "$*"; else "$@"; fi; }
 LEROBOT="$DICE_DATA/lerobot"
 PY="$LEROBOT/.venv/bin/python"
+MODAL="$LEROBOT/.venv/bin/modal"
 SFT="$DICE_DATA/sft/libero30-sft/checkpoints/step_000600"
 REVISION="$(grep -o 'LEROBOT_REVISION = "[0-9a-f]*"' "$DICE_REPO/script/lingbot_eval_config.py" | cut -d'"' -f2)"
 DATASET_REPO="$(grep -o 'DATASET_REPO = "[^"]*"' "$DICE_REPO/script/lingbot_sft_config.py" | cut -d'"' -f2)"
@@ -1228,6 +1246,12 @@ DATASET_REVISION="$(grep -o 'DATASET_REVISION = "[0-9a-f]*"' "$DICE_REPO/script/
 export PATH="$HOME/.local/bin:$PATH"
 export LEROBOT_SOURCE_ROOT="$LEROBOT" HF_HOME="$DICE_DATA/cache/hub" MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
 export LIBERO_CONFIG_PATH="$DICE_DATA/libero-config" PYTHONPATH="$DICE_REPO" TOKENIZERS_PARALLELISM=false
+for profile in "$MODAL_SFT_PROFILE" "$MODAL_PROFILE"; do
+  if ! grep -q "^\[$profile\]" "$HOME/.modal.toml" 2>/dev/null; then
+    echo "Modal profile '$profile' missing on this box; run: $MODAL token new --profile $profile --no-verify and approve it in the browser" >&2
+    exit 1
+  fi
+done
 run mkdir -p "$DICE_DATA/cache/hub" "$DICE_DATA/runs" "$DICE_DATA/sft/libero30-sft/checkpoints"
 if command -v apt-get >/dev/null 2>&1; then
   run sudo apt-get update -y
@@ -1243,18 +1267,10 @@ run git -C "$LEROBOT" checkout "$REVISION"
 run uv sync --index-url https://pypi.org/simple --project "$LEROBOT" --python 3.12 --locked --no-default-groups --extra lingbot_va --extra libero --extra evaluation --no-editable
 run uv export --index-url https://pypi.org/simple --project "$LEROBOT" --locked --no-default-groups --extra lingbot_va --extra libero --extra evaluation --no-emit-project --no-hashes --output-file "$DICE_DATA/lingbot-eval-deps.txt"
 run uv pip install --index-url https://pypi.org/simple --python "$PY" --constraint "$DICE_DATA/lingbot-eval-deps.txt" --exclude-newer 2026-09-05T00:00:00Z modal==1.1.4
-if [ -n "${MODAL_TOKEN_ID:-}" ] && [ -n "${MODAL_TOKEN_SECRET:-}" ]; then
-  run "$PY" -m modal token set --token-id "$MODAL_TOKEN_ID" --token-secret "$MODAL_TOKEN_SECRET" --profile brev
-  run "$PY" -m modal profile activate brev
-fi
 if [ ! -f "$SFT/norm_stats.json" ]; then
-  if [ -n "${MODAL_TOKEN_ID:-}" ]; then
-    run "$PY" -m modal volume get dice-lingbot-sft-runs libero30-sft/checkpoints/step_000600 "$DICE_DATA/sft/libero30-sft/checkpoints/"
-  else
-    echo "SFT checkpoint missing at $SFT; run brev/push.sh <host> --sft from the Mac" >&2
-    exit 1
-  fi
+  run env MODAL_PROFILE="$MODAL_SFT_PROFILE" "$MODAL" volume get dice-lingbot-sft-runs libero30-sft/checkpoints/step_000600 "$DICE_DATA/sft/libero30-sft/checkpoints/"
 fi
+run env MODAL_PROFILE="$MODAL_PROFILE" "$MODAL" volume create dice-lingbot-rl-runs || true
 run "$PY" -m script.lingbot_eval prepare --config-json '{"source_run":"libero30-sft","checkpoint_step":600,"stage":"eval","seed":42}' --cache-root "$DICE_DATA/cache" --checkpoint "$SFT" --prepared-output "$DICE_DATA/prepared.json"
 run "$PY" -c "import os; from script.lingbot_eval import download_snapshot; download_snapshot('$DATASET_REPO', repo_type='dataset', revision='$DATASET_REVISION', cache_dir='$DICE_DATA/cache/hub', token=os.environ['HF_TOKEN'])"
 run bash -c "echo '$DICE_DATA/cache/hub/datasets--${DATASET_REPO//\//--}/snapshots/$DATASET_REVISION' > '$DICE_DATA/dataset_root'"
@@ -1264,7 +1280,7 @@ run "$PY" -m script.lingbot_rl_train check-inits --task-id 0 --prepared-path "$(
 echo "setup complete: $DICE_DATA"
 ```
 
-In dry-run mode the `prepared.json` from `_box` is `{}` and `$PY` is an empty file, so the `--prepared-path` substitution collapses to an empty string; the test only checks the `check-inits --task-id 0` text.
+In dry-run mode the `prepared.json` from `_box` is `{}` and `$PY` is an empty file, so the `--prepared-path` substitution collapses to an empty string; the test only checks the `check-inits --task-id 0` text. The `modal volume get` remote path names the checkpoint directory and the local path its parent, matching the `modal volume get` layout note in AGENTS.md.
 
 `brev/train.sh` (runs on the box):
 ```bash
@@ -1288,6 +1304,7 @@ done
 : "${DICE_REPO:=$(cd "$HERE/.." && pwd)}"
 : "${DICE_DATA:=/ephemeral/dice}"
 : "${WANDB_API_KEY:?WANDB_API_KEY is required}"
+: "${MODAL_PROFILE:=desmond-zee}"
 DRY="${DICE_DRY_RUN:-0}"
 PY="$DICE_DATA/lerobot/.venv/bin/python"
 PREPARED_INDEX="$DICE_DATA/prepared.json"
@@ -1306,7 +1323,7 @@ ARGS=(--prepared-path "$PREPARED" --output-dir "$OUT" --run-name "$RUN" --datase
   echo 'set -euo pipefail'
   echo "export PYTHONPATH='$DICE_REPO' HF_HOME='$DICE_DATA/cache/hub' HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1"
   echo "export MUJOCO_GL=egl PYOPENGL_PLATFORM=egl LIBERO_CONFIG_PATH='$DICE_DATA/libero-config' TOKENIZERS_PARALLELISM=false"
-  echo "export LEROBOT_SOURCE_ROOT='$DICE_DATA/lerobot' DICE_SYNC_CMD='$DICE_REPO/brev/sync.sh $RUN'"
+  echo "export LEROBOT_SOURCE_ROOT='$DICE_DATA/lerobot' MODAL_PROFILE='$MODAL_PROFILE' DICE_SYNC_CMD='$DICE_REPO/brev/sync.sh $RUN'"
   echo "cd '$DICE_REPO'"
   printf 'exec %q -m script.lingbot_rl_train train --config-json "$(cat %q)"' "$PY" "$OUT/config.json"
   printf ' %q' "${ARGS[@]}"
@@ -1329,7 +1346,7 @@ tmux new-session -d -s "dice-$RUN" "bash $OUT/run.sh"
 echo "started dice-$RUN; attach with: tmux attach -t dice-$RUN; log: $OUT/train.log"
 ```
 
-`brev/sync.sh` (runs on the box, called by the hook):
+`brev/sync.sh` (runs on the box, called by the hook after every checkpoint and at run end):
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1341,40 +1358,39 @@ RUN="${1:?usage: sync.sh <run-name>}"
 : "${DICE_OUTPUT_DIR:?DICE_OUTPUT_DIR is set by the training hook}"
 : "${DICE_STEP:?DICE_STEP is set by the training hook}"
 DRY="${DICE_DRY_RUN:-0}"
-PY="$DICE_DATA/lerobot/.venv/bin/python"
+MODAL="$DICE_DATA/lerobot/.venv/bin/modal"
 run() { if [ "$DRY" = "1" ]; then echo "$*"; else "$@"; fi; }
-if [ -z "${MODAL_TOKEN_ID:-}" ] || [ -z "${MODAL_TOKEN_SECRET:-}" ]; then
-  echo "sync skip: no Modal credentials (step $DICE_STEP)"
+if [ -z "${MODAL_PROFILE:-}" ]; then
+  echo "sync skip: MODAL_PROFILE unset (step $DICE_STEP)"
   exit 0
 fi
+export MODAL_PROFILE
+put() { run "$MODAL" volume put dice-lingbot-rl-runs "$1" "$RUN/$2" --force; }
 STEP_DIR="train_eval/step_$(printf '%06d' "$DICE_STEP")"
-if [ -f "$DICE_OUTPUT_DIR/$STEP_DIR/residual.pt" ]; then
-  run "$PY" -m modal volume put dice-lingbot-rl-runs "$DICE_OUTPUT_DIR/$STEP_DIR/residual.pt" "$RUN/$STEP_DIR/residual.pt" --force
-else
-  run "$PY" -m modal volume put dice-lingbot-rl-runs "$DICE_OUTPUT_DIR/residual.pt" "$RUN/residual.pt" --force
+[ -d "$DICE_OUTPUT_DIR/$STEP_DIR" ] && put "$DICE_OUTPUT_DIR/$STEP_DIR" "$STEP_DIR"
+[ -f "$DICE_OUTPUT_DIR/settings.json" ] && put "$DICE_OUTPUT_DIR/settings.json" settings.json
+if [ -f "$DICE_OUTPUT_DIR/summary.json" ]; then
+  for name in residual.pt resume/latest.pt summary.json train.log; do
+    [ -f "$DICE_OUTPUT_DIR/$name" ] && put "$DICE_OUTPUT_DIR/$name" "$name"
+  done
 fi
-[ -f "$DICE_OUTPUT_DIR/settings.json" ] && run "$PY" -m modal volume put dice-lingbot-rl-runs "$DICE_OUTPUT_DIR/settings.json" "$RUN/settings.json" --force
 echo "sync done: step $DICE_STEP"
 ```
 
-`brev/pull.sh` (runs on the Mac):
+`brev/pull.sh` (runs on the Mac, pulls a run from the Modal store):
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
-HOST="${1:?usage: pull.sh <ssh-host> <run-name> [--resume]}"
-RUN="${2:?usage: pull.sh <ssh-host> <run-name> [--resume]}"
-WITH_RESUME="${3:-}"
-: "${DICE_DATA:=/ephemeral/dice}"
-DEST="result/brev/$RUN"
+RUN="${1:?usage: pull.sh <run-name>}"
+: "${MODAL_PROFILE:=desmond-zee}"
+DEST="result/brev"
 run() { if [ "${DICE_DRY_RUN:-0}" = "1" ]; then echo "$*"; else "$@"; fi; }
 run mkdir -p "$DEST"
-ARGS=(-az --partial --progress)
-[ "$WITH_RESUME" = "--resume" ] || ARGS+=(--exclude resume/)
-run rsync "${ARGS[@]}" "$HOST:$DICE_DATA/runs/$RUN/" "$DEST/"
-echo "pulled $RUN into $DEST"
+run env MODAL_PROFILE="$MODAL_PROFILE" uv run --no-project --with modal==1.1.4 modal volume get dice-lingbot-rl-runs "$RUN" "$DEST/" --force
+echo "pulled $RUN into $DEST/$RUN"
 ```
 
 Then:
@@ -1395,7 +1411,7 @@ Expected: PASS (unchanged).
 ```bash
 git add brev/ .gitignore tests/test_brev_scripts.py
 git commit -m "$(cat <<'MSG'
-Add the Brev push, setup, train, sync, and pull scripts for single-task DICE-RL runs.
+Add the Brev push, setup, train, sync, and pull scripts for single-task DICE-RL runs backed by a Modal volume.
 
 Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
 MSG
@@ -1432,15 +1448,25 @@ Insert before "## Evaluate step 600 on one H100" (or at the end of the RL sectio
 ```markdown
 ## Single-task RL on Brev
 
-Training runs on an on-demand H100 Brev instance; evaluation stays on Modal. Copy `brev/env.example` to `brev/env.sh` (gitignored) and fill in `WANDB_API_KEY`, `HF_TOKEN`, and optionally the Modal token so checkpoints can be pushed to the `dice-lingbot-rl-runs` volume. `DICE_DATA` defaults to `/ephemeral/dice`, the instance's 750 GB data disk (the 97 GB root disk is too small to be safe); the box needs ~30 GB there (frozen text encoder/VAE 14 GB, SFT step 600 9.5 GB, demo latents 2.3 GB, LIBERO assets 0.4 GB).
+Training runs on an on-demand H100 Brev instance; evaluation stays on Modal, and the Modal volume `dice-lingbot-rl-runs` in the `desmond-zee` workspace is the store of record because the Brev disk is ephemeral. Copy `brev/env.example` to `brev/env.sh` (gitignored) and fill in `WANDB_API_KEY` and `HF_TOKEN`. `DICE_DATA` defaults to `/ephemeral/dice`, the instance's 750 GB data disk (the 97 GB root disk is too small to be safe); the box needs ~30 GB there (frozen text encoder/VAE 14 GB, SFT step 600 9.5 GB, demo latents 2.3 GB, LIBERO assets 0.4 GB).
 
 From the Mac, with an ssh alias for the instance:
 
 ```bash
-brev/push.sh <host> --sft
+brev/push.sh <host>
 ```
 
-On the box:
+On the box, authenticate Modal twice — once for the workspace that holds the SFT checkpoint, once for the store — approving each link in your browser:
+
+```bash
+/ephemeral/dice/lerobot/.venv/bin/modal token new --profile source --no-verify
+```
+
+```bash
+/ephemeral/dice/lerobot/.venv/bin/modal token new --profile desmond-zee --no-verify
+```
+
+Then:
 
 ```bash
 brev/setup.sh
@@ -1448,15 +1474,15 @@ brev/train.sh smoke-t0 0 --max-env-steps 32 --no-tmux
 brev/train.sh dice-t0 0
 ```
 
-`setup.sh` mirrors the Modal image (pinned LeRobot revision, same `uv sync` extras), runs `script.lingbot_eval prepare`, downloads the demo latents, and ends with `check-inits`, which asserts two procedural resets differ. `train.sh` writes `runs/<run>/run.sh` and starts it in tmux session `dice-<run>`; rerunning the same name resumes from `runs/<run>/resume/latest.pt`. Every checkpoint (every 80k env steps and at the final step) fires `brev/sync.sh`, which pushes `residual.pt` to Modal when credentials exist and is otherwise a no-op.
+`setup.sh` mirrors the Modal image (pinned LeRobot revision, same `uv sync` extras), pulls the SFT checkpoint cloud-to-cloud from `dice-lingbot-sft-runs` under `MODAL_SFT_PROFILE`, creates the store volume under `MODAL_PROFILE`, runs `script.lingbot_eval prepare`, downloads the demo latents, and ends with `check-inits`, which asserts two procedural resets differ. `train.sh` writes `runs/<run>/run.sh` and starts it in tmux session `dice-<run>`; rerunning the same name resumes from `runs/<run>/resume/latest.pt`. Every checkpoint (every 80k env steps and at the final step) fires `brev/sync.sh`, which pushes that checkpoint's `train_eval/step_XXXXXX/` directory to the store volume, and at run end also the resume state, `summary.json`, and `train.log`.
 
 Back on the Mac:
 
 ```bash
-brev/pull.sh <host> dice-t0
+brev/pull.sh dice-t0
 ```
 
-pulls checkpoints, train-eval JSONs, and `train.log` into `result/brev/dice-t0/`; add `--resume` to also pull the multi-GB resume state.
+pulls the whole run from the Modal store into `result/brev/dice-t0/`.
 ```
 
 - [ ] **Step 3: Update `AGENTS.md` narrow checks**
@@ -1471,7 +1497,7 @@ bash -n brev/setup.sh brev/train.sh brev/sync.sh brev/pull.sh brev/push.sh
 and after the block add one paragraph:
 
 ```markdown
-Recipe version 3 trains the tasks in `RLConfig.task_ids` from procedural LIBERO initial states (`init_states=False`); the canonical 50 init states are reserved for evaluation. Brev scripts under `brev/` honour `DICE_DRY_RUN=1` and are tested that way; never run them for real as local verification. `brev/env.sh` holds secrets and is gitignored.
+Recipe version 3 trains the tasks in `RLConfig.task_ids` from procedural LIBERO initial states (`init_states=False`); the canonical 50 init states are reserved for evaluation. Brev scripts under `brev/` honour `DICE_DRY_RUN=1` and are tested that way; never run them for real as local verification. `brev/env.sh` holds secrets and is gitignored; Modal auth on the box is two `modal token new` profiles (`MODAL_SFT_PROFILE` for the SFT source workspace, `MODAL_PROFILE` for the `desmond-zee` store), never copied token files.
 ```
 
 - [ ] **Step 4: Full verification**
@@ -1502,6 +1528,6 @@ MSG
 
 ## After Phase A lands (not tasks in this plan)
 
-1. `brev/push.sh <host> --sft`, `brev/setup.sh`, then the lean smoke `brev/train.sh smoke-t0 0 --max-env-steps 32 --no-tmux` (~15 min after setup). Confirm: W&B run visible, `runs/smoke-t0/residual.pt` written, `sync done`/`sync skip` printed by the hook.
+1. `brev/push.sh <host>`, the two `modal token new` approvals, `brev/setup.sh`, then the lean smoke `brev/train.sh smoke-t0 0 --max-env-steps 32 --no-tmux` (~15 min after setup). Confirm: W&B run visible, `runs/smoke-t0/residual.pt` written, `sync done` printed by the hook and `smoke-t0/` visible in `modal volume ls dice-lingbot-rl-runs` under `desmond-zee`.
 2. Start the real runs: `brev/train.sh dice-t0 0` on box A and `brev/train.sh dice-t4 4` on box B.
 3. Phase B plan: eval protocol v2 (`heldout` stage, 50 states × 2 seeds), SFT baseline on Modal, Modal checkpoint evals from the synced `residual.pt`, k=1 switch, paired analysis. Must land before the runs reach 80k (~9 h).
