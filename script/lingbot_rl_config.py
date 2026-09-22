@@ -1,3 +1,4 @@
+import re
 from dataclasses import asdict, dataclass
 
 from script.lingbot_eval_config import (
@@ -141,6 +142,15 @@ class RLConfig:
 
     def to_dict(self):
         return {**asdict(self), "protocol": self.protocol()}
+
+
+def residual_step(residual_path):
+    match = re.search(r"step_(\d+)", str(residual_path or ""))
+    return int(match.group(1)) if match else None
+
+
+def eval_dir_name(stage, k, step=None):
+    return f"{stage}-k{k}" + (f"-step{step:06d}" if step is not None else "")
 
 
 def main():

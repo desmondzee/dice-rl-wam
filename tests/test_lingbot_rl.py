@@ -2060,3 +2060,68 @@ def test_budget_cut_stops_every_stream_at_the_budget(tmp_path, monkeypatch):
     assert summary["env_steps"] == 30
     assert [row["n_env_actions"] for row in _online_rows(tmp_path)] == [12, 12, 3, 3]
     assert policy.observed == [2] * 12 + [2] * 3
+
+
+def _mocked_evaluate(tmp_path, monkeypatch, seen):
+    import script.lingbot_rl_train as train
+
+    _StubEnv.instances.clear()
+    monkeypatch.setattr(train, "LiberoEnv", _StubEnv)
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _stub_policy())
+    monkeypatch.setattr("script.lingbot_eval.read_checkpoint_metadata",
+                        lambda path: {"architecture": {}, "normalization": {"q01": [-1.0] * 30, "q99": [1.0] * 30}})
+    tasks = [{"task_id": task, "instruction": f"task-{task}", "initial_state_count": 50} for task in range(10)]
+    monkeypatch.setattr("script.lingbot_eval.describe_suite", lambda path: (None, tasks))
+
+    def rollout(policy, env, entry, instruction, norm, device):
+        seen.append((policy.eval_candidates, entry["task_id"], entry["init_state_id"], entry["seed_index"]))
+        return {**entry, "instruction": instruction, "success": entry["seed_index"] == 0}
+
+    monkeypatch.setattr("script.lingbot_eval.run_episode", rollout)
+    return train, _prepared(tmp_path)
+
+
+def test_evaluate_writes_stage_k_step_directory_and_uses_k_candidates(tmp_path, monkeypatch):
+    seen = []
+    train, prepared = _mocked_evaluate(tmp_path, monkeypatch, seen)
+    residual = tmp_path / "train_eval" / "step_080000" / "residual.pt"
+    train.save_inference(residual, DiceResidualModel(device="cpu"))
+    summary = train.evaluate(RLConfig(task_ids=(0,)), prepared, tmp_path, "dice-t0", residual, task_ids=(0,), k=4)
+    eval_dir = tmp_path / "eval" / "heldout-k4-step080000"
+    assert summary["complete"] and summary["expected_episodes"] == 100 and set(summary["per_task"]) == {"0"}
+    assert summary["macro_success_rate"] == 0.5
+    assert {(k, task) for k, task, _, _ in seen} == {(4, 0)}
+    assert {(state, index) for _, _, state, index in seen} == {(s, i) for s in range(50) for i in range(2)}
+    assert len(list((eval_dir / "episodes" / "task_00").glob("episode_*.json"))) == 100
+    settings = __import__("json").loads((eval_dir / "settings.json").read_text())
+    assert (settings["stage"], settings["k"], settings["step"]) == ("heldout", 4, 80000)
+    assert settings["residual_path"] == str(residual) and settings["config"]["protocol"]["version"] == 2
+    assert len(settings["episode_plan"]) == 100 and settings["rl"]["k_candidates"] == 4
+    assert [env.kwargs["task_id"] for env in _StubEnv.instances] == [0]
+    assert train.evaluate(RLConfig(task_ids=(0,)), prepared, tmp_path, "dice-t0", residual, resume=True, task_ids=(0,), k=4) == summary
+    assert len(seen) == 100
+
+
+def test_evaluate_k1_uses_root_residual_without_step_suffix(tmp_path, monkeypatch):
+    seen = []
+    train, prepared = _mocked_evaluate(tmp_path, monkeypatch, seen)
+    train.save_inference(tmp_path / "residual.pt", DiceResidualModel(device="cpu"))
+    train.evaluate(RLConfig(task_ids=(4,)), prepared, tmp_path, "dice-t4", stage="smoke", k=1)
+    assert (tmp_path / "eval" / "smoke-k1" / "summary.json").is_file()
+    assert seen == [(1, 4, 0, 0)]
+    with pytest.raises(ValueError, match="1 .* or 4"):
+        train.evaluate(RLConfig(task_ids=(4,)), prepared, tmp_path, "dice-t4", k=2)
+
+
+def test_eval_cli_plumbs_stage_k_and_task_ids(monkeypatch, capsys):
+    import script.lingbot_rl_train as train
+
+    calls = []
+    monkeypatch.setattr(train, "evaluate", lambda *args, **kwargs: calls.append((args, kwargs)) or {"ok": True})
+    monkeypatch.setattr("sys.argv", ["prog", "eval", "--output-dir", "/rl/dice-t0", "--residual-path",
+                        "/rl/dice-t0/train_eval/step_080000/residual.pt", "--eval-stage", "heldout", "--eval-k", "1", "--task-ids", "0"])
+    train.main()
+    (args, kwargs), = calls
+    assert str(args[4]) == "/rl/dice-t0/train_eval/step_080000/residual.pt"
+    assert kwargs == {"stage": "heldout", "task_ids": (0,), "k": 1}
+    assert __import__("json").loads(capsys.readouterr().out) == {"ok": True}

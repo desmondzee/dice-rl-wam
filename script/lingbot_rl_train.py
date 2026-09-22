@@ -12,7 +12,7 @@ import torch
 
 from script.lingbot_eval_config import TASK_IDS, EvalConfig, episode_plan
 from script.lingbot_rl_buffer import ChunkReplay
-from script.lingbot_rl_config import RLConfig
+from script.lingbot_rl_config import RLConfig, eval_dir_name, residual_step
 from script.lingbot_rl_data import featurize_experts, load_manifest_episodes
 from script.lingbot_rl_model import BATCH, UTD, DiceResidualModel, apply_residual
 from script.lingbot_rl_policy import histogram_entropy, load_residual_policy, slice_env_actions
@@ -606,17 +606,17 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
 
 
 def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, residual_path=None,
-             resume=False, commit=None):
+             resume=False, commit=None, stage="heldout", task_ids=None, k=4):
     from script.lingbot_eval import (
         aggregate_results, describe_suite, read_checkpoint_metadata, read_json, run_episode, write_json,
     )
 
     config = (config or RLConfig()).validate()
+    if k not in (1, 4):
+        raise ValueError("Eval candidates must be 1 (residual only) or 4 (critic best-of-4)")
     eval_cfg = EvalConfig(
-        source_run=config.source_run, checkpoint_step=config.checkpoint_step, stage="eval", seed=42)
-    proto = eval_cfg.protocol()
-    if proto["episodes_per_task"] != 20 or proto["initial_state_offset"] != 1 or proto["base_seed"] != 42:
-        raise ValueError("Comparison eval drifted from the 69% SFT protocol")
+        source_run=config.source_run, checkpoint_step=config.checkpoint_step, stage=stage, seed=42,
+        task_ids=tuple(task_ids) if task_ids else config.task_ids).validate()
     prepared = _read_prepared(prepared_path)
     device = _device()
     if device == "cuda":
@@ -631,17 +631,22 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     except Exception as exc:
         raise RuntimeError(f"Failed to load residual weights {residual_path}: {exc}") from exc
     policy.residual_model = model
-    policy.eval_candidates = config.k_candidates
+    policy.eval_candidates = k
     suite, tasks = describe_suite(prepared["assets_path"])
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    tasks = [task for task_id in eval_cfg.task_ids for task in tasks if task["task_id"] == task_id]
+    step = residual_step(residual_path)
+    eval_dir = Path(output_dir) / "eval" / eval_dir_name(stage, k, step)
     plans = {task["task_id"]: episode_plan(eval_cfg, task["task_id"], task["initial_state_count"]) for task in tasks}
+    write_json(eval_dir / "settings.json", {
+        "config": eval_cfg.to_dict(), "rl": config.to_dict(), "stage": stage, "k": k,
+        "residual_path": str(residual_path), "step": step,
+        "episode_plan": [entry for task in tasks for entry in plans[task["task_id"]]]})
     rows = []
     for task in tasks:
         env = make_env(task["task_id"], suite)
         try:
             for entry in plans[task["task_id"]]:
-                path = output_dir / "eval" / "episodes" / f"task_{task['task_id']:02d}" / f"episode_{entry['episode_index']:03d}.json"
+                path = eval_dir / "episodes" / f"task_{task['task_id']:02d}" / f"episode_{entry['episode_index']:03d}.json"
                 if resume and path.exists():
                     rows.append(read_json(path))
                     continue
@@ -652,9 +657,9 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
                     commit()
         finally:
             env.close()
-    summary = aggregate_results(rows, episodes_per_task=eval_cfg.episodes_per_task)
-    write_json(output_dir / "eval" / "summary.json", summary)
-    write_json(output_dir / "eval" / "settings.json", {"config": eval_cfg.to_dict(), "rl": config.to_dict()})
+    summary = aggregate_results(rows, task_ids=eval_cfg.task_ids,
+                                episodes_per_task=eval_cfg.episodes_per_task * eval_cfg.policy_seeds)
+    write_json(eval_dir / "summary.json", summary)
     return summary
 
 
@@ -671,6 +676,9 @@ def main():
     parser.add_argument("--result-volume")
     parser.add_argument("--max-env-steps", type=int)
     parser.add_argument("--task-id", type=int)
+    parser.add_argument("--eval-stage", default="heldout")
+    parser.add_argument("--eval-k", type=int, default=4)
+    parser.add_argument("--task-ids")
     args = parser.parse_args()
     if args.operation == "check-inits":
         if args.task_id is None:
@@ -702,8 +710,10 @@ def main():
             max_env_steps=args.max_env_steps, dataset_root=args.dataset_root,
         )
     else:
+        task_ids = tuple(int(task) for task in args.task_ids.split(",")) if args.task_ids else None
         summary = evaluate(
-            config, args.prepared_path, args.output_dir, args.run_name, args.residual_path, args.resume, commit)
+            config, args.prepared_path, args.output_dir, args.run_name, args.residual_path, args.resume, commit,
+            stage=args.eval_stage, task_ids=task_ids, k=args.eval_k)
     print(json.dumps(summary, indent=2))
 
 
