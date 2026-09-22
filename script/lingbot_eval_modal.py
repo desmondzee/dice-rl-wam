@@ -8,7 +8,7 @@ from pathlib import Path
 
 import modal
 
-from script.lingbot_eval_config import EvalConfig, LEROBOT_REVISION, validate_name
+from script.lingbot_eval_config import EvalConfig, LEROBOT_REVISION, STAGES, TASK_IDS, validate_name
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -119,13 +119,14 @@ def download_results(run_name, download_dir):
 
 @app.local_entrypoint()
 def main(stage: str = "smoke", source_run: str = "libero30-sft", checkpoint_step: int = 600,
-         run_name: str = "", seed: int = 42, resume: bool = False,
+         run_name: str = "", seed: int = 42, tasks: str = "", resume: bool = False,
          wandb_project: str = "dice-lingbot-va-eval", wandb_entity: str = "",
          download_dir: str = "result/lingbot-eval"):
-    if stage not in ("prepare", "smoke", "eval"):
-        raise ValueError("Stage must be prepare, smoke, or eval")
+    if stage != "prepare" and stage not in STAGES:
+        raise ValueError("Stage must be prepare, smoke, eval, or heldout")
+    task_ids = tuple(int(task) for task in tasks.split(",")) if tasks else TASK_IDS
     cfg = EvalConfig(source_run=source_run, checkpoint_step=checkpoint_step,
-                     stage="eval" if stage == "prepare" else stage, seed=seed,
+                     stage="eval" if stage == "prepare" else stage, seed=seed, task_ids=task_ids,
                      wandb_project=wandb_project, wandb_entity=wandb_entity or None).validate()
     run_name = validate_name(run_name or cfg.default_run_name)
     if stage != "prepare" and (Path(download_dir) / run_name).exists():

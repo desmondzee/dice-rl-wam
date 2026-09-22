@@ -386,12 +386,14 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
         raise ValueError("LIBERO task assets changed after preparation")
     from lerobot.envs.libero import LiberoEnv
 
+    tasks = [task for task_id in config.task_ids for task in tasks if task["task_id"] == task_id]
     plans = {task["task_id"]: episode_plan(config, task["task_id"], task["initial_state_count"]) for task in tasks}
+    per_task = config.episodes_per_task * config.policy_seeds
     settings = {"config": config.to_dict(), "checkpoint": prepared,
         "harness_sha256": file_sha256(__file__),
         "config_module_sha256": file_sha256(Path(__file__).with_name("lingbot_eval_config.py")),
         "packages": {name: importlib.metadata.version(name) for name in ("lerobot", "torch", "diffusers", "transformers", "hf-libero", "mujoco", "robosuite")},
-        "episode_plan": [entry for task_id in TASK_IDS for entry in plans[task_id]]}
+        "episode_plan": [entry for task_id in config.task_ids for entry in plans[task_id]]}
     output_dir = Path(output_dir)
     if output_dir.exists():
         if not resume:
@@ -404,7 +406,7 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
         output_dir.mkdir(parents=True)
         write_json(output_dir / "settings.json", settings)
     rows = []
-    for task_id in TASK_IDS:
+    for task_id in config.task_ids:
         for entry in plans[task_id]:
             path = output_dir / "episodes" / f"task_{task_id:02d}" / f"episode_{entry['episode_index']:03d}.json"
             if path.exists():
@@ -412,7 +414,7 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
                 if any(row.get(key) != value for key, value in entry.items()):
                     raise ValueError("Saved episode identity differs from the evaluation plan")
                 rows.append(row)
-    summary = aggregate_results(rows, episodes_per_task=config.episodes_per_task)
+    summary = aggregate_results(rows, config.task_ids, per_task)
     write_json(output_dir / "summary.json", summary)
     if commit is not None:
         commit()
@@ -429,7 +431,7 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
         for task in tasks:
             task_id = task["task_id"]
             done = {row["episode_index"] for row in rows if row["task_id"] == task_id}
-            if len(done) == config.episodes_per_task:
+            if len(done) == per_task:
                 continue
             env = LiberoEnv(task_suite=suite, task_id=task_id, task_suite_name="libero_10",
                 episode_length=520, observation_height=128, observation_width=128, obs_type="pixels",
@@ -454,7 +456,7 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
                     rows.append(row)
                     path = output_dir / "episodes" / f"task_{task_id:02d}" / f"episode_{entry['episode_index']:03d}.json"
                     write_json(path, row)
-                    summary = aggregate_results(rows, episodes_per_task=config.episodes_per_task)
+                    summary = aggregate_results(rows, config.task_ids, per_task)
                     write_json(output_dir / "summary.json", summary)
                     if commit is not None:
                         commit()

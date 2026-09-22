@@ -11,7 +11,7 @@ from pathlib import Path
 
 IDENTITY_KEYS = ("task_id", "episode_index", "init_state_id", "seed")
 EPISODE_COLUMNS = (
-    "task_id", "task_name", "instruction", "episode_index", "init_state_id", "seed", "success",
+    "task_id", "task_name", "instruction", "episode_index", "init_state_id", "seed_index", "seed", "success",
     "policy_steps", "seconds", "terminated", "truncated", "peak_gpu_memory_bytes", "video", "record_path",
 )
 METRIC_COLUMNS = (
@@ -91,6 +91,7 @@ def build_report_data(result_dir):
         per_task = protocol["episodes_per_task"]
         max_steps = protocol["max_policy_steps"]
         offset = protocol["initial_state_offset"]
+        policy_seeds = protocol.get("policy_seeds", 1)
         tasks = settings["checkpoint"]["tasks"]
         plan = settings["episode_plan"]
         require(config["source_run"] == settings["checkpoint"]["source_run"] and
@@ -99,7 +100,7 @@ def build_report_data(result_dir):
         raise ValueError("Missing or malformed evaluation settings") from exc
     require(isinstance(task_ids, list) and task_ids and all(integer(task) for task in task_ids), "Invalid task IDs")
     require(len(set(task_ids)) == len(task_ids), "Duplicate task IDs")
-    require(integer(per_task, 1) and integer(max_steps, 1) and integer(offset), "Invalid episode protocol")
+    require(integer(per_task, 1) and integer(max_steps, 1) and integer(offset) and integer(policy_seeds, 1), "Invalid episode protocol")
     require(isinstance(tasks, list) and all(isinstance(task, dict) and integer(task.get("task_id")) for task in tasks),
             "Invalid task metadata")
     task_map = {task["task_id"]: task for task in tasks}
@@ -108,7 +109,7 @@ def build_report_data(result_dir):
         require(isinstance(task.get("instruction"), str) and task["instruction"] and
                 isinstance(task.get("name"), str) and integer(task.get("initial_state_count"), offset + per_task),
                 "Invalid task instruction or initial-state count")
-    expected = {(task, episode) for task in task_ids for episode in range(per_task)}
+    expected = {(task, episode) for task in task_ids for episode in range(per_task * policy_seeds)}
     require(isinstance(plan, list) and len(plan) == len(expected), "Incomplete episode plan")
     require(all(isinstance(entry, dict) and all(integer(entry.get(key)) for key in IDENTITY_KEYS) for entry in plan),
             "Invalid episode plan identity")
@@ -119,10 +120,12 @@ def build_report_data(result_dir):
     rows = []
     for entry in sorted(plan, key=lambda item: (item["task_id"], item["episode_index"])):
         task_id, episode_index = entry["task_id"], entry["episode_index"]
-        require(entry["init_state_id"] == offset + episode_index and entry["seed"] < 2**32, "Invalid planned state or seed")
+        require(entry["init_state_id"] == offset + episode_index % per_task and entry["seed"] < 2**32 and
+                entry.get("seed_index", 0) == episode_index // per_task, "Invalid planned state or seed")
         relative = f"episodes/task_{task_id:02d}/episode_{episode_index:03d}.json"
         row = read(relative)
-        require(all(integer(row.get(key)) and row[key] == entry[key] for key in IDENTITY_KEYS), f"Episode identity differs: {relative}")
+        require(all(integer(row.get(key)) and row[key] == entry[key] for key in IDENTITY_KEYS) and
+                row.get("seed_index", 0) == entry.get("seed_index", 0), f"Episode identity differs: {relative}")
         require(row.get("instruction") == task_map[task_id]["instruction"], f"Episode instruction differs: {relative}")
         require(all(type(row.get(key)) is bool for key in ("success", "terminated", "truncated")), f"Invalid outcome: {relative}")
         require(row["success"] or row["terminated"] or row["truncated"], f"Missing episode end condition: {relative}")
@@ -155,7 +158,7 @@ def build_report_data(result_dir):
         require(number(saved.get("success_rate")) and math.isclose(saved["success_rate"], task["success_rate"], rel_tol=0, abs_tol=1e-12),
                 "Per-task success rate differs")
     return {"report_version": 1, "run_name": root.name, "settings": settings,
-            "overall": {**overall, "task_count": len(task_ids), "episodes_per_task": per_task, "macro_success_rate": macro},
+            "overall": {**overall, "task_count": len(task_ids), "episodes_per_task": per_task * policy_seeds, "macro_success_rate": macro},
             "tasks": task_results, "episodes": rows, "source_sha256": hashes,
             "timing_note": TIMING_NOTE, "memory_note": MEMORY_NOTE}
 
@@ -191,7 +194,7 @@ def html_text(report):
     for row in report["episodes"]:
         cells = "".join(f"<td>{escape(value)}</td>" for value in (
             row["task_id"], row["episode_index"], row["instruction"], "Success" if row["success"] else "Failure",
-            row["policy_steps"], f"{row['seconds']:.2f}", row["init_state_id"], row["seed"],
+            row["policy_steps"], f"{row['seconds']:.2f}", row["init_state_id"], row.get("seed_index", 0), row["seed"],
             row["terminated"], row["truncated"], f"{row['peak_gpu_memory_bytes'] / 2**30:.2f}",
         ))
         video = f'<a href="{escape(row["video"])}">Video</a>' if row.get("video") else "Not recorded"
@@ -244,7 +247,7 @@ Episode and task IDs are zero-based. CSV text that could be interpreted as a spr
 <p><span id="shown">{overall['completed_episodes']}</span> / {overall['completed_episodes']} episodes shown</p>
 <div class="scroll"><table id="episodes"><thead><tr>
 <th>Task ID</th><th>Episode ID</th><th>Instruction</th><th>Outcome</th><th>Actions</th><th>Seconds</th>
-<th>Initial state ID</th><th>Seed</th><th>Terminated</th><th>Truncated</th><th>Cumulative peak GiB</th><th>Video</th><th>Record</th>
+<th>Initial state ID</th><th>Seed index</th><th>Seed</th><th>Terminated</th><th>Truncated</th><th>Cumulative peak GiB</th><th>Video</th><th>Record</th>
 </tr></thead><tbody>{''.join(episode_rows)}</tbody></table></div>
 <details><summary><h2>Configuration and provenance</h2></summary><pre>{escape(json.dumps(provenance, indent=2, sort_keys=True))}</pre></details>
 <script>
