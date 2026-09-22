@@ -105,7 +105,7 @@ The named volumes are `dice-lingbot-sft-cache` (dataset/model assets) and `dice-
 
 ## Single-task RL on Brev
 
-Training runs on an on-demand H100 Brev instance; evaluation stays on Modal, and the Modal volume `dice-lingbot-rl-runs` in the `desmond-zee` workspace is the store of record because the Brev disk is ephemeral. Copy `brev/env.example` to `brev/env.sh` (gitignored) and fill in `WANDB_API_KEY` and `HF_TOKEN`. `DICE_DATA` defaults to `/ephemeral/dice`, the instance's 750 GB data disk (the 97 GB root disk is too small to be safe); the box needs ~30 GB there (frozen text encoder/VAE 14 GB, SFT step 600 9.5 GB, demo latents 2.3 GB, LIBERO assets 0.4 GB).
+Training runs on an on-demand H100 Brev instance; evaluation stays on Modal, and the Modal volume `dice-lingbot-rl-runs` in the `desmond-zee` workspace is the store of record because the Brev disk is ephemeral. Secrets live in `brev/env.sh` on the box (gitignored; `push.sh` never copies it). `DICE_DATA` defaults to `/ephemeral/dice`, the instance's 750 GB data disk (the 97 GB root disk is too small to be safe); the box needs ~30 GB there (frozen text encoder/VAE 14 GB, SFT step 600 9.5 GB, demo latents 2.3 GB, LIBERO assets 0.4 GB).
 
 From the Mac, with an ssh alias for the instance:
 
@@ -113,7 +113,13 @@ From the Mac, with an ssh alias for the instance:
 brev/push.sh <host>
 ```
 
-On the box, authenticate Modal twice — once for the workspace that holds the SFT checkpoint, once for the store — approving each link in your browser:
+On the box, create `brev/env.sh` from `brev/env.example`, fill in `WANDB_API_KEY` and `HF_TOKEN`, and run setup once; on a fresh box it installs the environment and then stops, asking for the two Modal profiles:
+
+```bash
+cp brev/env.example brev/env.sh && brev/setup.sh
+```
+
+Create the profiles it names — one for the workspace that holds the SFT checkpoint (`james-j-carver2`), one for the store (`desmond-zee`) — approving each link in your browser and choosing that workspace:
 
 ```bash
 /ephemeral/dice/lerobot/.venv/bin/modal token new --profile source --no-verify
@@ -123,7 +129,7 @@ On the box, authenticate Modal twice — once for the workspace that holds the S
 /ephemeral/dice/lerobot/.venv/bin/modal token new --profile desmond-zee --no-verify
 ```
 
-Then:
+Then run setup again to finish, smoke, and start the run:
 
 ```bash
 brev/setup.sh
@@ -131,7 +137,7 @@ brev/train.sh smoke-t0 0 --max-env-steps 32 --no-tmux
 brev/train.sh dice-t0 0
 ```
 
-`setup.sh` mirrors the Modal image (pinned LeRobot revision, same `uv sync` extras), pulls the SFT checkpoint cloud-to-cloud from `dice-lingbot-sft-runs` under `MODAL_SFT_PROFILE`, creates the store volume under `MODAL_PROFILE`, runs `script.lingbot_eval prepare`, downloads the demo latents, and ends with `check-inits`, which asserts two procedural resets differ. `train.sh` writes `runs/<run>/run.sh` and starts it in tmux session `dice-<run>`; rerunning the same name resumes from `runs/<run>/resume/latest.pt`. Every checkpoint (every 80k env steps and at the final step) fires `brev/sync.sh`, which pushes that checkpoint's `train_eval/step_XXXXXX/` directory to the store volume, and at run end also the resume state, `summary.json`, and `train.log`.
+`setup.sh` mirrors the Modal image (pinned LeRobot revision, same `uv sync` extras), pulls the SFT checkpoint cloud-to-cloud from `dice-lingbot-sft-runs` under `MODAL_SFT_PROFILE`, creates the store volume under `MODAL_PROFILE`, runs `script.lingbot_eval prepare`, downloads the demo latents, and ends with `check-inits`, which asserts two procedural resets differ. `train.sh` writes `$DICE_DATA/runs/<run>/run.sh` and starts it in tmux session `dice-<run>`; rerunning the same name resumes from `runs/<run>/resume/latest.pt`. Every checkpoint (every 80k env steps and at the final step) fires `brev/sync.sh`, which pushes that checkpoint's `train_eval/step_XXXXXX/` directory, `settings.json`, and the resume state `resume/latest.pt` to the store volume, and at run end also the root `residual.pt`, `summary.json`, and `train.log`.
 
 Back on the Mac:
 
