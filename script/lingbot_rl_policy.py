@@ -95,7 +95,7 @@ def expand_conditional_kv(transformer, k, n=1):
             cache[key] = cache[key][:n].repeat_interleave(k, dim=0)
 
 
-def _clone_cache(cache):
+def _hold_cache(cache):
     return {key: value.clone() if torch.is_tensor(value) and key not in ("k", "v") else value
             for key, value in cache.items()}
 
@@ -128,11 +128,8 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         return torch.cat(mu_norm.split(mu_norm.shape[0] // len(keys), dim=0), dim=-1).to(self.config.device)
 
     def _maybe_init_prompt(self, batch):
-        if self._prompt_embeds is not None or batch is None:
-            return
-        task = batch.get("task")
-        self._prompt = list(task) if isinstance(task, (list, tuple)) else [task or ""]
-        self._prompt_embeds, self._negative_prompt_embeds = self._encode_prompt(self._prompt)
+        if self._prompt_embeds is None and batch is not None:
+            self._prompt_embeds, self._negative_prompt_embeds = self._encode_prompt(list(batch["task"]))
 
     def _repeat_input_for_cfg(self, input_dict):
         rows = input_dict["noisy_latents"].shape[0]
@@ -164,24 +161,19 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
     def drop_stream(self, index):
         n = self._prompt_embeds.shape[0]
         self._prompt_embeds = _without_stream(self._prompt_embeds, n, index)
-        if getattr(self, "_init_latent", None) is not None:
-            self._init_latent = _without_stream(self._init_latent, n, index)
-        if self._executed_actions is not None:
-            self._executed_actions = _without_stream(self._executed_actions, n, index)
+        self._init_latent = _without_stream(self._init_latent, n, index)
+        self._executed_actions = _without_stream(self._executed_actions, n, index)
         self._obs_buffer = [
             {key: _without_stream(value, n, index) for key, value in obs.items()} for obs in self._obs_buffer
         ]
         for block in self.transformer.blocks:
-            cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
-            if cache is not None:
-                for key in ("k", "v"):
-                    cache[key] = _without_stream(cache[key], n, index)
-        for key in ("streaming_vae", "streaming_vae_half"):
-            vae = (self._frozen or {}).get(key)
-            if vae is not None:
-                vae.feat_cache = [
-                    _without_stream(item, n, index) if torch.is_tensor(item) else item for item in vae.feat_cache
-                ]
+            cache = block.attn1.attn_caches["pos"]
+            for key in ("k", "v"):
+                cache[key] = _without_stream(cache[key], n, index)
+        self._streaming_vae.feat_cache = [
+            _without_stream(item, n, index) if torch.is_tensor(item) else item
+            for item in self._streaming_vae.feat_cache
+        ]
 
     def commit_executed(self, mlp_chunk, first_chunk=False):
         chunk = mask_unused_dof(mlp_chunk)
@@ -252,7 +244,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
             if cache is None:
                 raise RuntimeError("action candidate batching failed")
-            snaps.append(_clone_cache(cache))
+            snaps.append(_hold_cache(cache))
         return snaps
 
     def _restore_kv(self, snaps):

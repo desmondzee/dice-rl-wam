@@ -1563,6 +1563,7 @@ def test_train_single_task_uses_procedural_envs_and_only_that_task(tmp_path, mon
     assert {env.kwargs["task_id"] for env in _StubEnv.instances} == {4}
     assert all(env.kwargs["init_states"] is False for env in _StubEnv.instances)
     assert len(set(_StubEnv.instances[0].seeds)) == 2
+    assert logs and all(np.isfinite(log["delta_v"]) for log in logs)
 
 
 def test_collection_env_saves_are_throttled_to_every_tenth_episode(tmp_path, monkeypatch):

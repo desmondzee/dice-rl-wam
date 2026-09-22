@@ -70,30 +70,25 @@ class ChunkReplay:
     def add_online(self, row, stream=0):
         self._store(row, 0.0, stream)
 
-    def add_expert(self, row, stream=0):
-        self._store(row, 1.0, stream)
+    def add_expert(self, row):
+        self._store(row, 1.0, 0)
 
     def _ready(self):
-        ready = [(None, index) for index in range(len(self._data))]
+        ready = [(self._data, index) for index in range(len(self._data))]
         for stream in sorted(self._open):
             episode = self._open[stream]
             for index, row in enumerate(episode):
-                if index == len(episode) - 1 and float(row["done"]) != 1.0:
-                    continue
-                ready.append((stream, index))
+                if index < len(episode) - 1 or float(row["done"]) == 1.0:
+                    ready.append((episode, index))
         return ready
 
-    def _row(self, stream, index):
-        return self._data[index] if stream is None else self._open[stream][index]
-
     def has_ready_online(self):
-        return any(float(self._row(stream, index)["is_expert"]) == 0.0 for stream, index in self._ready())
+        return any(float(episode[index]["is_expert"]) == 0.0 for episode, index in self._ready())
 
-    def _n_step_view(self, stream, index):
-        row = self._row(stream, index)
-        if stream is None:
+    def _n_step_view(self, episode, index):
+        row = episode[index]
+        if episode is self._data:
             return row
-        episode = self._open[stream]
         length = len(episode)
         n_steps = min(N_STEP_CHUNKS, length - index)
         ret = 0.0
@@ -148,8 +143,8 @@ class ChunkReplay:
 
     def sample(self, batch_size, expert_ratio):
         ready = self._ready()
-        online = [i for i, key in enumerate(ready) if float(self._row(*key)["is_expert"]) == 0.0]
-        expert = [i for i, key in enumerate(ready) if float(self._row(*key)["is_expert"]) == 1.0]
+        online = [i for i, (episode, index) in enumerate(ready) if float(episode[index]["is_expert"]) == 0.0]
+        expert = [i for i, (episode, index) in enumerate(ready) if float(episode[index]["is_expert"]) == 1.0]
         if not online:
             raise ValueError("Replay has no online chunks")
         n_expert = int(round(batch_size * expert_ratio)) if expert else 0

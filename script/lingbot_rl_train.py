@@ -494,14 +494,17 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     raise RuntimeError("action candidate batching failed")
                 stars = []
                 chosen = []
+                delta_v = []
                 with torch.no_grad():
                     for position in range(len(live)):
                         rows = slice(position * k, (position + 1) * k)
                         state_k = state[position:position + 1].expand(k, -1)
                         executed = apply_residual(a_base[rows], model.actor(state_k, noise[rows]))
-                        star = int(model.critic(state_k, executed).reshape(-1).argmax())
+                        q_values = model.critic(state_k, executed)
+                        star = int(q_values.argmax())
                         stars.append(position * k + star)
                         chosen.append(executed[star:star + 1])
+                        delta_v.append(float(q_values.max() - model.critic(state_k, a_base[rows]).mean()))
                 chosen = torch.cat(chosen)
                 policy.commit_executed(chosen.cpu(), first_chunk=decoded["first_chunk"])
                 env_actions = slice_env_actions(chosen.cpu(), decoded["first_chunk"])
@@ -566,6 +569,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                             "q_min": actor_info["q_min"], "bc_filter_rate": actor_info["bc_filter_rate"],
                             "expert_ratio": expert_ratio, "episode_return": stat["return"],
                             "episode_success": stat["success"], "episode_length": stat["length"],
+                            "delta_v": delta_v[position],
                         }
                         run.log(log)
                 ended = [position for position in range(len(live)) if over[position]]
