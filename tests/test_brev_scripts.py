@@ -57,6 +57,7 @@ def test_train_dry_run_builds_single_task_command_and_resumes_when_state_exists(
     assert "tmux new-session -d -s dice-unit-t4" in first.stdout
     assert "DICE_SYNC_CMD" in first.stdout
     assert "MODAL_PROFILE='desmond-zee'" in first.stdout
+    assert "DICE_DATA='" + env["DICE_DATA"] + "'" in first.stdout
     assert "--config-json" in first.stdout
     run_dir = Path(env["DICE_DATA"]) / "runs" / "unit-t4"
     assert (run_dir / "run.sh").is_file()
@@ -68,6 +69,10 @@ def test_train_dry_run_builds_single_task_command_and_resumes_when_state_exists(
     smoke = _run("train.sh", ["smoke", "0", "--max-env-steps", "32"], env)
     assert "--max-env-steps 32" in smoke.stdout
     assert '"wandb_entity": null' in smoke.stdout
+    foreground = _run("train.sh", ["unit-t4", "4", "--no-tmux"], env)
+    assert foreground.returncode == 0, foreground.stderr
+    assert f"bash {run_dir / 'run.sh'}" in foreground.stdout
+    assert "tmux new-session" not in foreground.stdout
 
 
 def test_train_requires_run_name_task_and_prepared(tmp_path):
@@ -87,6 +92,8 @@ def test_sync_skips_without_profile_and_puts_step_dir_then_final_state(tmp_path)
     (out / "train_eval" / "step_080000" / "residual.pt").write_text("")
     (out / "residual.pt").write_text("")
     (out / "settings.json").write_text("{}")
+    (out / "resume").mkdir()
+    (out / "resume" / "latest.pt").write_text("")
     base = {**env, "DICE_OUTPUT_DIR": str(out), "DICE_STEP": "80000"}
     skipped = _run("sync.sh", ["r"], {**base, "MODAL_PROFILE": ""})
     assert skipped.returncode == 0
@@ -96,9 +103,8 @@ def test_sync_skips_without_profile_and_puts_step_dir_then_final_state(tmp_path)
     assert "modal volume put dice-lingbot-rl-runs" in put.stdout
     assert f"{out}/train_eval/step_080000 r/train_eval/step_080000" in put.stdout
     assert f"{out}/settings.json r/settings.json" in put.stdout
-    assert "resume/latest.pt" not in put.stdout
-    (out / "resume").mkdir()
-    (out / "resume" / "latest.pt").write_text("")
+    assert f"{out}/resume/latest.pt r/resume/latest.pt" in put.stdout
+    assert "summary.json" not in put.stdout
     (out / "summary.json").write_text("{}")
     (out / "train.log").write_text("")
     final = _run("sync.sh", ["r"], {**base, "DICE_STEP": "660000"})

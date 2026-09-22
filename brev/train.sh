@@ -37,7 +37,7 @@ ARGS=(--prepared-path "$PREPARED" --output-dir "$OUT" --run-name "$RUN" --datase
   echo 'set -euo pipefail'
   echo "export PYTHONPATH='$DICE_REPO' HF_HOME='$DICE_DATA/cache/hub' HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1"
   echo "export MUJOCO_GL=egl PYOPENGL_PLATFORM=egl LIBERO_CONFIG_PATH='$DICE_DATA/libero-config' TOKENIZERS_PARALLELISM=false"
-  echo "export LEROBOT_SOURCE_ROOT='$DICE_DATA/lerobot' MODAL_PROFILE='$MODAL_PROFILE' DICE_SYNC_CMD='$DICE_REPO/brev/sync.sh $RUN'"
+  echo "export LEROBOT_SOURCE_ROOT='$DICE_DATA/lerobot' DICE_DATA='$DICE_DATA' MODAL_PROFILE='$MODAL_PROFILE' DICE_SYNC_CMD='$DICE_REPO/brev/sync.sh $RUN'"
   echo "cd '$DICE_REPO'"
   printf 'exec %q -m script.lingbot_rl_train train --config-json "$(cat %q)"' "$PY" "$OUT/config.json"
   printf ' %q' "${ARGS[@]}"
@@ -46,7 +46,11 @@ ARGS=(--prepared-path "$PREPARED" --output-dir "$OUT" --run-name "$RUN" --datase
 chmod +x "$OUT/run.sh"
 if [ "$DRY" = "1" ]; then
   cat "$OUT/config.json" "$OUT/run.sh"
-  echo "tmux new-session -d -s dice-$RUN bash $OUT/run.sh"
+  if [ "$NO_TMUX" = "1" ]; then
+    echo "bash $OUT/run.sh"
+  else
+    echo "tmux new-session -d -s dice-$RUN bash $OUT/run.sh"
+  fi
   exit 0
 fi
 if [ "$NO_TMUX" = "1" ]; then

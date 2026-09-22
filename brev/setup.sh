@@ -21,12 +21,6 @@ DATASET_REVISION="$(grep -o 'DATASET_REVISION = "[0-9a-f]*"' "$DICE_REPO/script/
 export PATH="$HOME/.local/bin:$PATH"
 export LEROBOT_SOURCE_ROOT="$LEROBOT" HF_HOME="$DICE_DATA/cache/hub" MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
 export LIBERO_CONFIG_PATH="$DICE_DATA/libero-config" PYTHONPATH="$DICE_REPO" TOKENIZERS_PARALLELISM=false
-for profile in "$MODAL_SFT_PROFILE" "$MODAL_PROFILE"; do
-  if ! grep -q "^\[$profile\]" "$HOME/.modal.toml" 2>/dev/null; then
-    echo "Modal profile '$profile' missing on this box; run: $MODAL token new --profile $profile --no-verify and approve it in the browser" >&2
-    exit 1
-  fi
-done
 run mkdir -p "$DICE_DATA/cache/hub" "$DICE_DATA/runs" "$DICE_DATA/sft/libero30-sft/checkpoints"
 if command -v apt-get >/dev/null 2>&1; then
   run sudo apt-get update -y
@@ -42,6 +36,12 @@ run git -C "$LEROBOT" checkout "$REVISION"
 run uv sync --index-url https://pypi.org/simple --project "$LEROBOT" --python 3.12 --locked --no-default-groups --extra lingbot_va --extra libero --extra evaluation --no-editable
 run uv export --index-url https://pypi.org/simple --project "$LEROBOT" --locked --no-default-groups --extra lingbot_va --extra libero --extra evaluation --no-emit-project --no-hashes --output-file "$DICE_DATA/lingbot-eval-deps.txt"
 run uv pip install --index-url https://pypi.org/simple --python "$PY" --constraint "$DICE_DATA/lingbot-eval-deps.txt" --exclude-newer 2026-09-05T00:00:00Z modal==1.1.4
+for profile in "$MODAL_SFT_PROFILE" "$MODAL_PROFILE"; do
+  if ! grep -q "^\[$profile\]" "$HOME/.modal.toml" 2>/dev/null; then
+    echo "Modal profile '$profile' missing on this box; run: $MODAL token new --profile $profile --no-verify and approve it in the browser" >&2
+    exit 1
+  fi
+done
 if [ ! -f "$SFT/norm_stats.json" ]; then
   run env MODAL_PROFILE="$MODAL_SFT_PROFILE" "$MODAL" volume get dice-lingbot-sft-runs libero30-sft/checkpoints/step_000600 "$DICE_DATA/sft/libero30-sft/checkpoints/"
 fi

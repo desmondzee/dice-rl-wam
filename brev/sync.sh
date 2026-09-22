@@ -19,8 +19,9 @@ put() { run "$MODAL" volume put dice-lingbot-rl-runs "$1" "$RUN/$2" --force; }
 STEP_DIR="train_eval/step_$(printf '%06d' "$DICE_STEP")"
 [ -d "$DICE_OUTPUT_DIR/$STEP_DIR" ] && put "$DICE_OUTPUT_DIR/$STEP_DIR" "$STEP_DIR"
 [ -f "$DICE_OUTPUT_DIR/settings.json" ] && put "$DICE_OUTPUT_DIR/settings.json" settings.json
+[ -f "$DICE_OUTPUT_DIR/resume/latest.pt" ] && put "$DICE_OUTPUT_DIR/resume/latest.pt" resume/latest.pt
 if [ -f "$DICE_OUTPUT_DIR/summary.json" ]; then
-  for name in residual.pt resume/latest.pt summary.json train.log; do
+  for name in residual.pt summary.json train.log; do
     [ -f "$DICE_OUTPUT_DIR/$name" ] && put "$DICE_OUTPUT_DIR/$name" "$name"
   done
 fi
