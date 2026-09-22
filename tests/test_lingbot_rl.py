@@ -1721,10 +1721,12 @@ def test_check_inits_cli_exits_nonzero_on_frozen_env(tmp_path, monkeypatch, caps
     assert __import__("json").loads(capsys.readouterr().out)["ok"] is True
 
 
-def test_critic_cache_is_allocated_outside_inference_mode():
+def test_critic_cache_is_allocated_outside_inference_mode(monkeypatch):
     from types import SimpleNamespace
 
     from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    monkeypatch.setattr(ResidualLingBotPolicy, "_latent_hw", property(lambda self: (16, 32)))
 
     created = {}
 
@@ -1735,7 +1737,6 @@ def test_critic_cache_is_allocated_outside_inference_mode():
     policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
     policy._critic_cache_ready = False
     policy.config = SimpleNamespace(patch_size=(1, 2, 2), frame_chunk_size=4, action_per_frame=4, attn_window=30, device="cpu")
-    policy._latent_hw = (16, 32)
     policy.dtype = torch.float32
     policy.transformer = Transformer()
     with torch.inference_mode():
