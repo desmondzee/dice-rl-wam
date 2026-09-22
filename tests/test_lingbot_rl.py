@@ -1719,3 +1719,29 @@ def test_check_inits_cli_exits_nonzero_on_frozen_env(tmp_path, monkeypatch, caps
     monkeypatch.setattr("sys.argv", ["prog", "check-inits", "--task-id", "4"])
     train.main()
     assert __import__("json").loads(capsys.readouterr().out)["ok"] is True
+
+
+def test_critic_cache_is_allocated_outside_inference_mode():
+    from types import SimpleNamespace
+
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    created = {}
+
+    class Transformer:
+        def create_empty_cache(self, name, window, latent_tokens, action_tokens, device, dtype, batch_size):
+            created[name] = torch.zeros(batch_size, window, latent_tokens + action_tokens, device=device, dtype=dtype)
+
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy._critic_cache_ready = False
+    policy.config = SimpleNamespace(patch_size=(1, 2, 2), frame_chunk_size=4, action_per_frame=4, attn_window=30, device="cpu")
+    policy._latent_hw = (16, 32)
+    policy.dtype = torch.float32
+    policy.transformer = Transformer()
+    with torch.inference_mode():
+        policy._ensure_critic_cache()
+    cache = created["critic"]
+    assert not cache.is_inference()
+    with torch.no_grad():
+        cache[:, 0].add_(1.0)
+    assert policy._critic_cache_ready

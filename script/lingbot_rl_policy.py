@@ -142,15 +142,16 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         patch = cfg.patch_size
         latent_token_per_chunk = (cfg.frame_chunk_size * latent_h * latent_w) // (patch[0] * patch[1] * patch[2])
         action_token_per_chunk = cfg.frame_chunk_size * cfg.action_per_frame
-        self.transformer.create_empty_cache(
-            "critic",
-            cfg.attn_window,
-            latent_token_per_chunk,
-            action_token_per_chunk,
-            device=self.config.device,
-            dtype=self.dtype,
-            batch_size=1,
-        )
+        with torch.inference_mode(False):
+            self.transformer.create_empty_cache(
+                "critic",
+                cfg.attn_window,
+                latent_token_per_chunk,
+                action_token_per_chunk,
+                device=self.config.device,
+                dtype=self.dtype,
+                batch_size=1,
+            )
         self._critic_cache_ready = True
 
     @torch.no_grad()
