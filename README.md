@@ -103,6 +103,44 @@ uv run --no-project --with modal==1.1.4 modal volume get dice-lingbot-sft-runs \
 
 The named volumes are `dice-lingbot-sft-cache` (dataset/model assets) and `dice-lingbot-sft-runs` (checkpoints/provenance). Large optimizer state is deliberately not downloaded. A persistent run lock prevents concurrent writers; after abrupt termination, a stale lock must be inspected and cleared only after confirming the old job has stopped.
 
+## Single-task RL on Brev
+
+Training runs on an on-demand H100 Brev instance; evaluation stays on Modal, and the Modal volume `dice-lingbot-rl-runs` in the `desmond-zee` workspace is the store of record because the Brev disk is ephemeral. Copy `brev/env.example` to `brev/env.sh` (gitignored) and fill in `WANDB_API_KEY` and `HF_TOKEN`. `DICE_DATA` defaults to `/ephemeral/dice`, the instance's 750 GB data disk (the 97 GB root disk is too small to be safe); the box needs ~30 GB there (frozen text encoder/VAE 14 GB, SFT step 600 9.5 GB, demo latents 2.3 GB, LIBERO assets 0.4 GB).
+
+From the Mac, with an ssh alias for the instance:
+
+```bash
+brev/push.sh <host>
+```
+
+On the box, authenticate Modal twice — once for the workspace that holds the SFT checkpoint, once for the store — approving each link in your browser:
+
+```bash
+/ephemeral/dice/lerobot/.venv/bin/modal token new --profile source --no-verify
+```
+
+```bash
+/ephemeral/dice/lerobot/.venv/bin/modal token new --profile desmond-zee --no-verify
+```
+
+Then:
+
+```bash
+brev/setup.sh
+brev/train.sh smoke-t0 0 --max-env-steps 32 --no-tmux
+brev/train.sh dice-t0 0
+```
+
+`setup.sh` mirrors the Modal image (pinned LeRobot revision, same `uv sync` extras), pulls the SFT checkpoint cloud-to-cloud from `dice-lingbot-sft-runs` under `MODAL_SFT_PROFILE`, creates the store volume under `MODAL_PROFILE`, runs `script.lingbot_eval prepare`, downloads the demo latents, and ends with `check-inits`, which asserts two procedural resets differ. `train.sh` writes `runs/<run>/run.sh` and starts it in tmux session `dice-<run>`; rerunning the same name resumes from `runs/<run>/resume/latest.pt`. Every checkpoint (every 80k env steps and at the final step) fires `brev/sync.sh`, which pushes that checkpoint's `train_eval/step_XXXXXX/` directory to the store volume, and at run end also the resume state, `summary.json`, and `train.log`.
+
+Back on the Mac:
+
+```bash
+brev/pull.sh dice-t0
+```
+
+pulls the whole run from the Modal store into `result/brev/dice-t0/`.
+
 ## Evaluate step 600 on one H100
 
 We fine-tuned only on **LIBERO-Long / LIBERO-10**, not Spatial, Object, or Goal. The default evaluation reads step 600 directly from `dice-lingbot-sft-runs`; there is no need to upload the local weight copy. The SFT checkpoint volume is mounted read-only.

@@ -176,8 +176,8 @@ checkpoint-0 gate must land before either run reaches 80k (~9 h in).
     also sets it on `truncated`, `episode_length >= 520`, and budget
     exhaustion; those rows keep `done=0` and bootstrap from the final
     observed state (the buffer already points the tail's `s_next` at the
-    last row). `finalize_episode` runs on every episode end, not only when
-    `done=1` (`:476`), so a budget-cut episode still gets MC returns.
+    last row). `finalize_episode` already runs after every episode (`:478`), so the only
+    change is which rows carry `done=1`.
   - `_train_eval` → procedural inits, `train_eval_episodes_per_task`
     episodes, best-of-4.
   - checkpoint every `train_eval_every`: `checkpoints/step_XXXXXX/residual.pt`

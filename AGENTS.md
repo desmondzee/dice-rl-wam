@@ -112,7 +112,11 @@ Narrow checks:
 .cache/eval-venv/bin/python -m compileall -q script/lingbot_rl_*.py
 .cache/eval-venv/bin/python -m script.lingbot_rl_config
 uv run --no-project --with modal==1.1.4 --with click==8.1.8 --with typer==0.16.0 modal run -m script.lingbot_rl_modal --help
+.cache/eval-venv/bin/python -m pytest -q tests/test_brev_scripts.py
+bash -n brev/setup.sh brev/train.sh brev/sync.sh brev/pull.sh brev/push.sh
 ```
+
+Recipe version 3 trains the tasks in `RLConfig.task_ids` from procedural LIBERO initial states (`init_states=False`); the canonical 50 init states are reserved for evaluation. Brev scripts under `brev/` honour `DICE_DRY_RUN=1` and are tested that way; never run them for real as local verification. `brev/env.sh` holds secrets and is gitignored; Modal auth on the box is two `modal token new` profiles (`MODAL_SFT_PROFILE` for the SFT source workspace, `MODAL_PROFILE` for the `desmond-zee` store), never copied token files.
 
 User-run (paid) train, not executed as local verification:
 
