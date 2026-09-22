@@ -58,6 +58,10 @@ class EvalConfig:
             raise ValueError("Initial-state window must fit within the 50 canonical LIBERO initial states")
         if self.policy_seeds < 1:
             raise ValueError("At least one policy seed is required")
+        fields = (self.episodes_per_task, self.initial_state_offset, self.policy_seeds)
+        for stage, preset in STAGES.items():
+            if fields == preset and stage != self.stage and fields != STAGES[self.stage]:
+                raise ValueError(f"Protocol fields match the {stage} preset; construct EvalConfig(stage={stage!r}) instead of replace()")
         if type(self.checkpoint_step) is not int or not 1 <= self.checkpoint_step <= 1000:
             raise ValueError("Invalid checkpoint step")
         if type(self.seed) is not int or not 0 <= self.seed < 2**32:
@@ -70,13 +74,13 @@ class EvalConfig:
     def default_run_name(self):
         name = f"{self.source_run}-step{self.checkpoint_step:06d}-{self.stage}"
         if self.task_ids != TASK_IDS:
-            name += "-tasks" + "-".join(str(task) for task in self.task_ids)
+            name += "-tasks" + "-".join(str(task) for task in sorted(self.task_ids))
         return name
 
     def protocol(self):
         self.validate()
         return {
-            "version": 2 if self.stage == "heldout" else 1,
+            "version": 1 if (self.episodes_per_task, self.initial_state_offset, self.policy_seeds) in (STAGES["smoke"], STAGES["eval"]) else 2,
             "suite": "libero_10",
             "task_ids": list(self.task_ids),
             "episodes_per_task": self.episodes_per_task,

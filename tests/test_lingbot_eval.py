@@ -516,6 +516,28 @@ def test_results_report_handles_policy_seeds(tmp_path):
         create_report(damaged)
 
 
+def test_protocol_version_keys_on_resolved_fields_and_stage_mismatch_is_refused():
+    assert EvalConfig(stage="eval", episodes_per_task=20, initial_state_offset=1, policy_seeds=2).protocol()["version"] == 2
+    assert EvalConfig(stage="eval", episodes_per_task=10, initial_state_offset=0, policy_seeds=1).protocol()["version"] == 2
+    assert replace(EvalConfig(stage="smoke"), seed=7).validate().protocol()["version"] == 1
+    assert replace(EvalConfig(stage="eval"), checkpoint_step=200).validate().protocol()["version"] == 1
+    with pytest.raises(ValueError, match="match the eval preset"):
+        replace(EvalConfig(stage="eval"), stage="heldout").validate()
+    with pytest.raises(ValueError, match="match the heldout preset"):
+        EvalConfig(stage="eval", episodes_per_task=50, initial_state_offset=0, policy_seeds=2).validate()
+    assert EvalConfig(stage="heldout", task_ids=[4, 0]).default_run_name == "libero30-sft-step000600-heldout-tasks0-4"
+    assert EvalConfig(stage="heldout", task_ids=[4, 0]).task_ids == (4, 0)
+
+
+def test_results_report_ignores_checkpoint_tasks_outside_the_protocol(tmp_path):
+    from script.lingbot_eval_report import build_report_data
+    root = complete_report_fixture(tmp_path / "evaluation", policy_seeds=2)
+    settings = json.loads((root / "settings.json").read_text())
+    settings["checkpoint"]["tasks"].append({"task_id": 7, "name": "task_7", "instruction": "instruction 7", "initial_state_count": 50})
+    (root / "settings.json").write_text(json.dumps(settings))
+    assert [task["task_id"] for task in build_report_data(root)["tasks"]] == [0, 1]
+
+
 def test_results_report_metrics_exports_and_idempotence(tmp_path):
     import csv
     from script.lingbot_eval_report import create_report

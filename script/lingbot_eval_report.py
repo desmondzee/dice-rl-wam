@@ -92,7 +92,7 @@ def build_report_data(result_dir):
         max_steps = protocol["max_policy_steps"]
         offset = protocol["initial_state_offset"]
         policy_seeds = protocol.get("policy_seeds", 1)
-        tasks = settings["checkpoint"]["tasks"]
+        tasks = [task for task in settings["checkpoint"]["tasks"] if task["task_id"] in task_ids]
         plan = settings["episode_plan"]
         require(config["source_run"] == settings["checkpoint"]["source_run"] and
                 config["checkpoint_step"] == settings["checkpoint"]["checkpoint_step"], "Checkpoint identity differs")
