@@ -1370,3 +1370,62 @@ def test_eval_stage_fans_out_multiple_run_names(tmp_path, monkeypatch):
     (tmp_path / "dl" / "b-2").mkdir(parents=True)
     with pytest.raises(FileExistsError):
         module.main(stage="eval", run_name="a-1,b-2", download_dir=str(tmp_path / "dl"))
+
+
+def _manifest_for_tasks(per_task=3):
+    names = [f"instruction {task}" for task in range(10)]
+    episodes = []
+    index = 0
+    for name in names:
+        for _ in range(per_task):
+            episodes.append({"episode_index": index, "tasks": [name]})
+            index += 1
+    return {"episodes": episodes, "fingerprint": "abc"}, {name: task for task, name in enumerate(names)}
+
+
+def test_select_manifest_episodes_filters_by_task_ids():
+    from script.lingbot_rl_data import select_manifest_episodes
+
+    manifest, task_to_id = _manifest_for_tasks()
+    all_episodes = select_manifest_episodes(manifest, task_to_id)
+    assert len(all_episodes) == 30
+    only_four = select_manifest_episodes(manifest, task_to_id, task_ids=(4,))
+    assert [episode["episode_index"] for episode in only_four] == [12, 13, 14]
+    assert select_manifest_episodes(manifest, task_to_id, task_ids=(0, 9))[-1]["episode_index"] == 29
+    with pytest.raises(ValueError, match="No SFT demonstrations"):
+        select_manifest_episodes({"episodes": [], "fingerprint": "x"}, task_to_id, task_ids=(4,))
+
+
+def test_expert_fingerprint_depends_on_task_ids_and_recipe_v2():
+    from script.lingbot_rl_data import EXPERT_RECIPE, expert_fingerprint
+
+    norm = _eval_normalization()
+    manifest = {"fingerprint": "abc"}
+    assert EXPERT_RECIPE == "dice-rl-expert-v2"
+    assert expert_fingerprint(manifest, norm, task_ids=(0,)) != expert_fingerprint(manifest, norm, task_ids=(4,))
+    assert expert_fingerprint(manifest, norm, task_ids=(4, 0)) == expert_fingerprint(manifest, norm, task_ids=[0, 4])
+    assert expert_fingerprint(manifest, norm, task_ids=None) != expert_fingerprint(manifest, norm, task_ids=(0,))
+
+
+def test_featurize_experts_cache_keyed_by_task_ids(tmp_path):
+    from script.lingbot_rl_data import featurize_experts
+
+    class Policy:
+        config = None
+
+        def reset(self):
+            return None
+
+        def extract_critic_state(self, batch):
+            return torch.zeros(1, STATE_DIM)
+
+    norm = _eval_normalization()
+    episode = {"actions": np.zeros((12, USED_DOF), np.float32), "task": "t", "task_id": 4, "success": True}
+    cache = tmp_path / "expert_features.pt"
+    rows = featurize_experts(Policy(), [episode], {"fingerprint": "abc"}, norm, cache, task_ids=(4,))
+    assert len(rows) == 1
+    cached = featurize_experts(Policy(), [], {"fingerprint": "abc"}, norm, cache, task_ids=(4,))
+    assert len(cached) == 1
+    assert np.array_equal(cached[0]["a"], rows[0]["a"])
+    assert float(cached[0]["done"]) == 1.0
+    assert featurize_experts(Policy(), [], {"fingerprint": "abc"}, norm, cache, task_ids=(0,)) == []

@@ -10,7 +10,7 @@ from script.lingbot_rl_config import RLConfig
 from script.lingbot_rl_model import ACTION_DIM, HORIZON, USED_DOF, mask_unused_dof
 from script.lingbot_rl_policy import env_action_count
 
-EXPERT_RECIPE = "dice-rl-expert-v1"
+EXPERT_RECIPE = "dice-rl-expert-v2"
 EPS = 1e-6
 
 
@@ -21,7 +21,7 @@ def normalize_demo_action(raw, norm):
     return 2.0 * (values - low) / (high - low + EPS) - 1.0
 
 
-def expert_fingerprint(manifest, norm, episodes=None):
+def expert_fingerprint(manifest, norm, episodes=None, task_ids=None):
     proto = RLConfig().protocol()
     payload = {
         "recipe": EXPERT_RECIPE,
@@ -32,6 +32,7 @@ def expert_fingerprint(manifest, norm, episodes=None):
         "source_run": "libero30-sft",
         "q01": [float(x) for x in norm["q01"]],
         "q99": [float(x) for x in norm["q99"]],
+        "task_ids": sorted(int(task) for task in task_ids) if task_ids is not None else None,
     }
     if manifest is not None:
         payload["manifest"] = manifest.get("fingerprint", manifest)
@@ -123,12 +124,12 @@ def _episode_rows(policy, episode, norm):
     return rows
 
 
-def featurize_experts(policy, dataset, manifest=None, norm=None, cache_path=None):
+def featurize_experts(policy, dataset, manifest=None, norm=None, cache_path=None, task_ids=None):
     if norm is None:
         raise ValueError("Checkpoint norm_stats.json is required")
     episodes = list(dataset)
     cache_path = Path(cache_path) if cache_path is not None else None
-    fingerprint = expert_fingerprint(manifest, norm, episodes)
+    fingerprint = expert_fingerprint(manifest, norm, episodes, task_ids)
     if cache_path is not None and cache_path.is_file():
         try:
             payload = torch.load(cache_path, map_location="cpu", weights_only=False)
@@ -145,24 +146,34 @@ def featurize_experts(policy, dataset, manifest=None, norm=None, cache_path=None
     return rows
 
 
-def load_manifest_episodes(dataset_root, manifest, task_to_id=None, norm=None):
-    """Load the 300 SFT demos listed in the checkpoint manifest from a LeRobot snapshot."""
+def select_manifest_episodes(manifest, task_to_id, task_ids=None):
+    episodes = manifest["episodes"]
+    if task_ids is None:
+        return list(episodes)
+    wanted = {int(task) for task in task_ids}
+    selected = [episode for episode in episodes if task_to_id[episode["tasks"][0]] in wanted]
+    if not selected:
+        raise ValueError("No SFT demonstrations for the configured task_ids")
+    return selected
+
+
+def load_manifest_episodes(dataset_root, manifest, task_to_id=None, norm=None, task_ids=None):
     import pyarrow.parquet as pq
 
     if norm is None:
         raise ValueError("Checkpoint norm_stats.json is required")
     root = Path(dataset_root)
     info = json.loads((root / "meta" / "info.json").read_text())
-    episodes = manifest["episodes"]
-    if len(episodes) != 300:
+    if len(manifest["episodes"]) != 300:
         raise ValueError("Expected 300 SFT demonstrations in the checkpoint manifest")
     if task_to_id is None:
         task_names = []
-        for episode in episodes:
+        for episode in manifest["episodes"]:
             name = episode["tasks"][0]
             if name not in task_names:
                 task_names.append(name)
         task_to_id = {name: index for index, name in enumerate(task_names)}
+    episodes = select_manifest_episodes(manifest, task_to_id, task_ids)
     loaded = []
     for episode in episodes:
         idx = episode["episode_index"]
