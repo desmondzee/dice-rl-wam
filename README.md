@@ -153,6 +153,18 @@ brev/pull.sh dice-t0
 
 pulls the whole run from the Modal store into `result/brev/dice-t0/`.
 
+Held-out evaluation of a checkpoint runs on Modal in the `nobel` workspace, which cannot mount the `desmond-zee` store, so each `residual.pt` is first copied volume-to-volume through the Mac (`modal volume get` under `MODAL_PROFILE=desmond-zee`, then `modal volume put` under `MODAL_PROFILE=nobel`; about 485 MB, skipped when already present). `--stage eval --residual <volume path>` then evaluates that file best-of-4 (`--eval-k 4`, critic argmax as in training) or residual-only (`--eval-k 1`, one base sample plus the actor residual, no critic) on `--eval-stage heldout` for `--tasks`, writing `<run>/eval/<stage>-k<k>-step<NNNNNN>/` on `dice-lingbot-rl-runs` in `nobel` and downloading that directory to `result/lingbot-rl/<run>/eval/`. Every arm shares the SFT baseline's 100 `(init_state_id, seed_index)` pairs, so `analysis/paired_eval.py` joins them on `(task_id, init_state_id, seed_index)` and prints per-arm success with a Wilson 95% interval, the paired difference versus SFT with an exact McNemar p-value and a bootstrap 95% CI, best-of-4 versus k=1 where both exist, and writes `curve.csv`:
+
+```bash
+uv run --no-project --with modal==1.1.4 python -m script.copy_checkpoint --residual dice-t0/train_eval/step_080000/residual.pt
+MODAL_PROFILE=nobel uv run --no-project --with modal==1.1.4 modal run --detach -m script.lingbot_rl_modal \
+  --stage eval --residual dice-t0/train_eval/step_080000/residual.pt --eval-k 4 --tasks 0
+MODAL_PROFILE=nobel uv run --no-project --with modal==1.1.4 modal run --detach -m script.lingbot_rl_modal \
+  --stage eval --residual dice-t0/train_eval/step_080000/residual.pt --eval-k 1 --tasks 0
+.cache/eval-venv/bin/python -m analysis.paired_eval --sft result/lingbot-eval/libero30-sft-step000600-heldout-tasks0 \
+  --rl result/lingbot-rl/dice-t0/eval/* --curve result/lingbot-rl/dice-t0/curve.csv
+```
+
 ## Evaluate step 600 on one H100
 
 We fine-tuned only on **LIBERO-Long / LIBERO-10**, not Spatial, Object, or Goal. The default evaluation reads step 600 directly from `dice-lingbot-sft-runs`; there is no need to upload the local weight copy. The SFT checkpoint volume is mounted read-only.
@@ -241,7 +253,7 @@ uv run --no-project --with modal==1.1.4 modal run -m script.lingbot_rl_modal \
 
 Local download is inference-only (`residual.pt`, summaries, train-eval rows, and after `--stage eval` the 20-rollout JSON/`report.html`). Resume state, replay, Adam, expert cache, and the 5B transformer stay on `dice-lingbot-rl-runs`. Volumes: `dice-lingbot-sft-cache` and `dice-lingbot-sft-runs` read-only on GPU; `dice-lingbot-rl-runs` writable. CPU prepare uses `dice-lingbot-hf`; GPU uses `dice-lingbot-wandb` with Hub offline.
 
-`--stage eval` runs the 20-rollout comparison against the trained residual. Train-time eval is 1 rollout/task every 25k env steps and is not the 69% comparison.
+`--stage eval` runs the held-out protocol against a residual (see the Brev section above for `--residual`, `--eval-k`, and `--tasks`); train-time eval on procedural inits is not the held-out comparison.
 
 ## Local verification
 
