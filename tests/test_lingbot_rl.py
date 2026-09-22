@@ -1435,6 +1435,10 @@ def test_featurize_experts_cache_keyed_by_task_ids(tmp_path):
 
 def _stub_policy(success_state=None):
     class StubPolicy:
+        def __init__(self):
+            self.observed = []
+            self.dropped = []
+
         def reset(self):
             self._executed_actions = None
 
@@ -1442,10 +1446,11 @@ def _stub_policy(success_state=None):
             return torch.zeros(1, STATE_DIM)
 
         def decode_candidates(self, batch, k=4, **kwargs):
+            n = len(batch.get("task", [None]))
             return {
-                "s": torch.zeros(1, STATE_DIM),
-                "z": torch.zeros(k, HORIZON, ACTION_DIM),
-                "a_base": torch.zeros(k, HORIZON, ACTION_DIM),
+                "s": torch.zeros(n, STATE_DIM),
+                "z": torch.zeros(n * k, HORIZON, ACTION_DIM),
+                "a_base": torch.zeros(n * k, HORIZON, ACTION_DIM),
                 "video_noise": torch.zeros(1),
                 "first_chunk": True,
             }
@@ -1457,7 +1462,10 @@ def _stub_policy(success_state=None):
             return torch.zeros(1, 7)
 
         def observe_env_step(self, batch):
-            return None
+            self.observed.append(len(batch["task"]))
+
+        def drop_stream(self, index):
+            self.dropped.append(index)
 
     return StubPolicy()
 
@@ -1996,3 +2004,58 @@ def test_batched_decode_matches_independent_single_streams(monkeypatch):
                 torch.testing.assert_close(batched[chunk][key][row:row + 1], single[chunk][key], atol=1e-4, rtol=1e-4)
             for key in ("z", "a_base"):
                 torch.testing.assert_close(batched[chunk][key][row * k:(row + 1) * k], single[chunk][key], atol=1e-4, rtol=1e-4)
+
+
+def _online_rows(path):
+    resume = torch.load(path / "resume" / "latest.pt", map_location="cpu", weights_only=False)
+    return [row for row in resume["replay"]["data"] if float(row["is_expert"]) == 0.0]
+
+
+def _train_batched(tmp_path, monkeypatch, env_cls, steps, n_envs=2):
+    import script.lingbot_rl_train as train
+
+    _StubEnv.instances.clear()
+    policy = _stub_policy()
+    _fake_wandb(monkeypatch, [])
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: policy)
+    monkeypatch.setattr(train, "LiberoEnv", env_cls)
+    summary = train.train(config=RLConfig(task_ids=(0,), n_envs=n_envs), output_dir=tmp_path, run_name="unit",
+                          max_env_steps=steps, prepared_path=_prepared(tmp_path))
+    return policy, summary
+
+
+def test_two_envs_collect_in_lockstep_with_unique_seeds(tmp_path, monkeypatch):
+    policy, summary = _train_batched(tmp_path, monkeypatch, _StubEnv, 48)
+    assert summary["env_steps"] == 48
+    assert len(_StubEnv.instances) == 2
+    assert sorted(seed for env in _StubEnv.instances for seed in env.seeds) == [42, 43, 66, 67]
+    assert policy.observed == [2] * 24
+    assert policy.dropped == []
+    rows = _online_rows(tmp_path)
+    assert [row["n_env_actions"] for row in rows] == [12, 12, 12, 12]
+    assert all(float(row["done"]) == 0.0 for row in rows)
+
+
+def test_stream_that_ends_early_is_dropped_and_the_rest_continue(tmp_path, monkeypatch):
+    class WinEnv(_StubEnv):
+        def step(self, action):
+            self.steps += 1
+            goal = 5 if _StubEnv.instances.index(self) == 0 else 20
+            return self._frame(self.seeds[-1]), 0.0, False, False, {"is_success": self.steps >= goal}
+
+    policy, summary = _train_batched(tmp_path, monkeypatch, WinEnv, 25)
+    assert summary["env_steps"] == 25
+    assert policy.dropped == [0]
+    assert policy.observed == [2] * 12 + [1] * 8
+    rows = _online_rows(tmp_path)
+    assert [row["n_env_actions"] for row in rows] == [5, 12, 8]
+    assert [float(row["reward"]) for row in rows] == pytest.approx([1.0, GAMMA, 1.0])
+    assert [float(row["done"]) for row in rows] == [1.0, 1.0, 1.0]
+    assert [float(row["mc_return"]) for row in rows] == pytest.approx([1.0, GAMMA, 1.0])
+
+
+def test_budget_cut_stops_every_stream_at_the_budget(tmp_path, monkeypatch):
+    policy, summary = _train_batched(tmp_path, monkeypatch, _StubEnv, 30)
+    assert summary["env_steps"] == 30
+    assert [row["n_env_actions"] for row in _online_rows(tmp_path)] == [12, 12, 3, 3]
+    assert policy.observed == [2] * 12 + [2] * 3

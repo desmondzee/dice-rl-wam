@@ -78,6 +78,10 @@ def test_train_dry_run_builds_single_task_command_and_resumes_when_state_exists(
     foreground = _run("train.sh", ["unit-t4", "4", "--no-tmux"], env)
     assert foreground.returncode == 0, foreground.stderr
     assert f"bash {run_dir / 'run.sh'}" in foreground.stdout
+    assert '"n_envs": 1' in foreground.stdout
+    batched = _run("train.sh", ["unit-t4", "4", "--n-envs", "3"], env)
+    assert batched.returncode == 0, batched.stderr
+    assert '"n_envs": 3' in batched.stdout
     assert "tmux new-session" not in foreground.stdout
 
 

@@ -3,15 +3,17 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] && source "$ENV_FILE"
-RUN="${1:?usage: train.sh <run-name> <task-id> [--max-env-steps N] [--no-tmux] [--fresh]}"
-TASK="${2:?usage: train.sh <run-name> <task-id> [--max-env-steps N] [--no-tmux] [--fresh]}"
+RUN="${1:?usage: train.sh <run-name> <task-id> [--max-env-steps N] [--n-envs N] [--no-tmux] [--fresh]}"
+TASK="${2:?usage: train.sh <run-name> <task-id> [--max-env-steps N] [--n-envs N] [--no-tmux] [--fresh]}"
 shift 2
 MAX_ENV_STEPS=""
+N_ENVS=1
 NO_TMUX=0
 FRESH=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --max-env-steps) MAX_ENV_STEPS="$2"; shift 2 ;;
+    --n-envs) N_ENVS="$2"; shift 2 ;;
     --no-tmux) NO_TMUX=1; shift ;;
     --fresh) FRESH=1; shift ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
@@ -31,7 +33,7 @@ DATASET_ROOT="$(cat "$DICE_DATA/dataset_root")"
 OUT="$DICE_DATA/runs/$RUN"
 mkdir -p "$OUT"
 ENTITY="${WANDB_ENTITY:-}"
-python3 -c 'import json,sys; print(json.dumps({"task_ids": [int(sys.argv[1])], "wandb_entity": sys.argv[2] or None}))' "$TASK" "$ENTITY" > "$OUT/config.json"
+python3 -c 'import json,sys; print(json.dumps({"task_ids": [int(sys.argv[1])], "wandb_entity": sys.argv[2] or None, "n_envs": int(sys.argv[3])}))' "$TASK" "$ENTITY" "$N_ENVS" > "$OUT/config.json"
 ARGS=(--prepared-path "$PREPARED" --output-dir "$OUT" --run-name "$RUN" --dataset-root "$DATASET_ROOT")
 if [ ! -f "$OUT/resume/latest.pt" ] && [ "$FRESH" = 0 ] && [ -n "${MODAL_PROFILE:-}" ]; then
   if [ "$DRY" = "1" ]; then

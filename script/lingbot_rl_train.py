@@ -15,9 +15,7 @@ from script.lingbot_rl_buffer import ChunkReplay
 from script.lingbot_rl_config import RLConfig
 from script.lingbot_rl_data import featurize_experts, load_manifest_episodes
 from script.lingbot_rl_model import BATCH, UTD, DiceResidualModel, apply_residual
-from script.lingbot_rl_policy import (
-    env_action_count, histogram_entropy, load_residual_policy, slice_env_actions,
-)
+from script.lingbot_rl_policy import histogram_entropy, load_residual_policy, slice_env_actions
 
 LiberoEnv = None
 SAVE_EVERY_EPISODES = 10
@@ -259,6 +257,13 @@ def _to_model_device(sample, device):
     return moved
 
 
+def _stack_batches(batches):
+    return {
+        key: sum((batch[key] for batch in batches), []) if key == "task" else torch.cat([batch[key] for batch in batches])
+        for key in batches[0]
+    }
+
+
 def _sample_batch(buffer, expert_ratio, device):
     return _to_model_device(buffer.sample(min(BATCH, len(buffer)), expert_ratio), device)
 
@@ -413,6 +418,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     envs = {}
     episodes = 0
     episode_lengths = []
+    saved_blocks = 0
 
     def maybe_eval():
         if not do_train_eval:
@@ -429,7 +435,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             for task_id, success in summary["per_task_success"].items():
                 run.log({f"train_eval/task_{task_id}_success": float(success), "env_steps": env_steps})
             task = tasks[0]
-            env = envs.get(task["task_id"])
+            env = envs.get((0, task["task_id"]))
             borrowed = env is not None
             if not borrowed:
                 env = make_env(task["task_id"], suite, init_states=False)
@@ -459,97 +465,122 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 commit()
 
     maybe_eval()
-    episode_return = 0.0
-    episode_success = 0.0
-    episode_length = 0
     try:
         while env_steps < budget:
-            task = tasks[int(np.random.randint(len(tasks)))]
-            task_id = task["task_id"]
-            env = envs.get(task_id)
-            if env is None:
-                env = envs[task_id] = make_env(task_id, suite, init_states=False)
+            slots = list(range(config.n_envs))
+            slot_tasks = [tasks[int(np.random.randint(len(tasks)))] for _ in slots]
+            observations = []
+            for slot, task in zip(slots, slot_tasks):
+                env = envs.get((slot, task["task_id"]))
+                if env is None:
+                    env = envs[(slot, task["task_id"])] = make_env(task["task_id"], suite, init_states=False)
+                observations.append(env.reset(seed=config.seed + env_steps + slot)[0])
             policy.reset()
-            observation, _ = env.reset(seed=config.seed + env_steps)
-            episode_return = 0.0
-            episode_success = 0.0
-            episode_length = 0
-            saw_success = False
-            while env_steps < budget and episode_length < 520:
-                batch = observation_batch(observation, task["instruction"], device)
-                decoded = policy.decode_candidates(batch, k=config.k_candidates)
+            stats = [{"return": 0.0, "success": 0.0, "length": 0, "saw_success": False} for _ in slots]
+            live = list(slots)
+
+            def live_batch():
+                return _stack_batches([
+                    observation_batch(observations[slot], slot_tasks[slot]["instruction"], device) for slot in live
+                ])
+
+            while live and env_steps < budget:
+                decoded = policy.decode_candidates(live_batch(), k=config.k_candidates)
                 state = decoded["s"].to(device=device, dtype=torch.float32)
                 noise = decoded["z"].to(device=device, dtype=torch.float32)
                 a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
-                k = a_base.shape[0]
-                if k != config.k_candidates:
+                k = config.k_candidates
+                if a_base.shape[0] != len(live) * k or state.shape[0] != len(live):
                     raise RuntimeError("action candidate batching failed")
+                stars = []
+                chosen = []
                 with torch.no_grad():
-                    state_k = state.expand(k, -1)
-                    executed = apply_residual(a_base, model.actor(state_k, noise))
-                    q_values = model.critic(state_k, executed)
-                    star = int(q_values.reshape(-1).argmax())
-                chosen = executed[star:star + 1]
+                    for position in range(len(live)):
+                        rows = slice(position * k, (position + 1) * k)
+                        state_k = state[position:position + 1].expand(k, -1)
+                        executed = apply_residual(a_base[rows], model.actor(state_k, noise[rows]))
+                        star = int(model.critic(state_k, executed).reshape(-1).argmax())
+                        stars.append(position * k + star)
+                        chosen.append(executed[star:star + 1])
+                chosen = torch.cat(chosen)
                 policy.commit_executed(chosen.cpu(), first_chunk=decoded["first_chunk"])
                 env_actions = slice_env_actions(chosen.cpu(), decoded["first_chunk"])
-                n_env = env_actions.shape[1]
-                chunk_reward = 0.0
-                done = 0.0
-                episode_over = False
-                executed_n = 0
-                for index in range(n_env):
-                    action = decode_action(env_actions[:, index, :].reshape(1, 7), norm)
-                    observation, _, terminated, truncated, info = env.step(action)
-                    policy.observe_env_step(observation_batch(observation, task["instruction"], device))
-                    executed_n += 1
-                    episode_length += 1
-                    env_steps += 1
-                    if env_success(info) and not saw_success:
-                        chunk_reward = 1.0
-                        saw_success = True
-                        episode_success = 1.0
-                    if saw_success or terminated:
-                        done = 1.0
-                    if done or truncated or episode_length >= 520 or env_steps >= budget:
-                        episode_over = True
+                rewards = [0.0] * len(live)
+                dones = [0.0] * len(live)
+                executed_n = [0] * len(live)
+                over = [False] * len(live)
+                for index in range(env_actions.shape[1]):
+                    for position, slot in enumerate(live):
+                        if over[position]:
+                            continue
+                        stat = stats[slot]
+                        action = decode_action(env_actions[position:position + 1, index, :].reshape(1, 7), norm)
+                        observations[slot], _, terminated, truncated, info = envs[
+                            (slot, slot_tasks[slot]["task_id"])].step(action)
+                        executed_n[position] += 1
+                        stat["length"] += 1
+                        env_steps += 1
+                        if env_success(info) and not stat["saw_success"]:
+                            rewards[position] = 1.0
+                            stat["saw_success"] = True
+                            stat["success"] = 1.0
+                        if stat["saw_success"] or terminated:
+                            dones[position] = 1.0
+                        if dones[position] or truncated or stat["length"] >= 520:
+                            over[position] = True
+                        if env_steps >= budget:
+                            over[:] = [True] * len(live)
+                    policy.observe_env_step(live_batch())
+                    if all(over):
                         break
-                episode_return += chunk_reward
-                s_cpu = _host_array(state)[0]
-                row = {
-                    "s": s_cpu,
-                    "z": _host_array(noise[star]),
-                    "a_base": _host_array(a_base[star]),
-                    "z_all": _host_array(noise),
-                    "a_base_all": _host_array(a_base),
-                    "a": _host_array(chosen)[0],
-                    "reward": np.float32(chunk_reward),
-                    "done": np.float32(done),
-                    "s_next": s_cpu.copy(),
-                    "task_id": task_id,
-                    "n_env_actions": executed_n,
-                    "is_expert": np.float32(0.0),
-                }
-                buffer.add_online(row)
-                chunks += 1
-                expert_ratio = config.rlpd_expert_ratio(env_steps)
-                if buffer.has_ready_online():
-                    critic_info, actor_info = _update_from_buffer(model, buffer, expert_ratio, device)
-                    log = {
-                        "env_steps": env_steps, "chunks": chunks,
-                        "actor_loss": actor_info["actor_loss"], "critic_loss": critic_info["critic_loss"],
-                        "residual_rms": actor_info["residual_rms"], "q_mean": actor_info["q_mean"],
-                        "q_min": actor_info["q_min"], "bc_filter_rate": actor_info["bc_filter_rate"],
-                        "expert_ratio": expert_ratio, "episode_return": episode_return,
-                        "episode_success": episode_success, "episode_length": episode_length,
+                for position, slot in enumerate(live):
+                    if executed_n[position] == 0:
+                        continue
+                    stat = stats[slot]
+                    stat["return"] += rewards[position]
+                    rows = slice(position * k, (position + 1) * k)
+                    s_cpu = _host_array(state[position])
+                    row = {
+                        "s": s_cpu,
+                        "z": _host_array(noise[stars[position]]),
+                        "a_base": _host_array(a_base[stars[position]]),
+                        "z_all": _host_array(noise[rows]),
+                        "a_base_all": _host_array(a_base[rows]),
+                        "a": _host_array(chosen[position]),
+                        "reward": np.float32(rewards[position]),
+                        "done": np.float32(dones[position]),
+                        "s_next": s_cpu.copy(),
+                        "task_id": slot_tasks[slot]["task_id"],
+                        "n_env_actions": executed_n[position],
+                        "is_expert": np.float32(0.0),
                     }
-                    run.log(log)
-                if episode_over:
-                    break
-            buffer.finalize_episode()
-            episodes += 1
-            episode_lengths.append(episode_length)
+                    buffer.add_online(row, stream=slot)
+                    chunks += 1
+                    expert_ratio = config.rlpd_expert_ratio(env_steps)
+                    if buffer.has_ready_online():
+                        critic_info, actor_info = _update_from_buffer(model, buffer, expert_ratio, device)
+                        log = {
+                            "env_steps": env_steps, "chunks": chunks,
+                            "actor_loss": actor_info["actor_loss"], "critic_loss": critic_info["critic_loss"],
+                            "residual_rms": actor_info["residual_rms"], "q_mean": actor_info["q_mean"],
+                            "q_min": actor_info["q_min"], "bc_filter_rate": actor_info["bc_filter_rate"],
+                            "expert_ratio": expert_ratio, "episode_return": stat["return"],
+                            "episode_success": stat["success"], "episode_length": stat["length"],
+                        }
+                        run.log(log)
+                ended = [position for position in range(len(live)) if over[position]]
+                for position in ended:
+                    buffer.finalize_episode(stream=live[position])
+                    episodes += 1
+                    episode_lengths.append(stats[live[position]]["length"])
+                remaining = [slot for position, slot in enumerate(live) if not over[position]]
+                if remaining:
+                    for position in reversed(ended):
+                        policy.drop_stream(position)
+                live = remaining
             maybe_eval()
-            if episodes % SAVE_EVERY_EPISODES == 0:
+            if episodes // SAVE_EVERY_EPISODES > saved_blocks:
+                saved_blocks = episodes // SAVE_EVERY_EPISODES
                 save_inference(output_dir / "residual.pt", model)
                 save_resume(resume_path, model, buffer, env_steps, chunks, recipe, evaluated, wandb_id)
                 if commit is not None:
