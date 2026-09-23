@@ -1,4 +1,5 @@
 import io
+import json
 import random
 import zipfile
 from dataclasses import replace
@@ -9,12 +10,14 @@ import pytest
 import torch
 
 from script.lingbot_eval import decode_action
+from script.lingbot_eval_config import EvalConfig, episode_plan
 from script.lingbot_rl_buffer import ChunkReplay
-from script.lingbot_rl_config import RLConfig
+from script.lingbot_rl_config import RLConfig, config_from_dict
 from script.lingbot_rl_model import (
-    ACTION_DIM, ADAM_LR, BETA, ENSEMBLE, EPSILON, GAMMA, HIDDEN, HORIZON,
-    K_CANDIDATES, N_STEP_CHUNKS, STATE_DIM, TAU, USED_DOF, UTD, DiceResidualModel, apply_residual,
-    mask_unused_dof,
+    ACTION_DIM, ACTOR_EVERY, ADAM_LR, BATCH, BETA, ENSEMBLE, EPSILON, GAMMA, GRADIENT_STEPS,
+    HIDDEN, HORIZON, K_CANDIDATES, LR_MIN, MAX_GRAD_NORM, N_STEP_CHUNKS, STATE_DIM, TAU,
+    UPDATE_EVERY_CHUNKS, USED_DOF, WEIGHT_DECAY, DiceResidualModel, apply_residual,
+    cosine_restart_lr, mask_unused_dof,
 )
 from script.lingbot_rl_policy import (
     env_action_count, histogram_entropy, mlp_to_model, model_to_mlp,
@@ -25,79 +28,104 @@ from script.lingbot_rl_policy import (
 def test_config_pins_released_libero_sampler_and_step_600():
     cfg = RLConfig().validate()
     proto = cfg.protocol()
-    assert proto["video_steps"] == 20
-    assert proto["action_steps"] == 50
-    assert proto["video_exec_step"] == -1
     assert proto["sampler"] == "released_lingbot_libero_defaults"
-    assert proto["video_guidance"] == 5.0
-    assert proto["action_guidance"] == 1.0
     assert cfg.checkpoint_step == 600
     assert cfg.source_run == "libero30-sft"
     assert cfg.wandb_project == "dice-lingbot-va-rl"
     assert cfg.k_candidates == 4
-    assert cfg.online_env_steps == 100_000
-    assert proto["snr_shift"] == 5.0
-    assert proto["action_snr_shift"] == 0.05
-    assert proto["dtype"] == "bfloat16"
-    assert proto["attention_backend"] == "torch"
-    assert proto["attention_window"] == 30
+    assert cfg.task_ids == (0,)
+    assert cfg.default_run_name == "dice-t0"
+    assert cfg.online_env_steps == 660_000
     assert proto["action_normalization_epsilon"] == 1e-6
     assert proto["noisy_history"] is False
-    assert proto["text_encoder_device"] == "cpu"
     assert proto["environment_batch_size"] == 1
     assert proto["max_policy_steps"] == 520
-    assert proto["used_action_channels"] == list(range(7))
     assert proto["camera_orientation"] == "vertical_flip_only_native_lingbot"
     assert proto["residual_input"] == "z"
-    assert proto["mlp_hidden"] == [1024, 1024, 1024]
-    assert proto["critic_ensemble"] == 10
-    assert proto["beta"] == 100.0
-    assert proto["epsilon"] == -0.5
-    assert proto["n_step_chunks"] == 3
-    assert proto["gamma"] == 0.99
-    assert proto["utd"] == 10
-    assert proto["tau"] == 0.01
-    assert proto["adam_lr"] == 1e-4
-    assert proto["batch_size"] == 256
-    assert proto["rlpd_start"] == 0.5
+    assert proto["lr_schedule"] == "cosine_restarts_1000_warmup_10_min_1e-6"
+    assert proto["rlpd_start"] == 0.9
     assert proto["rlpd_end"] == 0.1
+    assert proto["rlpd_steps"] == 208_000
     assert proto["replay_capacity"] == 100_000
-    assert proto["train_eval_every"] == 25_000
-    assert proto["train_eval_episodes_per_task"] == 1
-    assert proto["comparison_episodes_per_task"] == 20
-    assert proto["comparison_initial_state_offset"] == 1
-    assert proto["comparison_seed"] == 42
+    assert proto["task_ids"] == [0]
+    assert proto["train_init_states"] == "procedural"
+    assert proto["selection"] == "max_q_min"
+    assert proto["selection_warmup_steps"] == 64_000
+    assert proto["bc_filter_anchor"] == "q_stored_minus_mc_return"
+    assert proto["bc_filter_warmup_steps"] == 128_000
+    assert proto["expert_rows_keep_bc"] is True
+    assert proto["actor_q_normalization"] == "mean_abs_q_online"
+    assert proto["checkpoint_every"] == 80_000
+    assert proto["train_eval_episodes"] == 10
     assert proto["checkpoint_step"] == 600
     assert proto["source_run"] == "libero30-sft"
-    assert proto["version"] == 2
+    assert proto["version"] == 3
     assert proto["multi_sample_candidates"] == 4
-    assert proto["bc_filter_anchor"] == "mc_return"
-    assert proto["utd_sampling"] == "fresh_minibatch_per_step"
     assert proto["actor_final_init"] == "zeros"
     assert proto["eval_best_of_n"] == 4
 
 
 @pytest.mark.parametrize("changes", [
-    {"video_steps": 3},
-    {"action_steps": 10},
-    {"video_exec_step": 12},
-    {"checkpoint_step": 400},
-    {"source_run": "other-run"},
-    {"k_candidates": 16},
-    {"train_eval_every": 5_000},
-    {"train_eval_episodes_per_task": 20},
+    {"video_steps": 3}, {"action_steps": 10}, {"video_exec_step": 12}, {"checkpoint_step": 400},
+    {"source_run": "other-run"}, {"k_candidates": 16}, {"task_ids": ()}, {"task_ids": (0, 0)},
+    {"task_ids": (11,)}, {"online_env_steps": 0}, {"checkpoint_every": 0}, {"train_eval_episodes": 0},
 ])
 def test_config_rejects_sampler_and_recipe_drift(changes):
     with pytest.raises(ValueError):
         replace(RLConfig(), **changes).validate()
 
 
+def test_config_from_dict_restores_task_ids_and_validates():
+    cfg = RLConfig(task_ids=(0, 3)).validate()
+    payload = cfg.to_dict()
+    assert payload["task_ids"] == [0, 3]
+    assert config_from_dict(payload) == cfg
+    assert config_from_dict({}) == RLConfig()
+    assert cfg.default_run_name == "dice-t0-3"
+    with pytest.raises(ValueError):
+        config_from_dict({"task_ids": [11]})
+
+
+def test_checkpoint_and_train_eval_schedules():
+    cfg = RLConfig().validate()
+    assert cfg.checkpoint_schedule() == [step * 80_000 for step in range(9)] + [660_000]
+    assert cfg.train_eval_schedule() == [0, 80_000, 240_000, 400_000, 560_000]
+
+
+def test_due_points_fire_once_per_schedule_entry():
+    from script.lingbot_rl_train import due_points
+
+    schedule = RLConfig().checkpoint_schedule()
+    done = set()
+    assert due_points(0, schedule, done) == [0]
+    done.add(0)
+    assert due_points(79_999, schedule, done) == []
+    assert due_points(80_012, schedule, done) == [80_000]
+    done.add(80_000)
+    assert due_points(240_000, schedule, done) == [160_000, 240_000]
+
+
+def test_cosine_restart_lr_warms_up_then_restarts():
+    assert cosine_restart_lr(0) == cosine_restart_lr(1000) == pytest.approx(LR_MIN / ADAM_LR)
+    assert cosine_restart_lr(10) == pytest.approx(1.0)
+    assert cosine_restart_lr(505) < cosine_restart_lr(10)
+
+
 def test_rlpd_ratio_anneals_over_env_steps():
     cfg = RLConfig().validate()
-    assert cfg.rlpd_expert_ratio(0) == pytest.approx(0.5)
-    assert cfg.rlpd_expert_ratio(50_000) == pytest.approx(0.3)
-    assert cfg.rlpd_expert_ratio(100_000) == pytest.approx(0.1)
-    assert cfg.rlpd_expert_ratio(120_000) == pytest.approx(0.1)
+    assert cfg.rlpd_expert_ratio(0) == pytest.approx(0.9)
+    assert cfg.rlpd_expert_ratio(104_000) == pytest.approx(0.5)
+    assert cfg.rlpd_expert_ratio(208_000) == pytest.approx(0.1)
+    assert cfg.rlpd_expert_ratio(500_000) == pytest.approx(0.1)
+
+
+def test_heldout_plan_is_fifty_episodes_from_initial_state_zero():
+    cfg = EvalConfig(stage="heldout").validate()
+    assert cfg.episodes_per_task == 50
+    assert cfg.initial_state_offset == 0
+    plan = episode_plan(cfg, 0, 50)
+    assert len(plan) == 50
+    assert [entry["init_state_id"] for entry in plan] == list(range(50))
 
 
 def test_model_hyperparameters_match_baseline_protocol():
@@ -111,9 +139,15 @@ def test_model_hyperparameters_match_baseline_protocol():
     assert GAMMA == proto["gamma"] == 0.99
     assert TAU == proto["tau"] == 0.01
     assert ADAM_LR == proto["adam_lr"] == 1e-4
-    assert UTD == proto["utd"] == 10
+    assert WEIGHT_DECAY == proto["weight_decay"] == 1e-5
+    assert MAX_GRAD_NORM == proto["max_grad_norm"] == 1.0
+    assert GRADIENT_STEPS == proto["gradient_steps"] == 10
+    assert UPDATE_EVERY_CHUNKS == proto["update_every_chunks"] == 4
+    assert ACTOR_EVERY == proto["actor_every"] == 2
+    assert BATCH == proto["batch_size"] == proto["min_online_rows"] == 256
     model = DiceResidualModel(device="cpu")
     assert len(model.critic.heads) == 10
+    assert model.actor_opt.param_groups[0]["weight_decay"] == WEIGHT_DECAY
 
 
 def test_residual_mask_zeros_unused_dof():
@@ -126,47 +160,78 @@ def test_residual_mask_zeros_unused_dof():
     torch.testing.assert_close(a[:, :, :USED_DOF], a_base[:, :, :USED_DOF] + residual[:, :, :USED_DOF])
 
 
-def test_n_step_chunk_return_sparse_terminal():
-    model = DiceResidualModel(device="cpu")
-    done = torch.tensor([[1.0], [1.0], [1.0]])
-    next_state = torch.zeros(3, STATE_DIM)
-    z_next_all = torch.zeros(3, K_CANDIDATES, HORIZON, ACTION_DIM)
-    a_base_next_all = torch.zeros(3, K_CANDIDATES, HORIZON, ACTION_DIM)
-    n_steps = torch.tensor([[3.0], [2.0], [1.0]])
-    summed = torch.tensor([[0.99 ** 2], [0.99], [1.0]])
-    target = model.n_step_target(summed, done, next_state, z_next_all, a_base_next_all, n_steps)
-    assert target.shape == (3, 1)
-    torch.testing.assert_close(target[2], torch.tensor([1.0]))
-    assert target[0].item() == pytest.approx(0.99 ** 2)
-    assert target[1].item() == pytest.approx(0.99)
-
-
 def test_actor_critic_one_step_update_on_random_tensors():
     torch.manual_seed(1)
     model = DiceResidualModel(device="cpu")
     state = torch.randn(8, STATE_DIM)
-    noise = torch.randn(8, HORIZON, ACTION_DIM)
-    a_base = mask_unused_dof(torch.randn(8, HORIZON, ACTION_DIM))
+    z_all = torch.randn(8, K_CANDIDATES, HORIZON, ACTION_DIM)
+    a_base_all = mask_unused_dof(torch.randn(8, K_CANDIDATES, HORIZON, ACTION_DIM))
     is_expert = torch.zeros(8, 1)
     is_expert[:4] = 1
-    reward = torch.zeros(8, 1)
-    done = torch.zeros(8, 1)
-    n_steps = torch.ones(8, 1) * 3
-    next_state = torch.randn(8, STATE_DIM)
-    z_next_all = torch.randn(8, K_CANDIDATES, HORIZON, ACTION_DIM)
-    a_base_next_all = mask_unused_dof(torch.randn(8, K_CANDIDATES, HORIZON, ACTION_DIM))
-    target = model.n_step_target(reward, done, next_state, z_next_all, a_base_next_all, n_steps)
+    target = torch.randn(8, 1)
     before = {k: v.detach().clone() for k, v in model.actor.named_parameters()}
-    critic_info = model.update_critic(
-        state, apply_residual(a_base, model.actor(state, noise).detach()), target, is_expert)
-    mc_return = torch.zeros(8, 1)
+    critic_info = model.update_critic(state, a_base_all[:, 0], target)
     actor_info = model.update_actor(
-        state, noise.unsqueeze(1).repeat(1, K_CANDIDATES, 1, 1),
-        a_base.unsqueeze(1).repeat(1, K_CANDIDATES, 1, 1), is_expert, mc_return)
+        state, a_base_all[:, 0], z_all, a_base_all, is_expert, torch.zeros(8, 1), True)
     assert torch.isfinite(torch.tensor(critic_info["critic_loss"]))
+    assert set(critic_info) == {"critic_loss", "critic_grad_norm", "critic_q_mean"}
     assert torch.isfinite(torch.tensor(actor_info["actor_loss"]))
+    assert set(actor_info) == {
+        "actor_loss", "actor_q_loss", "actor_bc_loss", "actor_grad_norm", "residual_rms",
+        "q_mean", "q_min", "pretrained_q_mean", "q_advantage", "better_than_base_rate",
+        "bc_filter_rate", "q_overestimation", "q_overestimation_online",
+    }
     assert 0.0 <= actor_info["bc_filter_rate"] <= 1.0
     assert any(not torch.equal(before[k], v) for k, v in model.actor.named_parameters())
+
+
+def test_actor_q_term_is_normalised_by_online_mean_abs_q():
+    torch.manual_seed(2)
+    model = DiceResidualModel(device="cpu")
+    state = torch.randn(4, STATE_DIM)
+    z_all = torch.zeros(4, K_CANDIDATES, HORIZON, ACTION_DIM)
+    a_base_all = mask_unused_dof(torch.randn(4, K_CANDIDATES, HORIZON, ACTION_DIM))
+    is_expert = torch.tensor([[1.0], [0.0], [0.0], [1.0]])
+    online = (is_expert == 0).float()
+    with torch.no_grad():
+        state_k = state.unsqueeze(1).expand(4, K_CANDIDATES, STATE_DIM).reshape(-1, STATE_DIM)
+        q = model.critic(state_k, a_base_all.reshape(-1, HORIZON, ACTION_DIM)).reshape(4, K_CANDIDATES)
+    q_scale = float((q.abs() * online).sum() / (online.sum() * K_CANDIDATES))
+    expected = float(-(q.mean(dim=1) * online.squeeze(1)).sum() / 4) / q_scale
+    info = model.update_actor(
+        state, a_base_all[:, 0], z_all, a_base_all, is_expert, torch.zeros(4, 1), False)
+    assert info["actor_q_loss"] == pytest.approx(expected, rel=1e-4)
+    assert info["q_mean"] == pytest.approx(float(q.mean()), rel=1e-4)
+    assert info["q_advantage"] == pytest.approx(0.0, abs=1e-6)
+
+
+class _SumCritic(torch.nn.Module):
+    def forward(self, state, action, return_all=False):
+        q = action.float().reshape(action.shape[0], -1).sum(dim=-1, keepdim=True)
+        return [q] if return_all else q
+
+
+def test_bc_filter_drops_better_overestimated_online_rows_only():
+    model = DiceResidualModel(device="cpu")
+    model.critic = _SumCritic()
+    state = torch.zeros(3, STATE_DIM)
+    z_all = torch.zeros(3, K_CANDIDATES, HORIZON, ACTION_DIM)
+    a_base_all = torch.zeros(3, K_CANDIDATES, HORIZON, ACTION_DIM)
+    stored = torch.zeros(3, HORIZON, ACTION_DIM)
+    is_expert = torch.tensor([[0.0], [0.0], [1.0]])
+    mc_return = torch.tensor([[1.0], [0.0], [1.0]])
+    rates = []
+    for filter_active in (False, True):
+        with torch.no_grad():
+            model.actor.net[-1].bias.fill_(1.0)
+        info = model.update_actor(state, stored, z_all, a_base_all, is_expert, mc_return, filter_active)
+        rates.append(info["bc_filter_rate"])
+    assert info["residual_rms"] == pytest.approx(1.0, rel=1e-3)
+    assert info["actor_bc_loss"] == pytest.approx(rates[1], rel=1e-3)
+    assert info["better_than_base_rate"] == 1.0
+    assert info["q_overestimation"] == pytest.approx(-2.0 / 3.0)
+    assert info["q_overestimation_online"] == pytest.approx(-0.5)
+    assert rates == [1.0, pytest.approx(2.0 / 3.0)]
 
 
 def _replay_row(reward, done, expert=False):
@@ -184,11 +249,49 @@ def _replay_row(reward, done, expert=False):
     }
 
 
-def test_n_step_sparse_terminal_three_chunks():
+def _online_buffer():
     buf = ChunkReplay(capacity=32)
     for reward, done in ((0, 0), (0, 0), (1, 1)):
         buf.add_online(_replay_row(reward, done))
     buf.finalize_episode()
+    return buf
+
+
+def test_update_runs_actor_and_polyak_on_every_second_gradient_step():
+    from script.lingbot_rl_train import _update_from_buffer
+
+    torch.manual_seed(7)
+    model = DiceResidualModel(device="cpu")
+    buf = _online_buffer()
+    samples, order, targets = [], [], []
+    critic, actor = model.update_critic, model.update_actor
+    weight = model.target_critic.heads[0][0].weight
+    original = buf.sample
+
+    def spy_critic(state, action, target_q):
+        order.append(("critic", id(state)))
+        targets.append(weight.detach().clone())
+        return critic(state, action, target_q)
+
+    def spy_actor(state, *args):
+        order.append(("actor", id(state)))
+        return actor(state, *args)
+
+    buf.sample = lambda size, expert_ratio: samples.append(size) or original(size, expert_ratio)
+    model.update_critic = spy_critic
+    model.update_actor = spy_actor
+    info = _update_from_buffer(model, buf, 0.0, "cpu", False)
+    actor_steps = GRADIENT_STEPS // ACTOR_EVERY
+    assert len(samples) == GRADIENT_STEPS
+    assert [kind for kind, _ in order] == ["critic", "critic", "actor"] * actor_steps
+    assert all(order[i * 3 + 2][1] == order[i * 3 + 1][1] for i in range(actor_steps))
+    moved = [not torch.equal(targets[i - 1], targets[i]) for i in range(1, GRADIENT_STEPS)]
+    assert moved == [False, True] * (actor_steps - 1) + [False]
+    assert {"critic_loss", "actor_loss"} <= set(info)
+
+
+def test_n_step_sparse_terminal_three_chunks():
+    buf = _online_buffer()
     rows = buf.rows()
     assert [float(row["n_steps"]) for row in rows] == [3.0, 2.0, 1.0]
     assert [float(row["done"]) for row in rows] == [1.0, 1.0, 1.0]
@@ -197,26 +300,20 @@ def test_n_step_sparse_terminal_three_chunks():
     assert float(rows[2]["reward"]) == pytest.approx(1.0)
 
 
-def test_open_episode_sample_bootstraps_from_successor():
+def test_only_finalized_online_rows_are_ready_to_sample():
     buf = ChunkReplay(capacity=32)
-    first = _replay_row(0, 0)
-    first["s"] = np.zeros(STATE_DIM, np.float32)
-    first["a"] = np.zeros((HORIZON, ACTION_DIM), np.float32)
-    second = _replay_row(0, 0)
-    second["s"] = np.ones(STATE_DIM, np.float32)
-    second["a"] = np.full((HORIZON, ACTION_DIM), 2.0, np.float32)
-    buf.add_online(first)
-    assert not buf.has_ready_online()
+    for _ in range(3):
+        buf.add_online(_replay_row(0, 0))
+    assert buf.ready_online_count() == 0
     with pytest.raises(ValueError, match="no online"):
         buf.sample(1, expert_ratio=0.0)
-    buf.add_online(second)
-    assert buf.has_ready_online()
-    batch = buf.sample(1, expert_ratio=0.0)
-    np.testing.assert_array_equal(batch["s"][0].numpy(), np.zeros(STATE_DIM, np.float32))
-    np.testing.assert_array_equal(batch["s_next"][0].numpy(), np.ones(STATE_DIM, np.float32))
-    np.testing.assert_array_equal(batch["a_next"][0].numpy(), np.full((HORIZON, ACTION_DIM), 2.0, np.float32))
-    assert float(batch["n_steps"][0]) == 2.0
-    assert float(batch["done"][0]) == 0.0
+    buf.finalize_episode()
+    assert buf.ready_online_count() == 3
+    for _ in range(4):
+        buf.add_expert(_replay_row(0, 1, expert=True))
+    buf.finalize_episode()
+    assert buf.ready_online_count() == 3
+    assert len(buf) == 7
 
 
 def test_rlpd_mix_respects_scheduled_ratio():
@@ -226,7 +323,8 @@ def test_rlpd_mix_respects_scheduled_ratio():
     buf.finalize_episode()
     for _ in range(80):
         buf.add_expert(_replay_row(0, 1, expert=True))
-    ratio = RLConfig().validate().rlpd_expert_ratio(0)
+    buf.finalize_episode()
+    ratio = RLConfig().validate().rlpd_expert_ratio(104_000)
     assert ratio == pytest.approx(0.5)
     counts = [float(buf.sample(20, expert_ratio=ratio)["is_expert"].mean()) for _ in range(40)]
     assert abs(sum(counts) / len(counts) - 0.5) < 0.15
@@ -444,6 +542,19 @@ def test_expert_chunk_stride_and_padding(tmp_path):
     np.testing.assert_allclose(decoded, raw, atol=1e-5)
 
 
+def test_ingest_experts_skips_rows_from_other_tasks():
+    from script.lingbot_rl_train import _ingest_experts
+
+    buf = ChunkReplay(capacity=32)
+    mine = _replay_row(1, 1, expert=True)
+    other = _replay_row(1, 1, expert=True)
+    other["task_id"] = 5
+    _ingest_experts(buf, [other, mine, other], (0,))
+    assert len(buf) == 1
+    assert buf.rows()[0]["task_id"] == 0
+    assert buf.ready_online_count() == 0
+
+
 def test_featurize_experts_pools_published_latents(tmp_path):
     from script.lingbot_rl_data import featurize_experts
 
@@ -602,21 +713,6 @@ def test_missing_demo_cameras_do_not_fabricate_none_frames(tmp_path):
     assert frames == []
 
 
-def test_train_eval_fires_after_crossing_chunk_stride():
-    from script.lingbot_rl_train import due_train_evals, train_eval_schedule
-
-    schedule = train_eval_schedule(100_000, 25_000)
-    assert schedule == [0, 25_000, 50_000, 75_000, 100_000]
-    evaluated = set()
-    assert due_train_evals(0, schedule, evaluated) == [0]
-    evaluated.update([0])
-    assert due_train_evals(24_999, schedule, evaluated) == []
-    assert due_train_evals(25_012, schedule, evaluated) == [25_000]
-    evaluated.update([25_000])
-    assert due_train_evals(50_016, schedule, evaluated) == [50_000]
-    assert train_eval_schedule(12, 25_000) == [0]
-
-
 def test_host_array_converts_bfloat16():
     from script.lingbot_rl_train import _host_array
 
@@ -700,30 +796,34 @@ def _resume_buffer():
     return buf
 
 
-def test_save_load_resume_roundtrips_rng_evaluated_and_wandb_id(tmp_path):
+def test_save_load_resume_roundtrips_rng_checkpointed_and_schedulers(tmp_path):
     from script.lingbot_rl_train import load_resume, save_resume
 
     recipe = RLConfig().protocol()
     path = tmp_path / "resume" / "latest.pt"
     model = DiceResidualModel(device="cpu")
+    for _ in range(12):
+        model.actor_opt.step()
+        model.critic_opt.step()
+        model.actor_lr.step()
+        model.critic_lr.step()
     buffer = _resume_buffer()
     torch.manual_seed(123)
     np.random.seed(123)
     random.seed(123)
-    save_resume(
-        path, model, buffer, 0, 0, recipe,
-        evaluated={0}, wandb_id="8otkv33a",
-    )
+    save_resume(path, model, buffer, 0, 0, recipe, checkpointed={0, 80_000}, wandb_id="8otkv33a")
     torch.manual_seed(999)
     np.random.seed(999)
     random.seed(999)
     restored = DiceResidualModel(device="cpu")
     buffer = ChunkReplay()
-    env_steps, chunks, evaluated, wandb_id = load_resume(path, restored, buffer, recipe)
+    env_steps, chunks, checkpointed, wandb_id = load_resume(path, restored, buffer, recipe)
     assert env_steps == 0
     assert chunks == 0
-    assert evaluated == {0}
+    assert checkpointed == {0, 80_000}
     assert wandb_id == "8otkv33a"
+    assert restored.actor_lr.state_dict()["last_epoch"] == 12 == restored.critic_lr.last_epoch
+    assert restored.actor_opt.param_groups[0]["lr"] == model.actor_opt.param_groups[0]["lr"]
     assert any(float(row["is_expert"]) == 1.0 for row in buffer.rows())
     got_t = torch.rand(4)
     got_n = np.random.rand()
@@ -743,19 +843,16 @@ def test_load_resume_restores_rng_from_non_byte_mapped_tensor(tmp_path):
     path = tmp_path / "resume" / "latest.pt"
     model = DiceResidualModel(device="cpu")
     torch.manual_seed(7)
-    save_resume(
-        path, model, _resume_buffer(), 12, 3, recipe,
-        evaluated={0}, wandb_id="abc",
-    )
+    save_resume(path, model, _resume_buffer(), 12, 3, recipe, checkpointed={0}, wandb_id="abc")
     payload = torch.load(path, map_location="cpu", weights_only=False)
     payload["rng"]["torch"] = payload["rng"]["torch"].to(dtype=torch.int32)
     torch.save(payload, path)
     torch.manual_seed(0)
-    env_steps, chunks, evaluated, wandb_id = load_resume(
+    env_steps, chunks, checkpointed, wandb_id = load_resume(
         path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
     assert env_steps == 12
     assert chunks == 3
-    assert evaluated == {0}
+    assert checkpointed == {0}
     assert wandb_id == "abc"
     got = torch.rand(3)
     torch.manual_seed(7)
@@ -767,23 +864,9 @@ def test_load_resume_rejects_recipe_mismatch(tmp_path):
 
     recipe = RLConfig().protocol()
     path = tmp_path / "latest.pt"
-    save_resume(path, DiceResidualModel(device="cpu"), _resume_buffer(), 0, 0, recipe, evaluated={0})
+    save_resume(path, DiceResidualModel(device="cpu"), _resume_buffer(), 0, 0, recipe, checkpointed={0})
     with pytest.raises(ValueError, match="recipe fingerprint"):
         load_resume(path, DiceResidualModel(device="cpu"), ChunkReplay(), {**recipe, "beta": 1.0})
-
-
-def test_load_resume_infers_evaluated_from_train_eval_dirs(tmp_path):
-    from script.lingbot_rl_train import load_resume, save_resume
-
-    recipe = RLConfig().protocol()
-    path = tmp_path / "resume" / "latest.pt"
-    save_resume(path, DiceResidualModel(device="cpu"), _resume_buffer(), 0, 0, recipe, evaluated={0})
-    payload = torch.load(path, map_location="cpu", weights_only=False)
-    payload.pop("evaluated")
-    torch.save(payload, path)
-    (tmp_path / "train_eval" / "step_000000").mkdir(parents=True)
-    _, _, evaluated, _ = load_resume(path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
-    assert evaluated == {0}
 
 
 def test_load_resume_accepts_legacy_torch_numpy_rng(tmp_path):
@@ -791,226 +874,185 @@ def test_load_resume_accepts_legacy_torch_numpy_rng(tmp_path):
 
     recipe = RLConfig().protocol()
     path = tmp_path / "resume" / "latest.pt"
-    save_resume(path, DiceResidualModel(device="cpu"), _resume_buffer(), 0, 0, recipe, evaluated={0})
+    save_resume(path, DiceResidualModel(device="cpu"), _resume_buffer(), 0, 0, recipe, checkpointed={0})
     payload = torch.load(path, map_location="cpu", weights_only=False)
     payload["rng"] = {
         "torch": payload["rng"]["torch"].to(dtype=torch.int32),
         "numpy": payload["rng"]["numpy"],
     }
-    payload.pop("evaluated")
+    payload.pop("checkpointed")
     payload.pop("wandb_id")
     torch.save(payload, path)
-    (tmp_path / "train_eval" / "step_000000").mkdir(parents=True)
-    env_steps, _, evaluated, wandb_id = load_resume(
+    env_steps, _, checkpointed, wandb_id = load_resume(
         path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
     assert env_steps == 0
-    assert evaluated == {0}
+    assert checkpointed == set()
     assert wandb_id is None
 
 
-def test_train_resume_reuses_wandb_id_and_skips_ingest(tmp_path, monkeypatch):
+class _StubPolicy:
+    def reset(self):
+        self._executed_actions = None
+
+    def decode_candidates(self, batch, k=4, **kwargs):
+        a_base = torch.zeros(k, HORIZON, ACTION_DIM)
+        for index in range(k):
+            a_base[index, :, 0] = index
+        return {
+            "s": torch.zeros(1, STATE_DIM),
+            "z": torch.zeros(k, HORIZON, ACTION_DIM),
+            "a_base": a_base,
+            "video_noise": torch.zeros(1),
+            "first_chunk": True,
+        }
+
+    def commit_executed(self, chunk, first_chunk=False):
+        self._executed_actions = chunk
+
+    def observe_env_step(self, batch):
+        return None
+
+
+def _sum_critic_model(device="cpu"):
+    model = DiceResidualModel(device=device)
+    model.critic = _SumCritic()
+    return model
+
+
+def _smoke_train(tmp_path, monkeypatch, budget, prepared=None, model_factory=None, **kwargs):
     import sys
 
     import script.lingbot_rl_train as train
 
-    recipe = RLConfig().protocol()
-    train.save_resume(
-        tmp_path / "resume" / "latest.pt",
-        DiceResidualModel(device="cpu"),
-        _resume_buffer(),
-        12,
-        1,
-        recipe,
-        evaluated={0},
-        wandb_id="run-from-checkpoint",
-    )
-
-    def boom(*args, **kwargs):
-        raise AssertionError("resume must not re-featurize experts")
-
-    wandb_calls = []
-
-    class Run:
-        id = "run-from-checkpoint"
-
-        def log(self, *args, **kwargs):
-            return None
-
-        def finish(self, **kwargs):
-            return None
-
-        summary = {}
-
-    class StubPolicy:
-        def reset(self):
-            self._executed_actions = None
-
-        def extract_critic_state(self, batch):
-            return torch.zeros(1, STATE_DIM)
-
-        def decode_candidates(self, batch, k=4, **kwargs):
-            z = torch.zeros(k, HORIZON, ACTION_DIM)
-            a_base = torch.zeros(k, HORIZON, ACTION_DIM)
-            return {
-                "s": torch.zeros(1, STATE_DIM),
-                "z": z,
-                "a_base": a_base,
-                "video_noise": torch.zeros(1),
-                "first_chunk": True,
-            }
-
-        def commit_executed(self, chunk, first_chunk=False):
-            self._executed_actions = chunk
-
-        def select_action(self, batch):
-            return torch.zeros(1, 7)
-
-        def observe_env_step(self, batch):
-            return None
+    envs, logs, wandb_calls = [], [], []
 
     class StubEnv:
-        def __init__(self, **kwargs):
+        def __init__(self, **env_kwargs):
+            envs.append(env_kwargs)
             self.steps = 0
+
+        def _obs(self):
+            zeros = np.zeros((128, 128, 3), np.uint8)
+            return {"pixels": {"image": zeros, "image2": zeros}}
 
         def reset(self, seed=None):
             self.steps = 0
-            zeros = np.zeros((128, 128, 3), np.uint8)
-            return {"pixels": {"image": zeros, "image2": zeros}}, {}
+            return self._obs(), {}
 
         def step(self, action):
             self.steps += 1
-            done = self.steps >= 12
-            return self.reset()[0], 0.0, done, False, {"is_success": False}
+            return self._obs(), 0.0, self.steps >= 12, False, {"is_success": False}
 
         def close(self):
             return None
 
-    monkeypatch.setattr(train, "featurize_experts", boom)
-    monkeypatch.setattr(train, "load_manifest_episodes", boom)
-    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: StubPolicy())
+    class Run:
+        id = "stub-run"
+        summary = {}
+
+        def log(self, payload):
+            logs.append(payload)
+
+        def finish(self, **finish_kwargs):
+            return None
+
+    prepared_path = tmp_path / "prepared.json"
+    if prepared is not None:
+        prepared_path.write_text(json.dumps(prepared))
+    if model_factory is not None:
+        monkeypatch.setattr(train, "DiceResidualModel", model_factory)
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _StubPolicy())
     monkeypatch.setattr(train, "LiberoEnv", StubEnv)
-    monkeypatch.setitem(
-        sys.modules,
-        "wandb",
-        type("W", (), {
-            "init": staticmethod(lambda **k: wandb_calls.append(k) or Run()),
-            "finish": staticmethod(lambda **k: None),
-        })(),
-    )
+    monkeypatch.setattr(train.np.random, "randint", lambda n: 0 if n == 1 else 1)
+    monkeypatch.setitem(sys.modules, "wandb", type("W", (), {
+        "init": staticmethod(lambda **k: wandb_calls.append(k) or Run()),
+        "finish": staticmethod(lambda **k: None),
+    })())
+    train.train(output_dir=tmp_path, run_name="unit", max_env_steps=budget,
+                prepared_path=prepared_path, **kwargs)
+    resume = torch.load(tmp_path / "resume" / "latest.pt", map_location="cpu", weights_only=False)
+    return {"rows": resume["replay"]["data"], "logs": logs, "envs": envs,
+            "wandb": wandb_calls, "resume": resume}
+
+
+def test_train_smoke_loop_gates_updates_saves_weights_and_runs_hook(tmp_path, monkeypatch):
+    from script.lingbot_rl_train import _hook
+
+    stamp = tmp_path / "hook.txt"
+    out = _smoke_train(tmp_path, monkeypatch, 42, commit=_hook(f"printf %s $DICE_STEP > {stamp}"))
+    assert out["envs"] and all(env["init_states"] is False for env in out["envs"])
+    assert stamp.read_text() == "42"
+    payload = torch.load(tmp_path / "residual.pt", map_location="cpu", weights_only=True)
+    assert set(payload) <= {"actor", "critic", "target_critic"}
+    assert "transformer" not in out["resume"]
+    assert out["resume"]["env_steps"] == 42
+    assert out["resume"]["checkpointed"] == []
+    assert "recipe" in out["resume"]
+    assert "python" in out["resume"]["rng"] and "cuda" in out["resume"]["rng"]
+    updates = [entry for entry in out["logs"] if "critic_loss" in entry]
+    assert len(out["rows"]) == 4
+    assert [entry["chunks"] for entry in updates] == [UPDATE_EVERY_CHUNKS]
+    assert updates[0]["buffer_online_rows"] == 3
+    assert [float(row["done"]) for row in out["rows"]] == [1.0, 1.0, 1.0, 0.0]
+    assert [int(row["n_env_actions"]) for row in out["rows"]] == [12, 12, 12, 6]
+
+
+def test_selection_is_random_during_warmup_and_argmax_afterwards(tmp_path, monkeypatch):
+    warmup = _smoke_train(
+        tmp_path / "warm", monkeypatch, 36, model_factory=_sum_critic_model,
+        config=RLConfig(selection_warmup_steps=10_000))
+    assert [float(row["a"][0][0]) for row in warmup["rows"]] == [1.0, 1.0, 1.0]
+    greedy = _smoke_train(
+        tmp_path / "greedy", monkeypatch, 36, model_factory=_sum_critic_model,
+        config=RLConfig(selection_warmup_steps=0))
+    assert [float(row["a"][0][0]) for row in greedy["rows"]] == [3.0, 3.0, 3.0]
+    assert [entry["selection_active"] for entry in greedy["logs"] if "selection_active" in entry] == []
+
+
+def test_train_resume_reuses_wandb_id_and_skips_ingest(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+
+    def boom(*args, **kwargs):
+        raise AssertionError("resume must not re-featurize experts")
+
+    train.save_resume(
+        tmp_path / "resume" / "latest.pt", DiceResidualModel(device="cpu"), _resume_buffer(),
+        12, 1, RLConfig().protocol(), checkpointed={0}, wandb_id="run-from-checkpoint")
     ckpt = tmp_path / "ckpt"
     ckpt.mkdir()
     (ckpt / "dataset_manifest.json").write_text("{}")
     prepared = {
-        "tasks": [{"task_id": task_id, "instruction": f"task-{task_id}", "initial_state_count": 50} for task_id in range(10)],
-        "normalization": {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23},
+        "tasks": [{"task_id": task_id, "instruction": f"task-{task_id}", "initial_state_count": 50}
+                  for task_id in range(10)],
+        "normalization": _eval_normalization(),
         "checkpoint": str(ckpt),
         "model_path": None,
         "architecture": {},
         "source_run": "libero30-sft",
         "checkpoint_step": 600,
     }
-    prepared_path = tmp_path / "prepared.json"
-    prepared_path.write_text(__import__("json").dumps(prepared))
+    monkeypatch.setattr(train, "featurize_experts", boom)
+    monkeypatch.setattr(train, "load_manifest_episodes", boom)
     monkeypatch.setattr(
         "script.lingbot_eval.read_checkpoint_metadata",
-        lambda path: {"architecture": {}, "normalization": prepared["normalization"]},
+        lambda path: {"architecture": {}, "normalization": _eval_normalization()},
     )
-    train.train(
-        output_dir=tmp_path, run_name="unit", resume=True, max_env_steps=24,
-        prepared_path=prepared_path, dataset_root=tmp_path / "dataset",
-    )
-    assert wandb_calls[0]["id"] == "run-from-checkpoint"
-    assert wandb_calls[0]["resume"] == "must"
-
-
-def test_train_mocked_step_logs_and_saves_small_weights(tmp_path, monkeypatch):
-    import sys
-
-    import script.lingbot_rl_train as train
-    from script.lingbot_rl_model import ACTION_DIM, HORIZON, STATE_DIM
-
-    class StubPolicy:
-        def reset(self):
-            self._executed_actions = None
-
-        def extract_critic_state(self, batch):
-            return torch.zeros(1, STATE_DIM)
-
-        def decode_candidates(self, batch, k=4, **kwargs):
-            z = torch.zeros(k, HORIZON, ACTION_DIM)
-            a_base = torch.zeros(k, HORIZON, ACTION_DIM)
-            return {
-                "s": torch.zeros(1, STATE_DIM),
-                "z": z,
-                "a_base": a_base,
-                "video_noise": torch.zeros(1),
-                "first_chunk": True,
-            }
-
-        def commit_executed(self, chunk, first_chunk=False):
-            self._executed_actions = chunk
-
-        def select_action(self, batch):
-            return torch.zeros(1, 7)
-
-        def observe_env_step(self, batch):
-            return None
-
-    class StubEnv:
-        def __init__(self, **kwargs):
-            self.steps = 0
-            self.init_state_id = 0
-
-        def reset(self, seed=None):
-            self.steps = 0
-            zeros = __import__("numpy").zeros((128, 128, 3), __import__("numpy").uint8)
-            return {"pixels": {"image": zeros, "image2": zeros}}, {}
-
-        def step(self, action):
-            self.steps += 1
-            done = self.steps >= 12
-            return self.reset()[0], 0.0, done, False, {"is_success": False}
-
-        def close(self):
-            return None
-
-    logs = []
-    monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: StubPolicy())
-    monkeypatch.setattr(train, "LiberoEnv", StubEnv)
-    monkeypatch.setitem(
-        sys.modules,
-        "wandb",
-        type("W", (), {
-            "init": staticmethod(lambda **k: type("R", (), {
-                "log": logs.append,
-                "summary": {},
-                "finish": lambda **k: None,
-            })()),
-            "finish": staticmethod(lambda **k: None),
-        })(),
-    )
-    train.train(output_dir=tmp_path, run_name="unit", max_env_steps=12, prepared_path=tmp_path / "prepared.json")
-    assert (tmp_path / "residual.pt").is_file()
-    payload = torch.load(tmp_path / "residual.pt", map_location="cpu", weights_only=True)
-    assert set(payload) <= {"actor", "critic", "target_critic"}
-    resume = torch.load(tmp_path / "resume" / "latest.pt", map_location="cpu", weights_only=False)
-    assert "transformer" not in resume
-    assert "env_steps" in resume
-    assert "recipe" in resume
-    assert "evaluated" in resume
-    assert "python" in resume["rng"]
-    assert "cuda" in resume["rng"]
+    out = _smoke_train(
+        tmp_path, monkeypatch, 24, prepared=prepared, resume=True, dataset_root=tmp_path / "dataset")
+    assert out["wandb"][0]["id"] == "run-from-checkpoint"
+    assert out["wandb"][0]["resume"] == "must"
 
 
 def test_save_inference_checkpoints_keeps_latest_and_step_copy(tmp_path):
-    from script.lingbot_rl_train import save_inference_checkpoints
+    from script.lingbot_rl_train import checkpoint_dir, save_inference_checkpoints
 
     model = DiceResidualModel(device="cpu")
     with torch.no_grad():
         model.actor.net[0].bias.fill_(0.25)
     save_inference_checkpoints(tmp_path, 50291, model)
     latest = tmp_path / "residual.pt"
-    step = tmp_path / "train_eval" / "step_050291" / "residual.pt"
+    step = checkpoint_dir(tmp_path, 50291) / "residual.pt"
+    assert step == tmp_path / "checkpoints" / "step_050291" / "residual.pt"
     assert latest.is_file()
     assert step.is_file()
     loaded_latest = torch.load(latest, map_location="cpu", weights_only=True)
@@ -1022,17 +1064,7 @@ def test_save_inference_checkpoints_keeps_latest_and_step_copy(tmp_path):
     assert "replay" not in loaded_latest
 
 
-def test_train_eval_writes_step_residual_not_only_latest():
-    import script.lingbot_rl_train as train
-
-    source = Path(train.__file__).read_text()
-    block = source.split("def maybe_eval", 1)[1].split("maybe_eval()", 1)[0]
-    assert "save_inference_checkpoints" in block
-    assert 'output_dir / "residual.pt"' not in block
-
-
 def test_sharpening_metrics_not_residual_rms():
-    from script.lingbot_rl_model import DiceResidualModel
     from script.lingbot_rl_train import sharpening_metrics
 
     model = DiceResidualModel(device="cpu")
@@ -1148,21 +1180,6 @@ def test_store_defaults_repeat_single_candidate_for_experts():
     np.testing.assert_array_equal(stored["a_base_all"][0], stored["a_base_all"][3])
 
 
-def test_open_episode_view_has_zero_mc_return_and_successor_candidates():
-    buf = ChunkReplay(capacity=32)
-    first = _replay_row(0, 0)
-    second = _replay_row(0, 0)
-    second["z_all"] = np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 5.0, np.float32)
-    buf.add_online(first)
-    buf.add_online(second)
-    batch = buf.sample(1, expert_ratio=0.0)
-    assert batch["mc_return"].shape == (1, 1)
-    assert float(batch["mc_return"][0]) == 0.0
-    assert batch["z_all"].shape == (1, K_CANDIDATES, HORIZON, ACTION_DIM)
-    np.testing.assert_array_equal(
-        batch["z_next_all"][0].numpy(), np.full((K_CANDIDATES, HORIZON, ACTION_DIM), 5.0, np.float32))
-
-
 def test_store_rejects_wrong_candidate_count():
     buf = ChunkReplay(capacity=8)
     row = _replay_row(0, 0)
@@ -1189,57 +1206,6 @@ def test_n_step_target_averages_current_policy_over_candidates():
         ], dim=0).mean(dim=0)
     torch.testing.assert_close(target[0], (GAMMA ** 3) * qs[0])
     torch.testing.assert_close(target[1], torch.tensor([1.0]))
-
-
-def test_bc_filter_disables_only_on_better_and_mc_underestimated():
-    from script.lingbot_rl_model import bc_filter_keep
-
-    q_a = torch.tensor([[0.9, 0.9, 0.3, 0.9]])
-    q_base = torch.tensor([[0.5, 0.5, 0.5, 0.95]])
-    mc_return = torch.tensor([[1.5]])
-    keep = bc_filter_keep(q_a, q_base, mc_return)
-    torch.testing.assert_close(keep, torch.tensor([[0.0, 0.0, 1.0, 1.0]]))
-    keep_low_mc = bc_filter_keep(q_a, q_base, torch.tensor([[0.9]]))
-    torch.testing.assert_close(keep_low_mc, torch.ones(1, 4))
-
-
-def test_update_actor_consumes_candidate_sets_and_mc_return():
-    torch.manual_seed(4)
-    model = DiceResidualModel(device="cpu")
-    state = torch.randn(6, STATE_DIM)
-    z_all = torch.randn(6, K_CANDIDATES, HORIZON, ACTION_DIM)
-    a_base_all = mask_unused_dof(torch.randn(6, K_CANDIDATES, HORIZON, ACTION_DIM))
-    is_expert = torch.zeros(6, 1)
-    is_expert[:3] = 1
-    mc_return = torch.zeros(6, 1)
-    before = {k: v.detach().clone() for k, v in model.actor.named_parameters()}
-    info = model.update_actor(state, z_all, a_base_all, is_expert, mc_return)
-    assert torch.isfinite(torch.tensor(info["actor_loss"]))
-    assert 0.0 <= info["bc_filter_rate"] <= 1.0
-    assert any(not torch.equal(before[k], v) for k, v in model.actor.named_parameters())
-
-
-def test_update_from_buffer_samples_a_fresh_minibatch_per_gradient_step():
-    from script.lingbot_rl_train import _update_from_buffer
-
-    torch.manual_seed(7)
-    model = DiceResidualModel(device="cpu")
-    buf = ChunkReplay(capacity=32)
-    for reward, done in ((0, 0), (0, 0), (1, 1)):
-        buf.add_online(_replay_row(reward, done))
-    buf.finalize_episode()
-    calls = []
-    original = buf.sample
-
-    def spy(batch_size, expert_ratio):
-        calls.append(batch_size)
-        return original(batch_size, expert_ratio)
-
-    buf.sample = spy
-    critic_info, actor_info = _update_from_buffer(model, buf, expert_ratio=0.0, device="cpu")
-    assert len(calls) == UTD + 1
-    assert torch.isfinite(torch.tensor(critic_info["critic_loss"]))
-    assert torch.isfinite(torch.tensor(actor_info["actor_loss"]))
 
 
 def test_predict_action_chunk_executes_highest_q_candidate():
