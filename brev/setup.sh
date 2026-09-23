@@ -19,7 +19,7 @@ DATASET_REVISION="$(grep -o 'DATASET_REVISION = "[0-9a-f]*"' "$DICE_REPO/script/
 export PATH="$HOME/.local/bin:$PATH"
 export LEROBOT_SOURCE_ROOT="$LEROBOT" HF_HOME="$DICE_DATA/cache/hub" HF_HUB_DISABLE_XET=1 MUJOCO_GL=egl PYOPENGL_PLATFORM=egl
 export LIBERO_CONFIG_PATH="$DICE_DATA/libero-config" PYTHONPATH="$DICE_REPO" TOKENIZERS_PARALLELISM=false
-[ -w "$(dirname "$DICE_DATA")" ] || { sudo mkdir -p "$DICE_DATA"; sudo chown "$USER" "$DICE_DATA"; }
+[ -w "$(dirname "$DICE_DATA")" ] || { sudo mkdir -p "$DICE_DATA"; sudo chown "$(id -un)" "$DICE_DATA"; }
 mkdir -p "$DICE_DATA/cache/hub" "$DICE_DATA/runs" "$DICE_DATA/sft/libero30-sft/checkpoints" "$DICE_DATA/libero-config"
 sudo apt-get update -y
 sudo apt-get install -y git ffmpeg libgl1 libegl1 libegl1-mesa-dev libgl1-mesa-dev libglib2.0-0 libglvnd0 libgles2 build-essential cmake tmux rsync curl

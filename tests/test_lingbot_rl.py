@@ -283,7 +283,7 @@ def test_update_runs_actor_and_polyak_on_every_second_gradient_step():
     info = _update_from_buffer(model, buf, 0.0, "cpu", False)
     actor_steps = GRADIENT_STEPS // ACTOR_EVERY
     assert len(samples) == GRADIENT_STEPS
-    assert [kind for kind, _ in order] == ["critic", "critic", "actor"] * actor_steps
+    assert [kind for kind, _ in order] == ["critic", "actor", "critic"] * actor_steps
     assert all(order[i * 3 + 2][1] == order[i * 3 + 1][1] for i in range(actor_steps))
     moved = [not torch.equal(targets[i - 1], targets[i]) for i in range(1, GRADIENT_STEPS)]
     assert moved == [False, True] * (actor_steps - 1) + [False]

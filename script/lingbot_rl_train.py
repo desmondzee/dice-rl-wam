@@ -222,11 +222,12 @@ def _update_from_buffer(model, buffer, expert_ratio, device, filter_active):
         target = model.n_step_target(
             sample["reward"], sample["done"], sample["s_next"],
             sample["z_next_all"], sample["a_base_next_all"], sample["n_steps"])
-        info.update(model.update_critic(sample["s"], sample["a"], target))
         if (step + 1) % ACTOR_EVERY == 0:
             info.update(model.update_actor(
                 sample["s"], sample["a"], sample["z_all"], sample["a_base_all"], sample["is_expert"],
                 sample["mc_return"], filter_active))
+        info.update(model.update_critic(sample["s"], sample["a"], target))
+        if (step + 1) % ACTOR_EVERY == 0:
             model.polyak_update()
     return info
 
@@ -359,7 +360,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         save_inference_checkpoints(output_dir, point, model)
         if point in eval_points:
             policy.eval_candidates = 1 if env_steps < config.selection_warmup_steps else config.k_candidates
+            rng = capture_rng()
             summary = _train_eval(policy, tasks, norm, device, suite, point, output_dir, config.train_eval_episodes)
+            restore_rng(rng)
             logged = {"train_eval/macro_success_rate": summary["macro_success_rate"], "env_steps": env_steps}
             for task_id, success in summary["per_task_success"].items():
                 logged[f"train_eval/task_{task_id}_success"] = success
@@ -378,6 +381,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             commit(point)
 
     maybe_checkpoint()
+    episodes = 0
     while env_steps < budget:
         task = tasks[int(np.random.randint(len(tasks)))]
         task_id = task["task_id"]
@@ -463,9 +467,10 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             "env_steps": env_steps, "episode_return": episode_return,
             "episode_success": episode_success, "episode_length": episode_length,
         })
+        episodes += 1
         maybe_checkpoint()
-        save_inference(output_dir / "residual.pt", model)
-        save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id)
+        if episodes % 10 == 0:
+            save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id)
     save_inference(output_dir / "residual.pt", model)
     save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id)
     _write_json(output_dir / "summary.json", {"env_steps": env_steps, "chunks": chunks})

@@ -186,7 +186,6 @@ def run_train(config, prepared_path, run_name, resume=False):
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/rl": results},
               secrets=[wandb_secret], max_containers=1)
 def run_smoke(config, prepared_path, run_name):
-    """A few env steps on one H100. Does not change the pinned 100k recipe or ingest 300 demos."""
     cfg = config_from_dict(config)
     validate_name(run_name)
     owner = _acquire(run_name)
