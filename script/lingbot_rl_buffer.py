@@ -71,47 +71,11 @@ class ChunkReplay:
     def add_expert(self, row):
         self._store(row, 1.0)
 
-    def _is_incomplete_last(self, index):
-        return (
-            index >= self._episode_start
-            and index == len(self._data) - 1
-            and float(self._data[index]["done"]) != 1.0
-        )
+    def finalized_indices(self):
+        return range(self._episode_start)
 
-    def ready_indices(self):
-        return [index for index in range(len(self._data)) if not self._is_incomplete_last(index)]
-
-    def has_ready_online(self):
-        return any(float(self._data[index]["is_expert"]) == 0.0 for index in self.ready_indices())
-
-    def _n_step_view(self, index):
-        row = self._data[index]
-        if index < self._episode_start:
-            return row
-        episode = self._data[self._episode_start:]
-        local = index - self._episode_start
-        length = len(episode)
-        n_steps = min(N_STEP_CHUNKS, length - local)
-        ret = 0.0
-        done_n = 0.0
-        used = n_steps
-        for lag in range(n_steps):
-            ret += (GAMMA ** lag) * float(episode[local + lag]["reward"])
-            if float(episode[local + lag]["done"]) == 1.0:
-                done_n = 1.0
-                used = lag + 1
-                break
-        nxt = local + used if local + used < length else length - 1
-        view = dict(row)
-        view["reward"] = np.float32(ret)
-        view["done"] = np.float32(done_n)
-        view["n_steps"] = np.float32(used)
-        view["s_next"] = np.array(episode[nxt]["s"], copy=True)
-        view["a_next"] = np.array(episode[nxt]["a"], copy=True)
-        view["z_next_all"] = np.array(episode[nxt]["z_all"], copy=True)
-        view["a_base_next_all"] = np.array(episode[nxt]["a_base_all"], copy=True)
-        view["mc_return"] = np.float32(0.0)
-        return view
+    def ready_online_count(self):
+        return sum(float(self._data[index]["is_expert"]) == 0.0 for index in self.finalized_indices())
 
     def finalize_episode(self):
         episode = self._data[self._episode_start:]
@@ -143,7 +107,7 @@ class ChunkReplay:
         self._episode_start = len(self._data)
 
     def sample(self, batch_size, expert_ratio):
-        ready = self.ready_indices()
+        ready = self.finalized_indices()
         online = [i for i in ready if float(self._data[i]["is_expert"]) == 0.0]
         expert = [i for i in ready if float(self._data[i]["is_expert"]) == 1.0]
         if not online:
@@ -154,10 +118,9 @@ class ChunkReplay:
         indices = list(np.random.choice(online, size=n_online, replace=len(online) < n_online))
         if n_expert:
             indices += list(np.random.choice(expert, size=n_expert, replace=len(expert) < n_expert))
-        views = [self._n_step_view(i) for i in indices]
         batch = {}
         for key in KEYS:
-            stacked = np.stack([view[key] for view in views])
+            stacked = np.stack([self._data[i][key] for i in indices])
             if key in FLOAT_KEYS:
                 stacked = np.asarray(stacked, dtype=np.float32)
             tensor = torch.from_numpy(np.ascontiguousarray(stacked)).to(self.device)

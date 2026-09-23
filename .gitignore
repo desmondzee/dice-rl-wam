@@ -125,3 +125,5 @@ instance/
 *.mo
 *.pot
 local_settings.py
+# Brev box secrets
+brev/env.sh

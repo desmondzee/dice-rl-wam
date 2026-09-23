@@ -10,7 +10,7 @@ from pathlib import Path
 import modal
 
 from script.lingbot_eval_config import EvalConfig, LEROBOT_REVISION, validate_name
-from script.lingbot_rl_config import RLConfig
+from script.lingbot_rl_config import RLConfig, config_from_dict
 from script.lingbot_sft_config import DATASET_REPO, DATASET_REVISION
 
 
@@ -21,7 +21,7 @@ RESULT_VOLUME = "dice-lingbot-rl-runs"
 HF_SECRET_NAME = "dice-lingbot-hf"
 WANDB_SECRET_NAME = "dice-lingbot-wandb"
 EVAL_PYTHON = "/opt/lerobot/.venv/bin/python"
-INFERENCE_PATHS = ("residual.pt", "summary.json", "settings.json", "status.json", "train_eval", "eval")
+INFERENCE_PATHS = ("residual.pt", "summary.json", "settings.json", "status.json", "checkpoints", "eval")
 SMOKE_ENV_STEPS = 32
 FILES = (
     "lingbot_eval_config.py", "lingbot_eval.py", "lingbot_eval_report.py", "lingbot_sft_config.py",
@@ -146,7 +146,7 @@ def prepare(config):
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/rl": results},
               secrets=[wandb_secret], max_containers=1)
 def run_train(config, prepared_path, run_name, resume=False):
-    cfg = RLConfig(**config).validate()
+    cfg = config_from_dict(config)
     validate_name(run_name)
     owner = _acquire(run_name)
     env = os.environ.copy()
@@ -187,7 +187,7 @@ def run_train(config, prepared_path, run_name, resume=False):
               secrets=[wandb_secret], max_containers=1)
 def run_smoke(config, prepared_path, run_name):
     """A few env steps on one H100. Does not change the pinned 100k recipe or ingest 300 demos."""
-    cfg = RLConfig(**config).validate()
+    cfg = config_from_dict(config)
     validate_name(run_name)
     owner = _acquire(run_name)
     env = os.environ.copy()
@@ -222,7 +222,7 @@ def run_smoke(config, prepared_path, run_name):
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/rl": results},
               secrets=[wandb_secret], max_containers=1)
 def run_eval(config, prepared_path, run_names, resume=False):
-    cfg = RLConfig(**config).validate()
+    cfg = config_from_dict(config)
     if isinstance(run_names, str):
         run_names = [run_names]
     for name in run_names:
@@ -297,7 +297,7 @@ def download_inference(run_name, download_dir):
 @app.local_entrypoint()
 def main(stage: str = "train", run_name: str = "", resume: bool = False,
          wandb_project: str = "dice-lingbot-va-rl", wandb_entity: str = "",
-         download_dir: str = "result/lingbot-rl"):
+         download_dir: str = "result/lingbot-rl", task_ids: str = "0"):
     if stage not in ("prepare", "train", "eval", "smoke", "download"):
         raise ValueError("Stage must be prepare, train, eval, smoke, or download")
     eval_cfg = EvalConfig(
@@ -306,6 +306,7 @@ def main(stage: str = "train", run_name: str = "", resume: bool = False,
     ).validate()
     rl_cfg = RLConfig(
         wandb_project=wandb_project, wandb_entity=wandb_entity or None,
+        task_ids=tuple(int(task) for task in task_ids.split(",")),
     ).validate()
     if stage == "smoke":
         run_names = [validate_name(run_name or "libero30-dice-smoke")]

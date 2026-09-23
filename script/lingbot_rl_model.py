@@ -1,4 +1,5 @@
 import copy
+import math
 
 import torch
 import torch.nn as nn
@@ -14,9 +15,16 @@ BETA = 100.0
 EPSILON = -0.5
 GAMMA = 0.99
 N_STEP_CHUNKS = 3
-UTD = 10
+GRADIENT_STEPS = 10
+UPDATE_EVERY_CHUNKS = 4
+ACTOR_EVERY = 2
 TAU = 0.01
 ADAM_LR = 1e-4
+WEIGHT_DECAY = 1e-5
+MAX_GRAD_NORM = 1.0
+LR_CYCLE = 1000
+LR_WARMUP = 10
+LR_MIN = 1e-6
 BATCH = 256
 REPLAY_CAPACITY = 100_000
 K_CANDIDATES = 4
@@ -38,10 +46,13 @@ def apply_residual(a_base, residual):
     return mask_unused_dof(mlp_float(a_base) + mlp_float(residual))
 
 
-def bc_filter_keep(q_a, q_base, mc_return):
-    better = (q_a > q_base).float()
-    underestimated = ((q_a - mc_return) < EPSILON).float()
-    return 1.0 - better * underestimated
+def cosine_restart_lr(step):
+    position = step % LR_CYCLE
+    if position < LR_WARMUP:
+        scale = position / LR_WARMUP
+    else:
+        scale = 0.5 * (1.0 + math.cos(math.pi * (position - LR_WARMUP) / (LR_CYCLE - LR_WARMUP)))
+    return (LR_MIN + (ADAM_LR - LR_MIN) * scale) / ADAM_LR
 
 
 def _mlp(in_dim, out_dim):
@@ -96,8 +107,10 @@ class DiceResidualModel:
         self.target_critic = copy.deepcopy(self.critic).to(device)
         for parameter in self.target_critic.parameters():
             parameter.requires_grad_(False)
-        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=ADAM_LR)
-        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=ADAM_LR)
+        self.actor_opt = torch.optim.Adam(self.actor.parameters(), lr=ADAM_LR, weight_decay=WEIGHT_DECAY)
+        self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=ADAM_LR, weight_decay=WEIGHT_DECAY)
+        self.actor_lr = torch.optim.lr_scheduler.LambdaLR(self.actor_opt, cosine_restart_lr)
+        self.critic_lr = torch.optim.lr_scheduler.LambdaLR(self.critic_opt, cosine_restart_lr)
 
     def n_step_target(self, reward, done, next_state, z_next_all, a_base_next_all, n_steps):
         with torch.no_grad():
@@ -112,19 +125,21 @@ class DiceResidualModel:
             backup = self.target_critic(state_k, a_next).reshape(batch, k, 1).mean(dim=1)
             return reward + (GAMMA ** n_steps) * (1.0 - done) * backup
 
-    def update_critic(self, state, action, target_q, is_expert):
+    def update_critic(self, state, action, target_q):
         preds = self.critic(state, action, return_all=True)
         loss = torch.stack([F.mse_loss(pred, target_q) for pred in preds]).sum()
         self.critic_opt.zero_grad(set_to_none=True)
         loss.backward()
+        grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), MAX_GRAD_NORM)
         self.critic_opt.step()
-        self.polyak_update()
+        self.critic_lr.step()
         return {
             "critic_loss": float(loss.detach()),
-            "q_mean": float(torch.stack(preds).mean().detach()),
+            "critic_grad_norm": float(grad_norm),
+            "critic_q_mean": float(torch.stack(preds).mean().detach()),
         }
 
-    def update_actor(self, state, z_all, a_base_all, is_expert, mc_return):
+    def update_actor(self, state, action_stored, z_all, a_base_all, is_expert, mc_return, filter_active):
         state = mlp_float(state)
         z_all = mlp_float(z_all)
         a_base_all = mlp_float(a_base_all)
@@ -132,26 +147,43 @@ class DiceResidualModel:
         state_k = state.unsqueeze(1).expand(batch, k, state.shape[-1]).reshape(batch * k, -1)
         z_flat = z_all.reshape(batch * k, HORIZON, ACTION_DIM)
         base_flat = a_base_all.reshape(batch * k, HORIZON, ACTION_DIM)
-        residual = self.actor(state_k, z_flat)
-        action = apply_residual(base_flat, residual)
+        action = apply_residual(base_flat, self.actor(state_k, z_flat))
         q_a = self.critic(state_k, action).reshape(batch, k)
+        online = (mlp_float(is_expert) == 0).float()
         with torch.no_grad():
             q_base = self.critic(state_k, base_flat).reshape(batch, k)
-            bc_keep = bc_filter_keep(q_a, q_base, mlp_float(mc_return))
-        online = (is_expert == 0).float()
-        q_term = -(q_a.mean(dim=1, keepdim=True) * online).sum() / online.sum().clamp(min=1.0)
-        mse = ((action - base_flat) ** 2).mean(dim=(1, 2)).reshape(batch, k)
-        bc = (bc_keep * mse).mean()
+            overestimation = self.critic(state, action_stored) - mlp_float(mc_return)
+            better = (q_a > q_base).float()
+            keep = torch.ones_like(better)
+            if filter_active:
+                keep = 1.0 - better * (overestimation < EPSILON).float()
+            keep = torch.maximum(keep, 1.0 - online)
+            q_scale = (q_a.abs() * online).sum() / (online.sum() * k).clamp(min=1.0)
+        q_term = -(q_a.mean(dim=1, keepdim=True) * online).mean()
+        if q_scale > 1e-8:
+            q_term = q_term / q_scale
+        mse = ((action - base_flat) ** 2).sum(dim=(1, 2)).reshape(batch, k) / (HORIZON * USED_DOF)
+        bc = (keep * mse).mean()
         loss = q_term + BETA * bc
         self.actor_opt.zero_grad(set_to_none=True)
         loss.backward()
+        grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), MAX_GRAD_NORM)
         self.actor_opt.step()
+        self.actor_lr.step()
         return {
             "actor_loss": float(loss.detach()),
-            "residual_rms": float(((action - base_flat).detach() ** 2).mean().sqrt()),
+            "actor_q_loss": float(q_term.detach()),
+            "actor_bc_loss": float(bc.detach()),
+            "actor_grad_norm": float(grad_norm),
+            "residual_rms": float(mse.detach().mean().sqrt()),
             "q_mean": float(q_a.detach().mean()),
             "q_min": float(q_a.detach().min()),
-            "bc_filter_rate": float(bc_keep.mean()),
+            "pretrained_q_mean": float(q_base.mean()),
+            "q_advantage": float((q_a.detach() - q_base).mean()),
+            "better_than_base_rate": float(better.mean()),
+            "bc_filter_rate": float(keep.mean()),
+            "q_overestimation": float(overestimation.mean()),
+            "q_overestimation_online": float((overestimation * online).sum() / online.sum().clamp(min=1.0)),
         }
 
     def polyak_update(self):
@@ -176,9 +208,13 @@ class DiceResidualModel:
             **self.inference_state_dict(),
             "actor_opt": self.actor_opt.state_dict(),
             "critic_opt": self.critic_opt.state_dict(),
+            "actor_lr": self.actor_lr.state_dict(),
+            "critic_lr": self.critic_lr.state_dict(),
         }
 
     def load_resume_state_dict(self, payload):
         self.load_inference_state_dict(payload)
         self.actor_opt.load_state_dict(payload["actor_opt"])
         self.critic_opt.load_state_dict(payload["critic_opt"])
+        self.actor_lr.load_state_dict(payload["actor_lr"])
+        self.critic_lr.load_state_dict(payload["critic_lr"])

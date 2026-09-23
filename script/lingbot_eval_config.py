@@ -36,8 +36,8 @@ class EvalConfig:
 
     def validate(self):
         validate_name(self.source_run)
-        if self.stage not in ("smoke", "eval"):
-            raise ValueError("Evaluation stage must be smoke or eval")
+        if self.stage not in ("smoke", "eval", "heldout"):
+            raise ValueError("Evaluation stage must be smoke, eval, or heldout")
         if type(self.checkpoint_step) is not int or not 1 <= self.checkpoint_step <= 1000:
             raise ValueError("Invalid checkpoint step")
         if type(self.seed) is not int or not 0 <= self.seed < 2**32:
@@ -48,11 +48,11 @@ class EvalConfig:
 
     @property
     def episodes_per_task(self):
-        return 1 if self.stage == "smoke" else 20
+        return {"smoke": 1, "eval": 20, "heldout": 50}[self.stage]
 
     @property
     def initial_state_offset(self):
-        return 0 if self.stage == "smoke" else 1
+        return 1 if self.stage == "eval" else 0
 
     @property
     def default_run_name(self):
@@ -118,7 +118,7 @@ def episode_plan(config, task_id, initial_state_count):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices=("smoke", "eval"), default="smoke")
+    parser.add_argument("--stage", choices=("smoke", "eval", "heldout"), default="smoke")
     parser.add_argument("--checkpoint-step", type=int, default=600)
     args = parser.parse_args()
     print(json.dumps(EvalConfig(stage=args.stage, checkpoint_step=args.checkpoint_step).to_dict(), indent=2))
