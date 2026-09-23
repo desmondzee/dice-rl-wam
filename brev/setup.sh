@@ -6,7 +6,6 @@ ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 source "$ENV_FILE"
 : "${DICE_REPO:=$(cd "$HERE/.." && pwd)}"
 : "${DICE_DATA:=/ephemeral/dice}"
-: "${HF_TOKEN:?HF_TOKEN is required}"
 : "${MODAL_PROFILE:=desmond-zee}"
 : "${MODAL_SFT_PROFILE:=source}"
 LEROBOT="$DICE_DATA/lerobot"
@@ -35,7 +34,7 @@ for profile in "$MODAL_SFT_PROFILE" "$MODAL_PROFILE"; do
 done
 [ -f "$SFT/norm_stats.json" ] || env MODAL_PROFILE="$MODAL_SFT_PROFILE" "$MODAL" volume get dice-lingbot-sft-runs libero30-sft/checkpoints/step_000600 "$DICE_DATA/sft/libero30-sft/checkpoints/"
 "$PY" -m script.lingbot_eval prepare --config-json '{"source_run":"libero30-sft","checkpoint_step":600,"stage":"eval","seed":42}' --cache-root "$DICE_DATA/cache" --checkpoint "$SFT" --prepared-output "$DICE_DATA/prepared.json"
-"$PY" -c "import os; from script.lingbot_eval import download_snapshot; download_snapshot('$DATASET_REPO', repo_type='dataset', revision='$DATASET_REVISION', cache_dir='$DICE_DATA/cache/hub', token=os.environ['HF_TOKEN'])"
+"$PY" -c "import os; from script.lingbot_eval import download_snapshot; download_snapshot('$DATASET_REPO', repo_type='dataset', revision='$DATASET_REVISION', cache_dir='$DICE_DATA/cache/hub', token='${HF_TOKEN:?HF_TOKEN is required}')"
 echo "$DICE_DATA/cache/hub/datasets--${DATASET_REPO//\//--}/snapshots/$DATASET_REVISION" > "$DICE_DATA/dataset_root"
 "$PY" -c "from lerobot.policies.lingbot_va.modeling_lingbot_va import LingBotVAPolicy; import wandb, modal"
 "$PY" -m script.lingbot_rl_config > /dev/null
