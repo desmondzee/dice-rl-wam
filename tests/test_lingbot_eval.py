@@ -1,3 +1,4 @@
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -6,8 +7,13 @@ import numpy as np
 import pytest
 import torch
 
-from script.lingbot_eval_config import EvalConfig, episode_plan
+from script.lingbot_eval_config import EvalConfig, episode_plan, eval_config_from_dict, shard_plan
 from script.lingbot_eval import aggregate_results, observation_batch, decode_action, run_episode
+
+
+def legacy_seed(seed, task_id, init_state_id):
+    identity = json.dumps(["libero_10", seed, task_id, init_state_id]).encode()
+    return int.from_bytes(hashlib.sha256(identity).digest()[:4], "big")
 
 
 def test_protocol_and_episode_plan():
@@ -19,8 +25,10 @@ def test_protocol_and_episode_plan():
     assert evaluation.protocol()["video_steps"] == 20
     assert evaluation.protocol()["action_steps"] == 50
     assert episode_plan(smoke, 0, 50)[0]["init_state_id"] == 0
+    assert episode_plan(smoke, 0, 50)[0]["seed"] == legacy_seed(42, 0, 0)
     plan = episode_plan(evaluation, 0, 50)
     assert [row["init_state_id"] for row in plan] == list(range(1, 21))
+    assert [row["seed"] for row in plan] == [legacy_seed(42, 0, state) for state in range(1, 21)]
     assert len({row["seed"] for row in plan}) == 20
     assert plan == episode_plan(replace(evaluation, checkpoint_step=200), 0, 50)
     assert plan != episode_plan(evaluation, 1, 50)
@@ -28,9 +36,50 @@ def test_protocol_and_episode_plan():
         episode_plan(evaluation, 0, 20)
 
 
+def test_heldout_plan_reuses_every_state_twice_with_fresh_seeds():
+    heldout = EvalConfig(stage="heldout").validate()
+    assert heldout.episodes_per_task == 100
+    assert heldout.initial_state_offset == 0
+    plan = episode_plan(heldout, 3, 50)
+    assert len(plan) == 100
+    assert [row["init_state_id"] for row in plan] == list(range(50)) * 2
+    assert [row["seed"] for row in plan[:50]] == [legacy_seed(42, 3, state) for state in range(50)]
+    assert all(first["seed"] != second["seed"] for first, second in zip(plan[:50], plan[50:]))
+    assert len({row["seed"] for row in plan}) == 100
+    assert [row["episode_index"] for row in plan] == list(range(100))
+
+
+def test_shard_plan_partitions_the_plan():
+    config = EvalConfig(stage="heldout").validate()
+    plan = episode_plan(config, 0, 50)
+    shards = [shard_plan(replace(config, shard=index, shards=4), plan) for index in range(4)]
+    assert [len(shard) for shard in shards] == [25, 25, 25, 25]
+    for index, shard in enumerate(shards):
+        assert {entry["episode_index"] % 4 for entry in shard} == {index}
+    merged = sorted((entry for shard in shards for entry in shard), key=lambda entry: entry["episode_index"])
+    assert merged == plan
+    assert shard_plan(config, plan) == plan
+
+
+def test_eval_config_round_trip_and_shard_validation():
+    config = EvalConfig(stage="heldout", task_ids=(0, 4), shard=2, shards=4).validate()
+    payload = json.loads(json.dumps(config.to_dict()))
+    assert payload["task_ids"] == [0, 4]
+    assert eval_config_from_dict(payload) == config
+    protocol = config.protocol()
+    assert protocol["version"] == 2
+    assert protocol["task_ids"] == [0, 4]
+    assert (protocol["shard"], protocol["shards"]) == (2, 4)
+    assert protocol["episodes_per_task"] == 100 and protocol["initial_state_offset"] == 0
+    for damage in ({"task_ids": [0, 0]}, {"task_ids": [10]}, {"task_ids": []}, {"shard": 4}, {"shard": -1}):
+        with pytest.raises(ValueError):
+            eval_config_from_dict({**payload, **damage})
+
+
 @pytest.mark.parametrize("changes", [
     {"source_run": "../other"}, {"stage": "all"}, {"checkpoint_step": 0},
-    {"seed": -1}, {"checkpoint_step": 1001},
+    {"seed": -1}, {"checkpoint_step": 1001}, {"task_ids": (0, 0)}, {"task_ids": ()},
+    {"shard": 1}, {"shard": -1, "shards": 2}, {"shards": 0},
 ])
 def test_invalid_config(changes):
     with pytest.raises(ValueError):
@@ -150,6 +199,17 @@ def test_aggregation_has_no_missing_or_duplicate_episode_bias():
         aggregate_results(rows + rows[:1], task_ids=(0, 1), episodes_per_task=2)
 
 
+def test_aggregation_accepts_an_explicit_shard_expectation():
+    rows = [{"task_id": 0, "episode_index": index, "success": index == 1} for index in (1, 5, 9)]
+    shard = aggregate_results(rows, task_ids=(0,), episodes_per_task=20, expected=3)
+    assert shard["complete"] is True
+    assert shard["expected_episodes"] == 3
+    assert shard["completed_episodes"] == 3
+    assert shard["macro_success_rate"] == 1 / 3
+    assert aggregate_results(rows, task_ids=(0,), episodes_per_task=20, expected=4)["complete"] is False
+    assert aggregate_results(rows, task_ids=(0,), episodes_per_task=20)["expected_episodes"] == 20
+
+
 def test_actual_checkpoint_tensor_schema_without_loading_weights():
     pytest.importorskip("lerobot")
     from script.lingbot_eval import validate_transformer_schema
@@ -215,7 +275,7 @@ def test_download_retry_and_secret_redaction(monkeypatch):
     assert "private-test-token" not in str(exc.value)
 
 
-def test_evaluation_persists_and_resumes_without_recounting(tmp_path, monkeypatch):
+def test_shard_evaluation_persists_resumes_and_never_touches_wandb(tmp_path, monkeypatch):
     import sys
     from types import SimpleNamespace
     import imageio.v2 as imageio
@@ -243,47 +303,56 @@ def test_evaluation_persists_and_resumes_without_recounting(tmp_path, monkeypatc
     closes = []
     monkeypatch.setitem(sys.modules, "lerobot.envs.libero", SimpleNamespace(LiberoEnv=lambda **kwargs: SimpleNamespace(close=lambda: closes.append(True))))
     monkeypatch.setattr(imageio, "get_writer", lambda *args, **kwargs: SimpleNamespace(close=lambda: None))
-    runs = []
-    def start_wandb(**kwargs):
-        run = SimpleNamespace(summary={}, log=lambda *args, **kwargs: None, finish=lambda **kwargs: None)
-        runs.append(kwargs)
-        return run
-    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=start_wandb))
+    monkeypatch.setitem(sys.modules, "wandb", None)
     visited = []
     fail = [True]
     def rollout(policy, env, entry, instruction, norm, device, **kwargs):
-        if entry["task_id"] == 1 and fail[0]:
+        if entry["task_id"] == 4 and fail[0]:
             fail[0] = False
             raise RuntimeError("simulated interruption")
-        visited.append(entry["task_id"])
-        return {**entry, "success": entry["task_id"] % 2 == 0, "seconds": 1.0, "policy_steps": 3}
+        visited.append((entry["task_id"], entry["episode_index"]))
+        return {**entry, "success": entry["task_id"] == 0, "seconds": 1.0, "policy_steps": 3}
     monkeypatch.setattr(module, "run_episode", rollout)
     commits = []
     output = tmp_path / "results"
-    cfg = EvalConfig(stage="smoke")
+    cfg = EvalConfig(stage="eval", task_ids=(0, 4), shard=1, shards=4)
     with pytest.raises(RuntimeError, match="simulated interruption"):
         module.evaluate(cfg, prepared_path, output, "test-run", commit=lambda: commits.append(True))
-    partial = module.read_json(output / "summary.json")
-    assert partial["completed_episodes"] == 1 and partial["macro_success_rate"] is None
-    assert module.read_json(output / "status.json")["state"] == "interrupted_or_failed"
+    assert not (output / "summary.json").exists()
+    partial = module.read_json(output / "summary" / "shard_1.json")
+    assert partial["completed_episodes"] == 5 and partial["expected_episodes"] == 10
+    assert partial["macro_success_rate"] is None
+    assert module.read_json(output / "status" / "shard_1.json")["state"] == "interrupted_or_failed"
+    settings = module.read_json(output / "settings" / "shard_1.json")
+    assert settings["config"]["task_ids"] == [0, 4] and settings["config"]["shard"] == 1
+    assert [entry["episode_index"] for entry in settings["episode_plan"]] == [1, 5, 9, 13, 17] * 2
     summary = module.evaluate(cfg, prepared_path, output, "test-run", resume=True, commit=lambda: commits.append(True))
     assert summary["complete"] and summary["completed_episodes"] == 10
+    assert summary["expected_episodes"] == 10
     assert summary["macro_success_rate"] == 0.5
-    assert visited == list(range(10))
-    assert runs[0]["resume"] == "never" and runs[1]["resume"] == "must"
-    assert runs[0]["id"] == runs[1]["id"]
+    assert visited == [(0, index) for index in (1, 5, 9, 13, 17)] + [(4, index) for index in (1, 5, 9, 13, 17)]
+    assert module.read_json(output / "status" / "shard_1.json")["state"] == "completed"
+    assert sorted(path.name for path in (output / "episodes").iterdir()) == ["task_00", "task_04"]
+    for task_id in (0, 4):
+        assert sorted(path.name for path in (output / "episodes" / f"task_{task_id:02d}").iterdir()) == [
+            f"episode_{index:03d}.json" for index in (1, 5, 9, 13, 17)]
     assert len(commits) >= 10
-    assert len(closes) == 11
+    assert len(closes) == 3
     with pytest.raises(FileExistsError):
         module.evaluate(cfg, prepared_path, output, "test-run")
     with pytest.raises(ValueError, match="identical"):
         module.evaluate(replace(cfg, seed=43), prepared_path, output, "test-run", resume=True)
-    module.write_json(output / "summary.json", {"complete": False})
-    recovered = module.evaluate(cfg, prepared_path, output, "test-run", resume=True)
-    assert recovered == summary
-    assert module.read_json(output / "summary.json") == summary
-    assert module.read_json(output / "status.json")["state"] == "completed"
-    assert visited == list(range(10))
+    assert module.evaluate(cfg, prepared_path, output, "test-run", resume=True) == summary
+    assert len(visited) == 10
+    other = module.evaluate(replace(cfg, shard=0), prepared_path, output, "test-run", commit=lambda: commits.append(True))
+    assert other["complete"] and other["completed_episodes"] == 10 and other["expected_episodes"] == 10
+    assert module.read_json(output / "settings" / "shard_0.json")["config"]["shard"] == 0
+    assert module.read_json(output / "summary" / "shard_1.json") == summary
+    assert len(visited) == 20
+    assert sorted(path.name for path in (output / "episodes/task_00").iterdir()) == [
+        f"episode_{index:03d}.json" for index in (0, 1, 4, 5, 8, 9, 12, 13, 16, 17)]
+    assert module.read_json(output / "episodes/task_04/episode_000.json")["video"] == "videos/task_04.mp4"
+    assert sys.modules["wandb"] is None
 
 
 def test_non_boolean_success_is_not_counted_as_success():
@@ -295,43 +364,71 @@ def test_non_boolean_success_is_not_counted_as_success():
         run_episode(FakePolicy(), InvalidSuccessEnv(), entry, "task", normalization(), "cpu", max_steps=1)
 
 
-def test_results_download_uses_existing_parent(tmp_path, monkeypatch):
+def heldout_episodes(local_dir, episodes=100):
+    from script.lingbot_eval import write_json
+    for index in range(episodes):
+        write_json(local_dir / "episodes/task_00" / f"episode_{index:03d}.json",
+                   {"task_id": 0, "episode_index": index, "init_state_id": index % 50, "seed": index,
+                    "success": index % 4 == 0, "policy_steps": index + 1, "seconds": 1.5})
+
+
+def test_merge_task_requires_every_shard_episode_and_adds_mean_steps(tmp_path):
     import script.lingbot_eval_modal as module
+    cfg = EvalConfig(stage="heldout", task_ids=(0,)).validate()
+    local_dir = tmp_path / "sft-step000600" / "task_00"
+    heldout_episodes(local_dir)
+    rows, summary = module.merge_task(local_dir, cfg)
+    assert [row["episode_index"] for row in rows] == list(range(100))
+    assert summary["complete"] and summary["completed_episodes"] == 100
+    assert summary["expected_episodes"] == 100
+    assert summary["successes"] == 25
+    assert summary["success_rate_completed"] == 0.25
+    assert summary["mean_policy_steps"] == 50.5
+    assert json.loads((local_dir / "summary.json").read_text()) == summary
+    (local_dir / "episodes/task_00/episode_042.json").unlink()
+    with pytest.raises(RuntimeError, match="missing episodes"):
+        module.merge_task(local_dir, cfg)
+
+
+def test_summary_csv_upserts_one_row_per_policy_and_task(tmp_path):
+    import csv
+    import script.lingbot_eval_modal as module
+    path = tmp_path / "summary.csv"
+    def summary(successes, steps):
+        return {"completed_episodes": 100, "successes": successes, "mean_policy_steps": steps}
+    module.write_summary_csv(path, "sft-step000600", 4, [], summary(25, 50.5))
+    module.write_summary_csv(path, "sft-step000600", 0, [], summary(60, 40.25))
+    module.write_summary_csv(path, "dice-step000600", 4, [], summary(80, 30.0))
+    module.write_summary_csv(path, "sft-step000600", 4, [], summary(50, 20.0))
+    with path.open(newline="") as handle:
+        table = list(csv.DictReader(handle))
+    assert [(row["policy"], row["task_id"]) for row in table] == [
+        ("dice-step000600", "4"), ("sft-step000600", "0"), ("sft-step000600", "4")]
+    assert table[1]["ci95_halfwidth"] == "0.096"
+    assert table[1]["mean_policy_steps"] == "40.2"
+    assert (table[2]["episodes"], table[2]["successes"], table[2]["success_rate"]) == ("100", "50", "0.5")
+    assert table[2]["mean_policy_steps"] == "20.0"
+
+
+def test_download_task_refuses_to_overwrite_without_resume(tmp_path, monkeypatch):
+    import script.lingbot_eval_modal as module
+    destination = tmp_path / "dl" / "sft-step000600" / "task_00"
     calls = []
     def download(command, check):
         calls.append(command)
-        parent = Path(command[-1])
-        assert parent.is_dir()
-        target = parent / command[-2]
-        complete_report_fixture(target)
+        assert Path(command[-2]).is_dir()
+        destination.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(module.subprocess, "run", download)
-    result = module.download_results("eval-run", tmp_path / "downloads")
-    assert Path(result) == tmp_path / "downloads/eval-run"
-    assert (Path(result) / "report.html").is_file()
-    assert (Path(result) / "episodes.csv").is_file()
-    assert (Path(result) / "tasks.csv").is_file()
-    assert json.loads((Path(result) / "report_data.json").read_text())["overall"]["completed_episodes"] == 4
-    assert calls[0][-1] == str(tmp_path / "downloads")
-    assert "--force" not in calls[0]
+    assert module.download_task("sft-step000600/task_00", tmp_path / "dl", False) == destination
+    assert calls[0][5] == module.RESULT_VOLUME
+    assert calls[0][-3:] == ["sft-step000600/task_00", str(tmp_path / "dl" / "sft-step000600"), "--force"]
     with pytest.raises(FileExistsError):
-        module.download_results("eval-run", tmp_path / "downloads")
-
-
-def test_download_rejects_missing_episode_despite_complete_summary(tmp_path, monkeypatch):
-    import script.lingbot_eval_modal as module
-
-    def download(command, check):
-        target = complete_report_fixture(Path(command[-1]) / command[-2])
-        (target / "episodes/task_00/episode_001.json").unlink()
-
-    monkeypatch.setattr(module.subprocess, "run", download)
-    with pytest.raises(ValueError, match="Missing or unexpected episode JSON"):
-        module.download_results("eval-run", tmp_path / "downloads")
-    assert not (tmp_path / "downloads/eval-run/report.html").exists()
+        module.download_task("sft-step000600/task_00", tmp_path / "dl", False)
+    assert module.download_task("sft-step000600/task_00", tmp_path / "dl", True) == destination
+    assert len(calls) == 2
 
 
 def test_cpu_preparation_commits_cache_on_failure(monkeypatch):
-    from dataclasses import asdict
     from types import SimpleNamespace
     import script.lingbot_eval_modal as module
     events = []
@@ -341,23 +438,26 @@ def test_cpu_preparation_commits_cache_on_failure(monkeypatch):
         raise RuntimeError("simulated preparation failure")
     monkeypatch.setattr(module.subprocess, "run", fail)
     with pytest.raises(RuntimeError, match="simulated preparation failure"):
-        module.prepare.local(asdict(EvalConfig()))
+        module.prepare.local(EvalConfig().to_dict())
     assert events == ["commit"]
 
 
-def test_modal_gpu_count_and_read_only_source_mounts():
+def test_modal_shard_function_gpu_and_read_only_mounts():
     import ast
     root = Path(__file__).resolve().parents[1]
     tree = ast.parse((root / "script/lingbot_eval_modal.py").read_text())
     functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
-    gpu = {kw.arg: kw.value for kw in functions["run_evaluation"].decorator_list[0].keywords}
-    assert ast.literal_eval(gpu["gpu"]) == "H100"
-    assert ast.literal_eval(gpu["retries"]) == 0
-    assert not {"region", "cloud", "routing_region"} & set(gpu)
-    mounts = gpu["volumes"]
+    assert "run_evaluation" not in functions
+    options = {kw.arg: kw.value for kw in functions["run_shard"].decorator_list[0].keywords}
+    assert ast.literal_eval(options["gpu"]) == "L40S"
+    assert ast.literal_eval(options["retries"]) == 0
+    assert ast.literal_eval(options["max_containers"]) == 16
+    assert not {"region", "cloud", "routing_region"} & set(options)
+    mounts = options["volumes"]
     entries = {ast.literal_eval(key): value for key, value in zip(mounts.keys, mounts.values)}
     assert entries["/cache"].func.attr == "read_only"
     assert entries["/sft"].func.attr == "read_only"
+    assert isinstance(entries["/results"], ast.Name)
 
 
 def test_modal_image_preserves_locked_package_index(monkeypatch):

@@ -33,11 +33,18 @@ class EvalConfig:
     seed: int = 42
     wandb_project: str = "dice-lingbot-va-eval"
     wandb_entity: str | None = None
+    task_ids: tuple = TASK_IDS
+    shard: int = 0
+    shards: int = 1
 
     def validate(self):
         validate_name(self.source_run)
         if self.stage not in ("smoke", "eval", "heldout"):
             raise ValueError("Evaluation stage must be smoke, eval, or heldout")
+        if not self.task_ids or any(task not in TASK_IDS for task in self.task_ids) or len(set(self.task_ids)) != len(self.task_ids):
+            raise ValueError("task_ids must be distinct LIBERO-10 task ids")
+        if type(self.shards) is not int or type(self.shard) is not int or not 0 <= self.shard < self.shards:
+            raise ValueError("shard must lie in [0, shards)")
         if type(self.checkpoint_step) is not int or not 1 <= self.checkpoint_step <= 1000:
             raise ValueError("Invalid checkpoint step")
         if type(self.seed) is not int or not 0 <= self.seed < 2**32:
@@ -48,7 +55,7 @@ class EvalConfig:
 
     @property
     def episodes_per_task(self):
-        return {"smoke": 1, "eval": 20, "heldout": 50}[self.stage]
+        return {"smoke": 1, "eval": 20, "heldout": 100}[self.stage]
 
     @property
     def initial_state_offset(self):
@@ -61,9 +68,11 @@ class EvalConfig:
     def protocol(self):
         self.validate()
         return {
-            "version": 1,
+            "version": 2,
             "suite": "libero_10",
-            "task_ids": list(TASK_IDS),
+            "task_ids": list(self.task_ids),
+            "shard": self.shard,
+            "shards": self.shards,
             "episodes_per_task": self.episodes_per_task,
             "initial_state_offset": self.initial_state_offset,
             "base_seed": self.seed,
@@ -98,22 +107,34 @@ class EvalConfig:
         }
 
     def to_dict(self):
-        return {**asdict(self), "protocol": self.protocol()}
+        return {**asdict(self), "task_ids": list(self.task_ids), "protocol": self.protocol()}
+
+
+def eval_config_from_dict(payload):
+    fields = {key: payload[key] for key in payload if key in EvalConfig.__dataclass_fields__}
+    if "task_ids" in fields:
+        fields["task_ids"] = tuple(int(task) for task in fields["task_ids"])
+    return EvalConfig(**fields).validate()
 
 
 def episode_plan(config, task_id, initial_state_count):
     config.validate()
     if task_id not in TASK_IDS:
         raise ValueError("Invalid task ID")
-    if initial_state_count < config.initial_state_offset + config.episodes_per_task:
+    states = initial_state_count - config.initial_state_offset
+    if states < 1 or states < min(config.episodes_per_task, initial_state_count):
         raise ValueError("Not enough distinct initial states for this evaluation protocol")
     plan = []
     for episode_index in range(config.episodes_per_task):
-        init_state_id = config.initial_state_offset + episode_index
-        identity = ["libero_10", config.seed, task_id, init_state_id]
+        init_state_id = config.initial_state_offset + episode_index % states
+        identity = ["libero_10", config.seed, task_id, init_state_id] + [episode_index // states] * (episode_index >= states)
         seed = int.from_bytes(hashlib.sha256(json.dumps(identity).encode()).digest()[:4], "big")
         plan.append({"task_id": task_id, "episode_index": episode_index, "init_state_id": init_state_id, "seed": seed})
     return plan
+
+
+def shard_plan(config, plan):
+    return plan[config.shard::config.shards]
 
 
 def main():

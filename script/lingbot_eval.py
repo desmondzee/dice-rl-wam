@@ -11,7 +11,7 @@ from pathlib import Path
 
 from script.lingbot_eval_config import (
     ARCHITECTURE_KEYS, CAMERAS, LIBERO_ASSETS_REPO, LIBERO_ASSETS_REVISION,
-    LEROBOT_REVISION, TASK_IDS, EvalConfig, episode_plan, validate_name,
+    LEROBOT_REVISION, TASK_IDS, EvalConfig, episode_plan, eval_config_from_dict, shard_plan, validate_name,
 )
 from script.lingbot_sft_config import DATASET_REPO, DATASET_REVISION, MODEL_REPO, MODEL_REVISION, UPSTREAM_REVISION, fingerprint
 
@@ -297,7 +297,7 @@ def run_episode(policy, env, entry, instruction, norm, device, max_steps=520, vi
         "seconds": time.perf_counter() - started}
 
 
-def aggregate_results(rows, task_ids=TASK_IDS, episodes_per_task=20):
+def aggregate_results(rows, task_ids=TASK_IDS, episodes_per_task=20, expected=None):
     per_task = {str(task): {"successes": 0, "completed_episodes": 0, "success_rate": None} for task in task_ids}
     seen = set()
     for row in rows:
@@ -313,7 +313,7 @@ def aggregate_results(rows, task_ids=TASK_IDS, episodes_per_task=20):
     for record in per_task.values():
         if record["completed_episodes"]:
             record["success_rate"] = record["successes"] / record["completed_episodes"]
-    expected = len(task_ids) * episodes_per_task
+    expected = len(task_ids) * episodes_per_task if expected is None else expected
     complete = len(rows) == expected
     successes = sum(record["successes"] for record in per_task.values())
     return {"complete": complete, "expected_episodes": expected, "completed_episodes": len(rows),
@@ -360,7 +360,6 @@ def load_policy(checkpoint, model_path, architecture):
 
 def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=None):
     import torch
-    import wandb
     import imageio.v2 as imageio
 
     config.validate()
@@ -386,58 +385,63 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
         raise ValueError("LIBERO task assets changed after preparation")
     from lerobot.envs.libero import LiberoEnv
 
-    plans = {task["task_id"]: episode_plan(config, task["task_id"], task["initial_state_count"]) for task in tasks}
+    tasks = [task for task in tasks if task["task_id"] in config.task_ids]
+    plans = {task["task_id"]: shard_plan(config, episode_plan(config, task["task_id"], task["initial_state_count"])) for task in tasks}
+    expected = sum(len(plan) for plan in plans.values())
     settings = {"config": config.to_dict(), "checkpoint": prepared,
         "harness_sha256": file_sha256(__file__),
         "config_module_sha256": file_sha256(Path(__file__).with_name("lingbot_eval_config.py")),
         "packages": {name: importlib.metadata.version(name) for name in ("lerobot", "torch", "diffusers", "transformers", "hf-libero", "mujoco", "robosuite")},
-        "episode_plan": [entry for task_id in TASK_IDS for entry in plans[task_id]]}
+        "episode_plan": [entry for task in tasks for entry in plans[task["task_id"]]]}
     output_dir = Path(output_dir)
-    if output_dir.exists():
+    settings_path = output_dir / "settings" / f"shard_{config.shard}.json"
+    if settings_path.exists():
         if not resume:
             raise FileExistsError("Evaluation output exists; use explicit --resume or choose a new run name")
-        if read_json(output_dir / "settings.json") != settings:
+        if read_json(settings_path) != settings:
             raise ValueError("Resume requires identical checkpoint, protocol, dependencies, and harness")
     elif resume:
         raise FileNotFoundError("Cannot resume an evaluation with no saved results")
     else:
-        output_dir.mkdir(parents=True)
-        write_json(output_dir / "settings.json", settings)
+        write_json(settings_path, settings)
+
+    def episode_path(task_id, episode_index):
+        return output_dir / "episodes" / f"task_{task_id:02d}" / f"episode_{episode_index:03d}.json"
+
     rows = []
-    for task_id in TASK_IDS:
-        for entry in plans[task_id]:
-            path = output_dir / "episodes" / f"task_{task_id:02d}" / f"episode_{entry['episode_index']:03d}.json"
+    for task in tasks:
+        for entry in plans[task["task_id"]]:
+            path = episode_path(task["task_id"], entry["episode_index"])
             if path.exists():
                 row = read_json(path)
                 if any(row.get(key) != value for key, value in entry.items()):
                     raise ValueError("Saved episode identity differs from the evaluation plan")
                 rows.append(row)
-    summary = aggregate_results(rows, episodes_per_task=config.episodes_per_task)
-    write_json(output_dir / "summary.json", summary)
-    if commit is not None:
-        commit()
-    wandb_run = None
-    completed = summary["complete"]
+
+    def summarize():
+        summary = aggregate_results(rows, task_ids=config.task_ids, episodes_per_task=config.episodes_per_task, expected=expected)
+        write_json(output_dir / "summary" / f"shard_{config.shard}.json", summary)
+        if commit is not None:
+            commit()
+        return summary
+
+    summary = summarize()
+    done = {(row["task_id"], row["episode_index"]) for row in rows}
     try:
-        wandb_run = wandb.init(project=config.wandb_project, entity=config.wandb_entity, name=run_name,
-            id=fingerprint([run_name, settings])[:16], resume="must" if resume else "never", config=settings)
-        if completed:
-            wandb_run.summary["eval/macro_success_rate"] = summary["macro_success_rate"]
+        if summary["complete"]:
             return summary
         torch.cuda.reset_peak_memory_stats()
         policy = load_policy(checkpoint, prepared["model_path"], metadata["architecture"])
         for task in tasks:
             task_id = task["task_id"]
-            done = {row["episode_index"] for row in rows if row["task_id"] == task_id}
-            if len(done) == config.episodes_per_task:
+            pending = [entry for entry in plans[task_id] if (task_id, entry["episode_index"]) not in done]
+            if not pending:
                 continue
             env = LiberoEnv(task_suite=suite, task_id=task_id, task_suite_name="libero_10",
                 episode_length=520, observation_height=128, observation_width=128, obs_type="pixels",
                 init_states=True, n_envs=1, num_steps_wait=10, control_freq=20, control_mode="relative", hard_reset=True)
             try:
-                for entry in plans[task_id]:
-                    if entry["episode_index"] in done:
-                        continue
+                for entry in pending:
                     writer = None
                     video_path = output_dir / "videos" / f"task_{task_id:02d}.mp4"
                     if entry["episode_index"] == 0:
@@ -452,29 +456,17 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
                     if entry["episode_index"] == 0:
                         row["video"] = str(video_path.relative_to(output_dir))
                     rows.append(row)
-                    path = output_dir / "episodes" / f"task_{task_id:02d}" / f"episode_{entry['episode_index']:03d}.json"
-                    write_json(path, row)
-                    summary = aggregate_results(rows, episodes_per_task=config.episodes_per_task)
-                    write_json(output_dir / "summary.json", summary)
-                    if commit is not None:
-                        commit()
-                    wandb_run.log({"eval/completed_episodes": len(rows), "eval/success_rate_completed": summary["success_rate_completed"],
-                        f"eval/task_{task_id:02d}/success_rate": summary["per_task"][str(task_id)]["success_rate"],
-                        "eval/episode_seconds": row["seconds"], "eval/episode_steps": row["policy_steps"],
-                        "eval/peak_gpu_memory_bytes": row["peak_gpu_memory_bytes"]}, step=len(rows))
+                    write_json(episode_path(task_id, entry["episode_index"]), row)
+                    summary = summarize()
             finally:
                 env.close()
-        completed = summary["complete"]
-        if not completed:
+        if not summary["complete"]:
             raise RuntimeError("Evaluation ended with missing episodes")
-        wandb_run.summary["eval/macro_success_rate"] = summary["macro_success_rate"]
         return summary
     finally:
-        write_json(output_dir / "status.json", {"state": "completed" if completed else "interrupted_or_failed"})
+        write_json(output_dir / "status" / f"shard_{config.shard}.json", {"state": "completed" if summary["complete"] else "interrupted_or_failed"})
         if commit is not None:
             commit()
-        if wandb_run is not None:
-            wandb_run.finish(exit_code=0 if completed else 1)
 
 
 def main():
@@ -493,7 +485,7 @@ def main():
     parser.add_argument("--result-volume")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
-    config = EvalConfig(**json.loads(args.config_json)).validate()
+    config = eval_config_from_dict(json.loads(args.config_json))
     root = os.environ.get("LEROBOT_SOURCE_ROOT", "/opt/lerobot")
     revision = subprocess.check_output(["git", "-C", root, "rev-parse", "HEAD"], text=True).strip()
     if revision != LEROBOT_REVISION or importlib.metadata.version("hf-libero") != "0.1.4":
@@ -506,8 +498,6 @@ def main():
     else:
         if any(value is None for value in (args.prepared_path, args.output_dir, args.run_name, args.result_volume)):
             parser.error("run requires --prepared-path, --output-dir, --run-name, and --result-volume")
-        if not os.environ.get("WANDB_API_KEY"):
-            raise RuntimeError("WANDB_API_KEY is required in dice-lingbot-wandb")
         import modal
         volume = modal.Volume.from_name(args.result_volume)
         summary = evaluate(config, args.prepared_path, args.output_dir, args.run_name, args.resume, volume.commit)
