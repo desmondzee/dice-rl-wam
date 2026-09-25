@@ -482,7 +482,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
 
 
 def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, residual_path=None,
-             resume=False, commit=None):
+             resume=False, commit=None, eval_candidates=None):
     from script.lingbot_eval import (
         aggregate_results, describe_suite, read_checkpoint_metadata, read_json, run_episode, write_json,
     )
@@ -504,7 +504,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     except Exception as exc:
         raise RuntimeError(f"Failed to load residual weights {residual_path}: {exc}") from exc
     policy.residual_model = model
-    policy.eval_candidates = config.k_candidates
+    policy.eval_candidates = eval_candidates or config.k_candidates
     suite, tasks = describe_suite(prepared["assets_path"])
     tasks = [task for task in tasks if task["task_id"] in config.task_ids]
     output_dir = Path(output_dir)
@@ -527,7 +527,8 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
             env.close()
     summary = aggregate_results(rows, task_ids=config.task_ids, episodes_per_task=eval_cfg.episodes_per_task)
     write_json(output_dir / "eval" / "summary.json", summary)
-    write_json(output_dir / "eval" / "settings.json", {"config": eval_cfg.to_dict(), "rl": config.to_dict()})
+    write_json(output_dir / "eval" / "settings.json",
+               {"config": eval_cfg.to_dict(), "rl": config.to_dict(), "eval_candidates": policy.eval_candidates})
     return summary
 
 
@@ -552,6 +553,7 @@ def main():
     parser.add_argument("--result-volume")
     parser.add_argument("--checkpoint-hook")
     parser.add_argument("--max-env-steps", type=int)
+    parser.add_argument("--eval-candidates", type=int)
     args = parser.parse_args()
     config = config_from_dict(json.loads(args.config_json) if args.config_json else {})
     commit = None
@@ -568,7 +570,8 @@ def main():
         )
     else:
         summary = evaluate(
-            config, args.prepared_path, args.output_dir, args.run_name, args.residual_path, args.resume, commit)
+            config, args.prepared_path, args.output_dir, args.run_name, args.residual_path, args.resume, commit,
+            eval_candidates=args.eval_candidates)
     print(json.dumps(summary, indent=2))
 
 
