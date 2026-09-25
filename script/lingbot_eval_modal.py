@@ -148,23 +148,24 @@ def main(stage: str = "prepare", source_run: str = "libero30-sft", checkpoint_st
          download_dir: str = "result/heldout"):
     from script.lingbot_eval import read_json
 
-    if stage not in ("prepare", "eval"):
-        raise ValueError("Stage must be prepare or eval")
+    if stage not in ("prepare", "eval", "merge"):
+        raise ValueError("Stage must be prepare, eval, or merge")
     tasks = tuple(int(task) for task in task_ids.split(","))
     policy = validate_name(policy or f"sft-step{checkpoint_step:06d}")
     base = EvalConfig(source_run=source_run, checkpoint_step=checkpoint_step, stage="heldout", seed=seed,
                       task_ids=tasks, wandb_project=wandb_project, wandb_entity=wandb_entity or None).validate()
-    prepared_path = prepare.remote(base.to_dict())
-    print(prepared_path)
-    if stage == "prepare":
-        return
     for task in tasks:
-        if (Path(download_dir) / policy / f"task_{task:02d}").exists() and not resume:
+        if stage != "prepare" and (Path(download_dir) / policy / f"task_{task:02d}").exists() and not resume:
             raise FileExistsError("Local result directory exists; pass --resume to refresh it")
-    jobs = [(EvalConfig(**{**base.__dict__, "task_ids": (task,), "shard": shard, "shards": shards}).validate().to_dict(),
-             prepared_path, f"{policy}/task_{task:02d}", resume) for task in tasks for shard in range(shards)]
-    for shard_summary in run_shard.starmap(jobs):
-        print(json.dumps(shard_summary))
+    if stage != "merge":
+        prepared_path = prepare.remote(base.to_dict())
+        print(prepared_path)
+        if stage == "prepare":
+            return
+        jobs = [(EvalConfig(**{**base.__dict__, "task_ids": (task,), "shard": shard, "shards": shards}).validate().to_dict(),
+                 prepared_path, f"{policy}/task_{task:02d}", resume) for task in tasks for shard in range(shards)]
+        for shard_summary in run_shard.starmap(jobs):
+            print(json.dumps(shard_summary))
     for task in tasks:
         cfg = EvalConfig(**{**base.__dict__, "task_ids": (task,)}).validate()
         local_dir = download_task(f"{policy}/task_{task:02d}", download_dir, resume)
