@@ -119,13 +119,13 @@ def test_rlpd_ratio_anneals_over_env_steps():
     assert cfg.rlpd_expert_ratio(500_000) == pytest.approx(0.1)
 
 
-def test_heldout_plan_is_fifty_episodes_from_initial_state_zero():
+def test_heldout_plan_covers_fifty_states_twice_from_state_zero():
     cfg = EvalConfig(stage="heldout").validate()
-    assert cfg.episodes_per_task == 50
+    assert cfg.episodes_per_task == 100
     assert cfg.initial_state_offset == 0
     plan = episode_plan(cfg, 0, 50)
-    assert len(plan) == 50
-    assert [entry["init_state_id"] for entry in plan] == list(range(50))
+    assert [entry["init_state_id"] for entry in plan] == list(range(50)) * 2
+    assert plan[0]["seed"] != plan[50]["seed"]
 
 
 def test_model_hyperparameters_match_baseline_protocol():
