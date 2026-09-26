@@ -103,22 +103,17 @@ Do not run `.remote()`, cloud builds, model downloads, real rollouts, or GPU all
 
 ## LingBot DICE-RL
 
-Residual RL lives in `script/lingbot_rl_*.py` on the **eval** LeRobot environment. Do not instantiate Hydra `DistillResidualRLModel`. Do not edit `.cache/lerobot` or `script/lingbot_eval.py` protocol fields. Local tests must not call `modal run` `.remote()`.
+Residual RL lives in `script/lingbot_rl_*.py` on the **eval** LeRobot environment and trains one LIBERO-10 task per run on a Brev L40S (`brev/*.sh`). Do not instantiate Hydra `DistillResidualRLModel`. Do not edit `.cache/lerobot` or `script/lingbot_eval.py` protocol fields. Local tests must not call `modal run` `.remote()`. Zero comments and docstrings in the RL scripts; keep changes lean.
 
-Narrow checks:
+Verify locally with:
 
-```text
-.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py
-.cache/eval-venv/bin/python -m compileall -q script/lingbot_rl_*.py
+```bash
+.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py tests/test_lingbot_eval.py
 .cache/eval-venv/bin/python -m script.lingbot_rl_config
-uv run --no-project --with modal==1.1.4 --with click==8.1.8 --with typer==0.16.0 modal run -m script.lingbot_rl_modal --help
+bash -n brev/setup.sh brev/train.sh brev/sync.sh brev/pull.sh
 ```
 
-User-run (paid) train, not executed as local verification:
-
-```text
-uv run --no-project --with modal==1.1.4 modal run --detach -m script.lingbot_rl_modal --stage train --run-name libero30-dice-baseline
-```
+Recipe values are pinned in `script/lingbot_rl_config.py` (schedules, budget, task ids) and `script/lingbot_rl_model.py` (losses, cadence, optimiser); a resume file carries the protocol fingerprint and refuses to load under a different recipe. Held-out evaluation (100 episodes per task, 50 canonical init states × 2 seeds) runs sharded on Modal workspace `nobel` through `script/lingbot_eval_modal.py`; results land in `result/heldout/`.
 
 Modal image builders use an internal PyPI mirror by default. LeRobot's pinned lockfile records https://pypi.org/simple, so evaluation image uv sync, uv export, and constrained uv pip install commands explicitly pass --index-url https://pypi.org/simple. Without that flag, uv reports a missing remote index, re-resolves, and fails --locked. Keep --locked and the upstream lockfile unchanged; upgrading uv or regenerating the lock is not the fix.
 

@@ -2,7 +2,7 @@
 
 This repository explores DICE-RL post-training of LingBot-VA on **LIBERO-10 (LIBERO-Long)**. It starts from `robbyant/lingbot-va-base`, not the converged LIBERO checkpoint.
 
-**Current scope: SFT, vanilla LingBot checkpoint evaluation, and a Modal DICE-RL residual trainer.** SFT uses **30 demonstrations per task, 300 demonstrations total**, with a **1,000-update cap**; the first run was stopped after saving step 600. Thirty refers to demonstrations, not tasks or optimizer steps. Evaluation loads the native transformer weights directly into a pinned LeRobot policy; no on-disk checkpoint conversion is required. RL freezes that step-600 prior and trains residual + critic MLPs with the same 20/50 full-video sampler that scored 69% on LIBERO-10.
+**Current scope: SFT, held-out evaluation of the SFT prior, and single-task DICE-RL residual training on Brev.** SFT uses **30 demonstrations per task, 300 demonstrations total**, with a **1,000-update cap**; the pinned prior is step 600. RL freezes that prior and trains residual + critic MLPs on one LIBERO-10 task at a time with the same 20/50 full-video sampler.
 
 References: [DICE-RL, including Appendix A](https://arxiv.org/html/2603.10263v2), [LingBot-VA, especially Sections 3–4](https://arxiv.org/html/2601.21998v2), [upstream LingBot-VA](https://github.com/Robbyant/lingbot-va), and [LeRobot integration](https://huggingface.co/docs/lerobot/lingbot_va).
 
@@ -161,32 +161,56 @@ The later SFT-vs-DICE-RL benchmark should use 100 rollouts/task as reported in D
 - The intended prior has roughly **40–70% success**. This is a future rollout-based selection criterion, not an SFT metric or guarantee. If success is above about 80%, select an earlier checkpoint or revisit the demo budget before RL.
 - The single-H100 evaluation adapter uses pinned LeRobot components and directly loads the native transformer checkpoint with strict tensor checks. Initial evaluation is 20 rollouts/task; final comparison remains 100 rollouts/task. Current LingBot streaming inference is single-environment; batched collection remains future work.
 
-## DICE-RL residual training
+## DICE-RL residual training (single task)
 
-The residual trainer freezes `libero30-sft` **step 000600** and uses the same released LIBERO sampler as the 69% eval (video 20, `video_exec_step=-1`, action 50, CFG 5.0/1.0). Do not switch to the paper real-time 3-step / s=0.6 decoder; that would be a different π_pre. Comparison eval is 20 rollouts/task, init-states 1–20, seed 42 — identical to `EvalConfig(stage="eval")`. Do not re-run the SFT 69% job.
+Port of the reference Transport recipe (`model/rl/distill_residual_rl*.py`, `cfg/robomimic/finetune/transport/ft_distill_residual_flow_unet_img.yaml`) onto the frozen step-600 prior. Recipe values live in `script/lingbot_rl_config.py` and `script/lingbot_rl_model.py`; `python -m script.lingbot_rl_config` prints the full protocol.
 
-The following command **starts paid Modal compute** (one H100, 12h train timeout). Use the active Modal profile (workspace `tiwariojas`). `--detach` is a Modal CLI flag and must come **before** `-m` so the H100 job keeps running if this laptop disconnects. Add `--wandb-entity YOUR_ENTITY` if needed. W&B project is `dice-lingbot-va-rl`.
+| Component | Value |
+| --- | --- |
+| Prior | `libero30-sft` step 600, frozen; released sampler (video 20 / action 50, CFG 5.0 / 1.0) |
+| Task | one LIBERO-10 task per run (`task_ids`), procedural resets during training, 660k env steps, 1 env |
+| Critic state | 3072-d mean-pooled transformer tokens, frozen |
+| Actor / critic | residual MLP [1024]³ GELU + LayerNorm, zero-init output; 10-critic ensemble, min |
+| Candidates | K=4 latent samples per chunk share one video denoise; stored per replay row for targets and actor loss |
+| Selection | uniform random candidate for the first 64k env steps, then argmax of min-Q (best-of-4) at collection and eval |
+| Updates | gate ≥256 finalised online rows; 10 gradient steps per 4 chunks, actor + Polyak (τ 0.01) every 2nd step |
+| Critic loss | summed per-head MSE to 3-chunk n-step target, γ 0.99, mean over K next candidates, truncation terminal |
+| Actor loss | −Q on online rows ÷ full batch, normalised by mean \|Q\| over online entries; β=100 BC on the 7 live channels |
+| BC filter | ε=−0.5 anchored on Q(s,a_stored)−MC return, active after 128k env steps; expert rows always keep BC |
+| Optimiser | Adam 1e-4, weight decay 1e-5, grad-norm clip 1.0, cosine restarts (1000 / 10 warmup / 1e-6 floor) |
+| RLPD | expert demos of the task only (z=0, a_base=a); ratio 0.9→0.1 over 208k env steps |
+| Checkpoints | every 80k env steps + budget end; train-time eval of 10 procedural episodes at 0/80k/240k/400k/560k |
+
+### Brev workflow
+
+One L40S per task (~0.33 s per env step, ~62 h per run). Secrets live in `brev/env.sh` (copy `brev/env.example`; gitignored).
 
 ```bash
-uv run --no-project --with modal==1.1.4 modal profile current
-uv run --no-project --with modal==1.1.4 modal run --detach -m script.lingbot_rl_modal \
-  --stage train --run-name libero30-dice-baseline
+bash brev/setup.sh                       # lerobot env, SFT checkpoint, model cache, dataset, prepared index
+bash brev/train.sh dice-t0 0             # tmux session dice-dice-t0, resumes from the Modal store if a resume file exists
+bash brev/train.sh smoke-t0 0 --max-env-steps 300
 ```
 
-Stay connected through CPU prepare until the GPU function is running; after that a dropped client does not cancel the job. Weights are committed to `dice-lingbot-rl-runs` as the run proceeds. Pull inference artifacts later (no GPU) with `--stage download` once `status.json` has `"complete": true`:
+`brev/sync.sh` runs as the checkpoint hook and uploads each checkpoint, the resume state and logs to `dice-lingbot-rl-runs` (workspace `desmond-zee`); `brev/pull.sh RUN` downloads a run into `result/runs/RUN`. W&B project `dice-lingbot-va-rl`.
+
+### Held-out evaluation
+
+100 episodes per task: the 50 canonical LIBERO init states, each with two seeds (`EvalConfig(stage="heldout")`). Runs on Modal workspace `nobel` as 4–8 L40S shards per task via `script/lingbot_eval_modal.py`, which downloads, merges, writes `result/heldout/summary.csv` and logs one W&B run per policy and task in `dice-lingbot-va-eval`.
 
 ```bash
-uv run --no-project --with modal==1.1.4 modal run -m script.lingbot_rl_modal \
-  --stage download --run-name libero30-dice-baseline
+MODAL_PROFILE=nobel .cache/eval-venv/bin/python -m modal run script/lingbot_eval_modal.py --stage prepare --task-ids 0,4
+MODAL_PROFILE=nobel .cache/eval-venv/bin/python -m modal run script/lingbot_eval_modal.py --stage eval --task-ids 0,4 --shards 4
+MODAL_PROFILE=nobel .cache/eval-venv/bin/python -m modal run script/lingbot_eval_modal.py --stage eval --task-ids 0 --shards 8 \
+  --residual dice-t0/step_660000/residual.pt --eval-candidates 4 --policy dice-t0-step660000
 ```
 
-Local download is inference-only (`residual.pt`, summaries, train-eval rows, and after `--stage eval` the 20-rollout JSON/`report.html`). Resume state, replay, Adam, expert cache, and the 5B transformer stay on `dice-lingbot-rl-runs`. Volumes: `dice-lingbot-sft-cache` and `dice-lingbot-sft-runs` read-only on GPU; `dice-lingbot-rl-runs` writable. CPU prepare uses `dice-lingbot-hf`; GPU uses `dice-lingbot-wandb` with Hub offline.
+The SFT baseline runs best-of-1; RL checkpoints run best-of-4 (the method) and best-of-1 (residual only). Residual weights are uploaded to the `dice-lingbot-rl-weights` volume first. `--stage merge` reprocesses finished shards without compute. W&B logging from the client needs the team `WANDB_API_KEY` in the environment.
 
-`--stage eval` runs the 20-rollout comparison against the trained residual. Train-time eval is 1 rollout/task every 25k env steps and is not the 69% comparison.
+Results: `result/heldout/<policy>/task_XX/` per episode JSON plus `summary.csv`; RL run mirrors in `result/runs/`; pre-restart results in `result/legacy/`.
 
 ## Local verification
 
-See [AGENTS.md](AGENTS.md) for the separate pinned SFT and evaluation `uv` environments. `tests/test_lingbot_sft.py` covers SFT data restriction/alignment, normalization, checkpoint/resume paths, W&B setup, and mocked Modal commands. `tests/test_lingbot_eval.py` covers evaluation protocol, camera/action mapping, success accounting, result persistence/resume, asset retries, and checkpoint tensor schema. Real Linux/EGL rendering, CUDA inference/FSDP execution, and measured throughput are separate cloud checks.
+See [AGENTS.md](AGENTS.md) for the separate pinned SFT and evaluation `uv` environments. `tests/test_lingbot_sft.py` covers SFT data restriction/alignment, normalization, checkpoint/resume paths, W&B setup, and mocked Modal commands. `tests/test_lingbot_eval.py` covers evaluation protocol, sharded held-out plans, camera/action mapping, success accounting, result persistence/resume, asset retries, and checkpoint tensor schema. `tests/test_lingbot_rl.py` covers the RL recipe, update cadence, filter, buffer, resume and the mocked training loop. Real Linux/EGL rendering, CUDA inference/FSDP execution, and measured throughput are separate cloud checks.
 
 ## Original DICE-RL project
 
