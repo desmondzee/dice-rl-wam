@@ -482,14 +482,16 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
 
 
 def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, residual_path=None,
-             resume=False, commit=None, eval_candidates=None):
+             resume=False, commit=None, eval_candidates=None, shard=0, shards=1):
     from script.lingbot_eval import (
-        aggregate_results, describe_suite, read_checkpoint_metadata, read_json, run_episode, write_json,
+        aggregate_results, describe_suite, file_sha256, read_checkpoint_metadata, read_json, run_episode, write_json,
     )
+    from script.lingbot_eval_config import shard_plan
 
     config = (config or RLConfig()).validate()
     eval_cfg = EvalConfig(
-        source_run=config.source_run, checkpoint_step=config.checkpoint_step, stage="heldout", seed=42)
+        source_run=config.source_run, checkpoint_step=config.checkpoint_step, stage="heldout", seed=42,
+        task_ids=config.task_ids, shard=shard, shards=shards).validate()
     prepared = _read_prepared(prepared_path)
     device = _device()
     if device == "cuda":
@@ -507,29 +509,35 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     policy.eval_candidates = eval_candidates or config.k_candidates
     suite, tasks = describe_suite(prepared["assets_path"])
     tasks = [task for task in tasks if task["task_id"] in config.task_ids]
+    plans = {task["task_id"]: shard_plan(eval_cfg, episode_plan(eval_cfg, task["task_id"], task["initial_state_count"])) for task in tasks}
+    expected = sum(len(plan) for plan in plans.values())
     output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    write_json(output_dir / "settings" / f"shard_{shard}.json", {
+        "config": eval_cfg.to_dict(), "rl": config.to_dict(), "eval_candidates": policy.eval_candidates,
+        "residual_sha256": file_sha256(residual_path), "episode_plan": [entry for task in tasks for entry in plans[task["task_id"]]]})
+
+    def summarize():
+        summary = aggregate_results(rows, task_ids=config.task_ids, episodes_per_task=eval_cfg.episodes_per_task, expected=expected)
+        write_json(output_dir / "summary" / f"shard_{shard}.json", summary)
+        if commit is not None:
+            commit(len(rows))
+        return summary
+
     rows = []
     for task in tasks:
         env = make_env(task["task_id"], suite)
         try:
-            for entry in episode_plan(eval_cfg, task["task_id"], task["initial_state_count"]):
-                path = output_dir / "eval" / "episodes" / f"task_{task['task_id']:02d}" / f"episode_{entry['episode_index']:03d}.json"
+            for entry in plans[task["task_id"]]:
+                path = output_dir / "episodes" / f"task_{task['task_id']:02d}" / f"episode_{entry['episode_index']:03d}.json"
                 if resume and path.exists():
                     rows.append(read_json(path))
                     continue
-                row = run_episode(policy, env, entry, task["instruction"], metadata["normalization"], device)
-                rows.append(row)
-                write_json(path, row)
-                if commit is not None:
-                    commit(entry["episode_index"])
+                rows.append(run_episode(policy, env, entry, task["instruction"], metadata["normalization"], device))
+                write_json(path, rows[-1])
+                summarize()
         finally:
             env.close()
-    summary = aggregate_results(rows, task_ids=config.task_ids, episodes_per_task=eval_cfg.episodes_per_task)
-    write_json(output_dir / "eval" / "summary.json", summary)
-    write_json(output_dir / "eval" / "settings.json",
-               {"config": eval_cfg.to_dict(), "rl": config.to_dict(), "eval_candidates": policy.eval_candidates})
-    return summary
+    return summarize()
 
 
 def _hook(command):
@@ -554,6 +562,8 @@ def main():
     parser.add_argument("--checkpoint-hook")
     parser.add_argument("--max-env-steps", type=int)
     parser.add_argument("--eval-candidates", type=int)
+    parser.add_argument("--shard", type=int, default=0)
+    parser.add_argument("--shards", type=int, default=1)
     args = parser.parse_args()
     config = config_from_dict(json.loads(args.config_json) if args.config_json else {})
     commit = None
@@ -571,7 +581,7 @@ def main():
     else:
         summary = evaluate(
             config, args.prepared_path, args.output_dir, args.run_name, args.residual_path, args.resume, commit,
-            eval_candidates=args.eval_candidates)
+            eval_candidates=args.eval_candidates, shard=args.shard, shards=args.shards)
     print(json.dumps(summary, indent=2))
 
 

@@ -15,8 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 CACHE_VOLUME = "dice-lingbot-sft-cache"
 SOURCE_VOLUME = "dice-lingbot-sft-runs"
 RESULT_VOLUME = "dice-lingbot-eval-results"
+WEIGHTS_VOLUME = "dice-lingbot-rl-weights"
 EVAL_PYTHON = "/opt/lerobot/.venv/bin/python"
-FILES = ("lingbot_eval_config.py", "lingbot_eval.py", "lingbot_sft_config.py")
+FILES = ("lingbot_eval_config.py", "lingbot_eval.py", "lingbot_sft_config.py", "lingbot_rl_config.py",
+         "lingbot_rl_model.py", "lingbot_rl_buffer.py", "lingbot_rl_data.py", "lingbot_rl_policy.py", "lingbot_rl_train.py")
 
 
 def build_image():
@@ -49,6 +51,7 @@ image = build_image()
 cache = modal.Volume.from_name(CACHE_VOLUME, create_if_missing=True)
 source = modal.Volume.from_name(SOURCE_VOLUME)
 results = modal.Volume.from_name(RESULT_VOLUME, create_if_missing=True)
+weights = modal.Volume.from_name(WEIGHTS_VOLUME, create_if_missing=True)
 hf_secret = modal.Secret.from_name("dice-lingbot-hf", required_keys=["HF_TOKEN"])
 
 
@@ -82,6 +85,28 @@ def run_shard(config, prepared_path, run_dir, resume=False):
         EVAL_PYTHON, "-m", "script.lingbot_eval", "run", "--config-json", json.dumps(cfg.to_dict()),
         "--prepared-path", prepared_path, "--output-dir", f"/results/{run_dir}",
         "--run-name", validate_name(run_dir.replace("/", "-")), "--result-volume", RESULT_VOLUME,
+    ] + (["--resume"] if resume else [])
+    try:
+        subprocess.run(command, check=True)
+    finally:
+        results.commit()
+    return json.loads((Path("/results") / run_dir / "summary" / f"shard_{cfg.shard}.json").read_text())
+
+
+@app.function(image=image, gpu="L40S", cpu=8, memory=49152, timeout=21600, retries=0,
+              volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/weights": weights.read_only(), "/results": results},
+              max_containers=16)
+def run_rl_shard(config, prepared_path, run_dir, residual, eval_candidates, resume=False):
+    cfg = eval_config_from_dict(config)
+    cache.reload()
+    source.reload()
+    weights.reload()
+    results.reload()
+    command = [
+        EVAL_PYTHON, "-m", "script.lingbot_rl_train", "eval", "--config-json", json.dumps({"task_ids": list(cfg.task_ids)}),
+        "--prepared-path", prepared_path, "--output-dir", f"/results/{run_dir}", "--residual-path", f"/weights/{residual}",
+        "--eval-candidates", str(eval_candidates), "--shard", str(cfg.shard), "--shards", str(cfg.shards),
+        "--result-volume", RESULT_VOLUME,
     ] + (["--resume"] if resume else [])
     try:
         subprocess.run(command, check=True)
@@ -145,12 +170,14 @@ def download_task(run_dir, download_dir, resume):
 def main(stage: str = "prepare", source_run: str = "libero30-sft", checkpoint_step: int = 600, policy: str = "",
          task_ids: str = "0,4", shards: int = 4, seed: int = 42, resume: bool = False,
          wandb_project: str = "dice-lingbot-va-eval", wandb_entity: str = "james-j-carver-university-of-cambridge",
-         download_dir: str = "result/heldout"):
+         download_dir: str = "result/heldout", residual: str = "", eval_candidates: int = 4):
     from script.lingbot_eval import read_json
 
     if stage not in ("prepare", "eval", "merge"):
         raise ValueError("Stage must be prepare, eval, or merge")
     tasks = tuple(int(task) for task in task_ids.split(","))
+    if residual and not policy:
+        raise ValueError("--policy names the residual evaluation")
     policy = validate_name(policy or f"sft-step{checkpoint_step:06d}")
     base = EvalConfig(source_run=source_run, checkpoint_step=checkpoint_step, stage="heldout", seed=seed,
                       task_ids=tasks, wandb_project=wandb_project, wandb_entity=wandb_entity or None).validate()
@@ -163,8 +190,12 @@ def main(stage: str = "prepare", source_run: str = "libero30-sft", checkpoint_st
         if stage == "prepare":
             return
         jobs = [(EvalConfig(**{**base.__dict__, "task_ids": (task,), "shard": shard, "shards": shards}).validate().to_dict(),
-                 prepared_path, f"{policy}/task_{task:02d}", resume) for task in tasks for shard in range(shards)]
-        for shard_summary in run_shard.starmap(jobs):
+                 prepared_path, f"{policy}/task_{task:02d}") for task in tasks for shard in range(shards)]
+        if residual:
+            summaries = run_rl_shard.starmap([(*job, residual, eval_candidates, resume) for job in jobs])
+        else:
+            summaries = run_shard.starmap([(*job, resume) for job in jobs])
+        for shard_summary in summaries:
             print(json.dumps(shard_summary))
     for task in tasks:
         cfg = EvalConfig(**{**base.__dict__, "task_ids": (task,)}).validate()
