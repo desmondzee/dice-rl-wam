@@ -400,8 +400,6 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
             raise FileExistsError("Evaluation output exists; use explicit --resume or choose a new run name")
         if read_json(settings_path) != settings:
             raise ValueError("Resume requires identical checkpoint, protocol, dependencies, and harness")
-    elif resume:
-        raise FileNotFoundError("Cannot resume an evaluation with no saved results")
     else:
         write_json(settings_path, settings)
 
