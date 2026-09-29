@@ -7,9 +7,9 @@ Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 
 ```mermaid
 xychart-beta
     title "Held-out success rate, 100 episodes per bar"
-    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t4 SFT", "t4 660k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t9 SFT", "t9 400k k4", "t9 480k k4", "t9 660k k4"]
+    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4"]
     y-axis "success rate" 0 --> 1
-    bar [0.63, 0.81, 0.90, 0.76, 0.71, 0.78, 0.83, 0.82, 0.42, 0.63, 0.55, 0.52]
+    bar [0.63, 0.81, 0.90, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.42, 0.49, 0.63, 0.55, 0.52]
 ```
 
 | task | policy | successes | rate | mean steps | vs SFT paired: gained / lost | states 2/2 · 1/2 · 0/2 |
@@ -19,10 +19,12 @@ xychart-beta
 | 0 | RL 660k, best-of-4 | 90 | 0.90 | 335 | 34 / 7 | 40 · 10 · 0 |
 | 4 | SFT, best-of-1 | 76 | 0.76 | 317 | — | 29 · 18 · 3 |
 | 4 | RL 660k, best-of-1 | 71 | 0.71 | 325 | 8 / 13 | 28 · 15 · 7 |
+| 4 | RL 480k, best-of-1 | 75 | 0.75 | 313 | 12 / 13 | — |
 | 4 | RL 660k, best-of-4 | 78 | 0.78 | 300 | 12 / 10 | 32 · 14 · 4 |
 | 4 | RL 480k, best-of-4 | 83 | 0.83 | 294 | 15 / 8 | 36 · 11 · 3 |
 | 4 | RL 240k, best-of-4 | 82 | 0.82 | 290 | 16 / 10 | 36 · 10 · 4 |
 | 9 | SFT, best-of-1 | 42 | 0.42 | 437 | — | 13 · 16 · 21 |
+| 9 | RL 400k, best-of-1 | 49 | 0.49 | 418 | 21 / 14 | — |
 | 9 | RL 400k, best-of-4 | 63 | 0.63 | 382 | 33 / 12 | 20 · 23 · 7 |
 | 9 | RL 480k, best-of-4 | 55 | 0.55 | 401 | 32 / 19 | 17 · 21 · 12 |
 | 9 | RL 660k, best-of-4 | 52 | 0.52 | 404 | 27 / 17 | 15 · 22 · 13 |
@@ -71,7 +73,9 @@ Conclusions that follow:
 - The decline coincides with the critic turning pessimistic on executed actions while rating the actor's unexecuted corrections ever higher, and with rising actor and critic gradients against a fixed-size residual. This is the task-4 pattern (its facts 2–4) arriving late, after a period in which the residual transferred.
 - Across the three runs, the train-eval ΔV ordering at 240k–400k (task 0 > task 9 > task 4) matches the held-out gain ordering; `better_than_base_rate` and `q_advantage` do not.
 
-Not established: the 240k checkpoint's held-out rate (ΔV peaked there); the best-of-1 rate at 400k.
+6. Best-of-1 at 400k: 49/100 (SFT 42, best-of-4 63). The residual alone adds 7 points; the critic's selection adds a further 14.
+
+Not established: the 240k checkpoint's held-out rate (ΔV peaked there).
 
 ## Task 4: why a high better-than-base rate did not carry to the held-out eval
 
@@ -81,7 +85,7 @@ Facts:
 2. The only logged quantity that compares the critic to realised returns, `q_overestimation`, is evaluated on the executed action a_stored, not on a_base + residual. It therefore cannot detect a critic that overrates the actor's residual specifically. On task 4 it stayed positive on online rows for the whole run (+0.146 → +0.049), whereas on task 0 it crossed to negative after 330k (−0.028 at the end).
 3. Outside the buffer, the critic's predicted advantage for task 4 is near zero: train-eval ΔV was 0.001–0.007 at every checkpoint (task 0: 0.021–0.071), against a buffer-state `q_advantage` of 0.064. The task-4 advantage the critic reports is concentrated on replayed states.
 4. Task 4's residual is larger than task 0's (RMS 0.018 vs 0.015) and its actor gradient norm grew through the run (0.19 → 0.33) while task 0's stayed flat (0.20 → 0.22).
-5. Held-out best-of-1 at 660k loses 13 SFT successes and gains 8, and the number of init states failing on both seeds rises from 3 (SFT) to 7. Best-of-4 recovers to 12 gained / 10 lost. The 240k and 480k checkpoints, best-of-4, are the only task-4 policies above the prior by more than their interval's half-width (82, 83 vs 76; ±0.08).
+5. Held-out best-of-1 at 660k loses 13 SFT successes and gains 8, and the number of init states failing on both seeds rises from 3 (SFT) to 7. Best-of-1 at 480k is 75/100 (12 gained / 13 lost). Best-of-4 recovers to 12 gained / 10 lost at 660k. The 240k and 480k checkpoints, best-of-4, are the only task-4 policies above the prior by more than their interval's half-width (82, 83 vs 76; ±0.08).
 6. Collection success in the final bin (0.866, n=396 unseeded episodes, policy changing within the bin) exceeds the held-out best-of-4 rate at 660k (0.78, n=100). Both sample the same start distribution: 200 procedural resets versus the 50 canonical states give coincident per-object position ranges with all 50 canonical states inside them (tasks 0, 4, 9 checked). The two rates' intervals overlap.
 7. All task-4 failures, for every policy, are 520-step truncations; successful episodes average 238–253 steps. RL successes are 6–15 steps faster than SFT successes.
 8. The BC filter released BC on ≤0.13% of candidate rows in both runs; β = 100 BC applied throughout.
@@ -89,8 +93,18 @@ Facts:
 Conclusions that follow from the facts above:
 
 - On task 4 the residual actor learned a correction the critic rates highly on training states (facts 1, 3) that does not improve, and slightly degrades, success on held-out states (fact 5). The critic's positive online overestimation throughout the run (fact 2) is consistent with, but does not by itself prove, the actor exploiting critic error; the logged overestimation metric cannot settle this because it scores the executed action rather than the actor's output (fact 2).
-- The task-4 gain that does exist (best-of-4, 240k–480k, +6–7 points) comes with selection on, and is absent with selection off; on task 0 the residual alone accounts for most of the gain. The two tasks differ in whether the learned residual transfers, not in whether the critic learned to rank candidates.
+- The task-4 residual never exceeded the prior on its own at either checkpoint measured (75 at 480k, 71 at 660k, prior 76); the task-4 gain that does exist (best-of-4, 240k–480k, +6–7 points) comes entirely from selection. On task 0 the residual alone accounts for most of the gain (63 → 81 → 90); on task 9 for a third of it (42 → 49 → 63). The three tasks differ in whether the learned residual transfers, not in whether the critic learned to rank candidates.
 - The train-eval ΔV, computed on a state outside the buffer, separated the two runs at every checkpoint (fact 3) while `better_than_base_rate` and `q_advantage` did not (fact 1). Of the logged signals, ΔV is the one that tracked the held-out outcome.
 - Task 4's SFT prior (0.76) starts above the 40–70% band; task 0 (0.63) and task 9 (0.42) start inside it.
 
 Not established by these data: whether the task-4 residual would transfer with a smaller β, a different critic state, or more seeds; whether the late decline from 480k to 660k (83 → 78, within the interval) is real.
+
+## Decomposition across tasks
+
+| task | SFT | residual only (best-of-1) | residual + selection (best-of-4) | checkpoint |
+|---|---|---|---|---|
+| 0 | 63 | 81 (+18) | 90 (+9 more) | 660k |
+| 9 | 42 | 49 (+7) | 63 (+14 more) | 400k |
+| 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
+
+Selection by the trained critic contributed on all three tasks (+9, +14, +7); the residual's own contribution ranged from +18 to −5 and ordered the tasks the same way the train-eval ΔV did.
