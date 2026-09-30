@@ -32,7 +32,7 @@ def episode_rows(rows):
             continue
         yield episode, step, row
         step += 1
-        if float(row["done"]) == 1.0:
+        if float(row["n_steps"]) == 1.0:
             episode += 1
             step = 0
 

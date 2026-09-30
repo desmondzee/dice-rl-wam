@@ -1331,5 +1331,6 @@ def test_bin_entropy_counts_distinct_bins_per_coordinate():
 def test_sharpen_episode_rows_skip_experts_and_split_on_done():
     from script.lingbot_rl_sharpen import episode_rows
 
-    rows = [{"is_expert": 1.0, "done": 1.0}, {"is_expert": 0.0, "done": 0.0}, {"is_expert": 0.0, "done": 1.0}, {"is_expert": 0.0, "done": 0.0}]
-    assert [(e, s) for e, s, _ in episode_rows(rows)] == [(0, 0), (0, 1), (1, 0)]
+    rows = [{"is_expert": 1.0, "n_steps": 1.0}, {"is_expert": 0.0, "n_steps": 3.0}, {"is_expert": 0.0, "n_steps": 2.0},
+            {"is_expert": 0.0, "n_steps": 1.0}, {"is_expert": 0.0, "n_steps": 3.0}]
+    assert [(e, s) for e, s, _ in episode_rows(rows)] == [(0, 0), (0, 1), (0, 2), (1, 0)]
