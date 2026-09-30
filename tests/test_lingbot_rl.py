@@ -1315,3 +1315,21 @@ def test_eval_stage_fans_out_multiple_run_names(tmp_path, monkeypatch):
     (tmp_path / "dl" / "b-2").mkdir(parents=True)
     with pytest.raises(FileExistsError):
         module.main(stage="eval", run_name="a-1,b-2", download_dir=str(tmp_path / "dl"))
+
+
+def test_bin_entropy_counts_distinct_bins_per_coordinate():
+    from script.lingbot_rl_sharpen import bin_entropy, log_std
+
+    same = np.zeros((1, 4, HORIZON, ACTION_DIM), dtype=np.float32)
+    spread = np.zeros((1, 4, HORIZON, ACTION_DIM), dtype=np.float32)
+    spread[0, :, :, :USED_DOF] = np.linspace(-0.9, 0.9, 4)[:, None, None]
+    assert bin_entropy(same)[0] == pytest.approx(0.0)
+    assert bin_entropy(spread)[0] == pytest.approx(np.log(4))
+    assert log_std(spread)[0] > log_std(same)[0]
+
+
+def test_sharpen_episode_rows_skip_experts_and_split_on_done():
+    from script.lingbot_rl_sharpen import episode_rows
+
+    rows = [{"is_expert": 1.0, "done": 1.0}, {"is_expert": 0.0, "done": 0.0}, {"is_expert": 0.0, "done": 1.0}, {"is_expert": 0.0, "done": 0.0}]
+    assert [(e, s) for e, s, _ in episode_rows(rows)] == [(0, 0), (0, 1), (1, 0)]
