@@ -438,7 +438,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         if self.residual_model is None:
             chosen = a_base
         else:
-            chosen = apply_residual(a_base, self.residual_model.actor(state, noise))
+            chosen = apply_residual(a_base, self.residual_model.actor(state, noise, a_base))
         self.commit_executed(chosen, first_chunk=decoded["first_chunk"])
         if self.config.save_predicted_video:
             self.last_predicted_frames = None
@@ -456,7 +456,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             state = decoded["s"].float()
             if state.shape[0] != a_base.shape[0]:
                 state = state[:1].expand(a_base.shape[0], -1)
-            executed = apply_residual(a_base, self.residual_model.actor(state, noise))
+            executed = apply_residual(a_base, self.residual_model.actor(state, noise, a_base))
             index = int(self.residual_model.critic(state, executed).reshape(-1).argmax())
         return self._apply_residual_choice(decoded, index)
 

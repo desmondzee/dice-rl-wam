@@ -266,7 +266,7 @@ def _maybe_sharpen(model, policy, batch, device):
     if state.shape[0] == 1 and a_base.shape[0] > 1:
         state = state.expand(a_base.shape[0], -1)
     with torch.no_grad():
-        action = apply_residual(a_base, model.actor(state, noise))
+        action = apply_residual(a_base, model.actor(state, noise, a_base))
     if a_base.ndim == 3:
         a_base = a_base.unsqueeze(0)
         action = action.unsqueeze(0)
@@ -302,7 +302,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     else:
         norm = prepared.get("normalization") or {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
     policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture)
-    model = DiceResidualModel(device=device)
+    model = DiceResidualModel(device=device, residual_input=config.residual_input)
     policy.residual_model = model
     policy.eval_candidates = config.k_candidates
     buffer = ChunkReplay()
@@ -404,7 +404,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     raise RuntimeError("action candidate batching failed")
                 with torch.no_grad():
                     state_k = state.expand(k, -1)
-                    executed = apply_residual(a_base, model.actor(state_k, noise))
+                    executed = apply_residual(a_base, model.actor(state_k, noise, a_base))
                     if env_steps < config.selection_warmup_steps:
                         star = int(np.random.randint(k))
                     else:
@@ -499,7 +499,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
     metadata = read_checkpoint_metadata(prepared["checkpoint"])
     policy = load_residual_policy(prepared["checkpoint"], prepared["model_path"], prepared.get("architecture") or metadata.get("architecture") or {})
-    model = DiceResidualModel(device=device)
+    model = DiceResidualModel(device=device, residual_input=config.residual_input)
     residual_path = Path(residual_path or Path(output_dir) / "residual.pt")
     try:
         model.load_inference_state_dict(torch.load(residual_path, map_location="cpu", weights_only=True))

@@ -96,14 +96,14 @@ def run_shard(config, prepared_path, run_dir, resume=False):
 @app.function(image=image, gpu="L40S", cpu=8, memory=49152, timeout=21600, retries=0,
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/weights": weights.read_only(), "/results": results},
               max_containers=16)
-def run_rl_shard(config, prepared_path, run_dir, residual, eval_candidates, resume=False):
+def run_rl_shard(config, prepared_path, run_dir, residual, eval_candidates, resume=False, residual_input="z"):
     cfg = eval_config_from_dict(config)
     cache.reload()
     source.reload()
     weights.reload()
     results.reload()
     command = [
-        EVAL_PYTHON, "-m", "script.lingbot_rl_train", "eval", "--config-json", json.dumps({"task_ids": list(cfg.task_ids)}),
+        EVAL_PYTHON, "-m", "script.lingbot_rl_train", "eval", "--config-json", json.dumps({"task_ids": list(cfg.task_ids), "residual_input": residual_input}),
         "--prepared-path", prepared_path, "--output-dir", f"/results/{run_dir}", "--residual-path", f"/weights/{residual}",
         "--eval-candidates", str(eval_candidates), "--shard", str(cfg.shard), "--shards", str(cfg.shards),
         "--result-volume", RESULT_VOLUME,
@@ -170,7 +170,7 @@ def download_task(run_dir, download_dir, resume):
 def main(stage: str = "prepare", source_run: str = "libero30-sft", checkpoint_step: int = 600, policy: str = "",
          task_ids: str = "0,4", shards: int = 4, seed: int = 42, resume: bool = False,
          wandb_project: str = "dice-lingbot-va-eval", wandb_entity: str = "james-j-carver-university-of-cambridge",
-         download_dir: str = "result/heldout", residual: str = "", eval_candidates: int = 4):
+         download_dir: str = "result/heldout", residual: str = "", eval_candidates: int = 4, residual_input: str = "z"):
     from script.lingbot_eval import read_json
 
     if stage not in ("prepare", "eval", "merge"):
@@ -192,7 +192,7 @@ def main(stage: str = "prepare", source_run: str = "libero30-sft", checkpoint_st
         jobs = [(EvalConfig(**{**base.__dict__, "task_ids": (task,), "shard": shard, "shards": shards}).validate().to_dict(),
                  prepared_path, f"{policy}/task_{task:02d}") for task in tasks for shard in range(shards)]
         if residual:
-            summaries = run_rl_shard.starmap([(*job, residual, eval_candidates, resume) for job in jobs])
+            summaries = run_rl_shard.starmap([(*job, residual, eval_candidates, resume, residual_input) for job in jobs])
         else:
             summaries = run_shard.starmap([(*job, resume) for job in jobs])
         for shard_summary in summaries:

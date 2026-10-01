@@ -27,6 +27,7 @@ class RLConfig:
     rlpd_start: float = 0.9
     rlpd_end: float = 0.1
     rlpd_steps: int = 208_000
+    residual_input: str = "z"
 
     def validate(self):
         validate_name(self.source_run)
@@ -44,6 +45,8 @@ class RLConfig:
             raise ValueError("Budget, checkpoint stride, and train-eval episodes must be positive")
         if min(self.selection_warmup_steps, self.bc_filter_warmup_steps, self.rlpd_steps) < 0:
             raise ValueError("Warmup windows must be non-negative")
+        if self.residual_input not in ("z", "base", "z_base"):
+            raise ValueError("residual_input must be z, base, or z_base")
         if type(self.seed) is not int or not 0 <= self.seed < 2**32:
             raise ValueError("Invalid seed")
         if not self.wandb_project:
@@ -102,7 +105,7 @@ class RLConfig:
             "used_action_channels": list(range(7)),
             "k_candidates": self.k_candidates,
             "online_env_steps": self.online_env_steps,
-            "residual_input": "z",
+            "residual_input": self.residual_input,
             "multi_sample_candidates": self.k_candidates,
             "selection": "max_q_min",
             "selection_warmup_steps": self.selection_warmup_steps,

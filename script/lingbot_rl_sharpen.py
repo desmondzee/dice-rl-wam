@@ -37,9 +37,9 @@ def episode_rows(rows):
             step = 0
 
 
-def analyse(resume_path, residual_path, batch=512, device="cpu"):
+def analyse(resume_path, residual_path, batch=512, device="cpu", residual_input="z"):
     payload = torch.load(resume_path, map_location="cpu", weights_only=False)
-    model = DiceResidualModel(device=device)
+    model = DiceResidualModel(device=device, residual_input=residual_input)
     model.load_inference_state_dict(torch.load(residual_path, map_location="cpu", weights_only=True))
     items = list(episode_rows(payload["replay"]["data"]))
     out = []
@@ -52,7 +52,7 @@ def analyse(resume_path, residual_path, batch=512, device="cpu"):
             n, k = z_all.shape[0], z_all.shape[1]
             state_k = state.unsqueeze(1).expand(n, k, -1).reshape(n * k, -1)
             base_flat = base_all.reshape(n * k, HORIZON, -1)
-            action = apply_residual(base_flat, model.actor(state_k, z_all.reshape(n * k, HORIZON, -1)))
+            action = apply_residual(base_flat, model.actor(state_k, z_all.reshape(n * k, HORIZON, -1), base_flat))
             delta_v = (model.critic(state_k, action) - model.critic(state_k, base_flat)).reshape(n, k).mean(dim=1).cpu().numpy()
             after = action.reshape(n, k, HORIZON, -1).cpu().numpy()
             before = base_flat.reshape(n, k, HORIZON, -1).cpu().numpy()
@@ -112,8 +112,9 @@ def main():
     parser.add_argument("--residual", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--title", default="")
+    parser.add_argument("--residual-input", default="z")
     args = parser.parse_args()
-    rows = analyse(args.resume, args.residual)
+    rows = analyse(args.resume, args.residual, residual_input=args.residual_input)
     summary, episodes = summarise(rows)
     args.out.mkdir(parents=True, exist_ok=True)
     for name, data in (("rows.csv", rows), ("episodes.csv", episodes)):

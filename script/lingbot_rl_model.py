@@ -66,19 +66,23 @@ def _mlp(in_dim, out_dim):
     return nn.Sequential(*layers)
 
 
+RESIDUAL_INPUTS = {"z": ("z",), "base": ("base",), "z_base": ("z", "base")}
+
+
 class ResidualActor(nn.Module):
-    def __init__(self):
+    def __init__(self, residual_input="z"):
         super().__init__()
-        self.net = _mlp(STATE_DIM + HORIZON * ACTION_DIM, HORIZON * ACTION_DIM)
+        self.inputs = RESIDUAL_INPUTS[residual_input]
+        self.net = _mlp(STATE_DIM + len(self.inputs) * HORIZON * ACTION_DIM, HORIZON * ACTION_DIM)
         final = self.net[-1]
         nn.init.zeros_(final.weight)
         nn.init.zeros_(final.bias)
 
-    def forward(self, state, noise):
+    def forward(self, state, noise, a_base):
         state = mlp_float(state)
-        noise = mlp_float(noise)
         batch = state.shape[0]
-        residual = self.net(torch.cat([state, noise.reshape(batch, -1)], dim=-1))
+        parts = [state] + [mlp_float(noise if name == "z" else a_base).reshape(batch, -1) for name in self.inputs]
+        residual = self.net(torch.cat(parts, dim=-1))
         return mask_unused_dof(residual.reshape(batch, HORIZON, ACTION_DIM))
 
 
@@ -100,9 +104,9 @@ class CriticEnsemble(nn.Module):
 
 
 class DiceResidualModel:
-    def __init__(self, device="cpu"):
+    def __init__(self, device="cpu", residual_input="z"):
         self.device = device
-        self.actor = ResidualActor().to(device)
+        self.actor = ResidualActor(residual_input).to(device)
         self.critic = CriticEnsemble().to(device)
         self.target_critic = copy.deepcopy(self.critic).to(device)
         for parameter in self.target_critic.parameters():
@@ -121,7 +125,7 @@ class DiceResidualModel:
             state_k = next_state.unsqueeze(1).expand(batch, k, next_state.shape[-1]).reshape(batch * k, -1)
             z_flat = z_next_all.reshape(batch * k, HORIZON, ACTION_DIM)
             base_flat = a_base_next_all.reshape(batch * k, HORIZON, ACTION_DIM)
-            a_next = apply_residual(base_flat, self.actor(state_k, z_flat))
+            a_next = apply_residual(base_flat, self.actor(state_k, z_flat, base_flat))
             backup = self.target_critic(state_k, a_next).reshape(batch, k, 1).mean(dim=1)
             return reward + (GAMMA ** n_steps) * (1.0 - done) * backup
 
@@ -147,7 +151,7 @@ class DiceResidualModel:
         state_k = state.unsqueeze(1).expand(batch, k, state.shape[-1]).reshape(batch * k, -1)
         z_flat = z_all.reshape(batch * k, HORIZON, ACTION_DIM)
         base_flat = a_base_all.reshape(batch * k, HORIZON, ACTION_DIM)
-        action = apply_residual(base_flat, self.actor(state_k, z_flat))
+        action = apply_residual(base_flat, self.actor(state_k, z_flat, base_flat))
         q_a = self.critic(state_k, action).reshape(batch, k)
         online = (mlp_float(is_expert) == 0).float()
         with torch.no_grad():

@@ -726,7 +726,7 @@ def test_actor_critic_cast_bfloat16_policy_tensors_to_float32():
     state = torch.zeros(2, STATE_DIM, dtype=torch.bfloat16)
     noise = torch.zeros(2, HORIZON, ACTION_DIM, dtype=torch.bfloat16)
     action = torch.zeros(2, HORIZON, ACTION_DIM, dtype=torch.bfloat16)
-    residual = model.actor(state, noise)
+    residual = model.actor(state, noise, action)
     q = model.critic(state, action)
     applied = apply_residual(action, residual)
     assert residual.dtype == torch.float32
@@ -913,8 +913,8 @@ class _StubPolicy:
         return None
 
 
-def _sum_critic_model(device="cpu"):
-    model = DiceResidualModel(device=device)
+def _sum_critic_model(device="cpu", residual_input="z"):
+    model = DiceResidualModel(device=device, residual_input=residual_input)
     model.critic = _SumCritic()
     return model
 
@@ -1139,9 +1139,9 @@ def test_residual_actor_initializes_to_zero_so_policy_starts_at_prior():
     model = DiceResidualModel(device="cpu")
     state = torch.randn(5, STATE_DIM)
     noise = torch.randn(5, HORIZON, ACTION_DIM)
-    residual = model.actor(state, noise)
-    torch.testing.assert_close(residual, torch.zeros(5, HORIZON, ACTION_DIM))
     a_base = mask_unused_dof(torch.randn(5, HORIZON, ACTION_DIM))
+    residual = model.actor(state, noise, a_base)
+    torch.testing.assert_close(residual, torch.zeros(5, HORIZON, ACTION_DIM))
     torch.testing.assert_close(apply_residual(a_base, residual), a_base)
 
 
@@ -1239,7 +1239,7 @@ def test_predict_action_chunk_executes_highest_q_candidate():
     policy._apply_residual_choice = fake_apply
     policy.predict_action_chunk({"task": ["t"]})
     state = decoded["s"].expand(4, -1)
-    executed = apply_residual(decoded["a_base"], model.actor(state, decoded["z"]))
+    executed = apply_residual(decoded["a_base"], model.actor(state, decoded["z"], decoded["a_base"]))
     expected = int(model.critic(state, executed).reshape(-1).argmax())
     assert captured["k"] == 4
     assert captured["index"] == expected
