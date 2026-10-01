@@ -7,9 +7,9 @@ Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 
 ```mermaid
 xychart-beta
     title "Held-out success rate, 100 episodes per bar"
-    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4"]
+    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4"]
     y-axis "success rate" 0 --> 1
-    bar [0.63, 0.81, 0.90, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.42, 0.49, 0.63, 0.55, 0.52]
+    bar [0.63, 0.81, 0.90, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69]
 ```
 
 | task | policy | successes | rate | mean steps | vs SFT paired: gained / lost | states 2/2 · 1/2 · 0/2 |
@@ -25,6 +25,8 @@ xychart-beta
 | 4 | RL 240k, best-of-4 | 82 | 0.82 | 290 | 16 / 10 | 36 · 10 · 4 |
 | 9 | SFT, best-of-1 | 42 | 0.42 | 437 | — | 13 · 16 · 21 |
 | 9 | RL 400k, best-of-1 | 49 | 0.49 | 418 | 21 / 14 | — |
+| 9 | base-conditioned actor (offline probe, 400k critic), best-of-1 | 57 | 0.57 | 393 | 33 / 18 | — |
+| 9 | base-conditioned actor (offline probe, 400k critic), best-of-4 | 69 | 0.69 | 365 | 39 / 12 | — |
 | 9 | RL 400k, best-of-4 | 63 | 0.63 | 382 | 33 / 12 | 20 · 23 · 7 |
 | 9 | RL 480k, best-of-4 | 55 | 0.55 | 401 | 32 / 19 | 17 · 21 · 12 |
 | 9 | RL 660k, best-of-4 | 52 | 0.52 | 404 | 27 / 17 | 15 · 22 · 13 |
@@ -98,6 +100,28 @@ Conclusions that follow from the facts above:
 - Task 4's SFT prior (0.76) starts above the 40–70% band; task 0 (0.63) and task 9 (0.42) start inside it.
 
 Not established by these data: whether the task-4 residual would transfer with a smaller β, a different critic state, or more seeds; whether the late decline from 480k to 660k (83 → 78, within the interval) is real.
+
+## Sharpening analysis and the residual's input
+
+`script/lingbot_rl_sharpen.py` computes, for every online replay row of a run, ΔV = mean over the 4 stored candidates of Q(s, a_base + r) − Q(s, a_base) and ΔH = entropy of the 4 corrected candidates minus entropy of the 4 base candidates (50-bin histogram over [−1, 1] on the 7 live channels × 16 steps, as in the paper's Figure 5; plus a log-std version). Figures: `result/analysis/figures/`.
+
+| run, checkpoint | mean ΔV | mean ΔH | mean Δlog-std | r(ΔV, ΔH) per state |
+|---|---|---|---|---|
+| t0 240k / 480k / 660k | 0.022 / 0.033 / 0.047 | +0.037 / +0.034 / +0.032 | +0.14 / +0.14 / +0.13 | +0.28 / +0.49 / +0.56 |
+| t4 240k / 480k / 660k | 0.025 / 0.056 / 0.063 | +0.053 / +0.051 / +0.048 | +0.18 / +0.17 / +0.16 | +0.35 / +0.43 / +0.60 |
+| t9 240k / 400k / 660k | 0.042 / 0.066 / 0.111 | +0.072 / +0.069 / +0.067 | +0.23 / +0.22 / +0.21 | −0.03 / +0.10 / +0.43 |
+
+Facts: mean ΔH is positive on all nine combinations (the residual spreads the candidates; the paper reports contraction with r = −0.18); r(ΔV, ΔH) rises to +0.43..+0.60 by 660k on every task. On the buffers, z adds nothing to predicting a_base beyond the state (ridge R² 0.47–0.55 with or without z), and the candidate-specific part of the residual is uncorrelated with the candidate's offset (−0.04 to −0.08). The residual's input (s, z) does not locate the candidate it corrects: with this base policy a_base is a 50-step denoise of the 5B model, unlike the paper's small flow.
+
+`script/lingbot_rl_actor_probe.py` retrains fresh actors on a run's buffer against its frozen critic with inputs (s, z), (s, a_base), (s, z, a_base); held-out rows (`result/analysis/probe/summary.csv`):
+
+| run | input | critic gain ΔV | Δlog-std | states sharpened | candidate-specific share | offset corr |
+|---|---|---|---|---|---|---|
+| t0 660k | z / base / z_base | 0.004 / 0.050 / 0.017 | +0.22 / +0.04 / +0.20 | 1% / 52% / 3% | 65% / 8% / 52% | −0.04 / −0.17 / −0.06 |
+| t9 400k | z / base / z_base | 0.006 / 0.133 / 0.053 | +0.30 / +0.07 / +0.25 | 0% / 38% / 1% | 68% / 8% / 45% | −0.06 / −0.19 / −0.08 |
+| t4 660k | z / base / z_base | 0.004 / 0.070 / 0.019 | +0.23 / +0.06 / +0.21 | 5% / 50% / 9% | 64% / 10% / 51% | −0.04 / −0.13 / −0.05 |
+
+The (s, a_base) actor from the task-9 probe, paired with the task-9 400k critic, scored 57/100 best-of-1 and 69/100 best-of-4 on the held-out protocol (table above): above the online-trained z-actor at the same checkpoint (49 / 63) with no new environment data. `residual_input` is now a recipe option (`z`, `base`, `z_base`); a training run with `base` is the pending test.
 
 ## Decomposition across tasks
 
