@@ -1334,3 +1334,11 @@ def test_sharpen_episode_rows_skip_experts_and_split_on_done():
     rows = [{"is_expert": 1.0, "n_steps": 1.0}, {"is_expert": 0.0, "n_steps": 3.0}, {"is_expert": 0.0, "n_steps": 2.0},
             {"is_expert": 0.0, "n_steps": 1.0}, {"is_expert": 0.0, "n_steps": 3.0}]
     assert [(e, s) for e, s, _ in episode_rows(rows)] == [(0, 0), (0, 1), (0, 2), (1, 0)]
+
+
+def test_train_loop_runs_with_base_conditioned_residual(tmp_path, monkeypatch):
+    out = _smoke_train(tmp_path, monkeypatch, 42, config=RLConfig(residual_input="base").validate())
+    assert out["envs"]
+    actor = torch.load(tmp_path / "residual.pt", map_location="cpu", weights_only=True)["actor"]
+    assert actor["net.0.weight"].shape[1] == STATE_DIM + HORIZON * ACTION_DIM
+    assert json.loads((tmp_path / "settings.json").read_text())["recipe"]["residual_input"] == "base"
