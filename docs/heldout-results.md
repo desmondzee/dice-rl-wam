@@ -1,6 +1,6 @@
 # Single-task DICE-RL on LingBot-VA: held-out results
 
-Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 50 canonical init states × 2 seeds (`EvalConfig(stage="heldout")`, seed 42). Identical states and seeds for every policy on a task. SFT prior = `libero30-sft` step 600 with best-of-1. RL = frozen prior + residual actor, best-of-4 by critic argmax (the method) or best-of-1 (residual only). 95% intervals are ±0.06–0.10 at n=100. Source: `result/heldout/summary.csv` and the per-episode JSON under `result/heldout/<policy>/task_XX/`.
+Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 50 canonical init states × 2 seeds (`EvalConfig(stage="heldout")`, seed 42). Identical states and seeds for every policy on a task. SFT prior = `libero30-sft` step 600 with best-of-1. RL = frozen prior + residual actor, best-of-4 by critic argmax (the method) or best-of-1 (residual only). 95% intervals are ±0.06–0.10 at n=100. Source: `docs/heldout-results.csv` (this table, with seed-pass splits and intervals) and the per-episode JSON under `result/heldout/<policy>/task_XX/`.
 
 ## Results
 
@@ -14,24 +14,24 @@ xychart-beta
 
 | task | policy | successes | rate | mean steps | vs SFT paired: gained / lost | states 2/2 · 1/2 · 0/2 |
 |---|---|---|---|---|---|---|
-| 0 | SFT, best-of-1 | 63 | 0.63 | 389 | — | 21 · 21 · 8 |
+| 0 | SFT, best-of-1 | 63 | 0.63 | 388 | — | 21 · 21 · 8 |
 | 0 | RL 660k, best-of-1 | 81 | 0.81 | 355 | 26 / 8 | 32 · 17 · 1 |
 | 0 | RL 660k, best-of-4 | 90 | 0.90 | 335 | 34 / 7 | 40 · 10 · 0 |
-| 0 | base-conditioned actor (offline probe, 660k critic), best-of-1 | 80 | 0.80 | 347 | 23 / 6 | — |
+| 0 | base-conditioned actor (offline probe, 660k critic), best-of-1 | 80 | 0.80 | 347 | 23 / 6 | 34 · 12 · 4 |
 | 4 | SFT, best-of-1 | 76 | 0.76 | 317 | — | 29 · 18 · 3 |
 | 4 | RL 660k, best-of-1 | 71 | 0.71 | 325 | 8 / 13 | 28 · 15 · 7 |
-| 4 | RL 480k, best-of-1 | 75 | 0.75 | 313 | 12 / 13 | — |
+| 4 | RL 480k, best-of-1 | 75 | 0.75 | 313 | 13 / 14 | 26 · 23 · 1 |
 | 4 | RL 660k, best-of-4 | 78 | 0.78 | 300 | 12 / 10 | 32 · 14 · 4 |
-| 4 | base-conditioned actor (offline probe, 660k critic), best-of-1 | 84 | 0.84 | 285 | 14 / 6 | — |
 | 4 | RL 480k, best-of-4 | 83 | 0.83 | 294 | 15 / 8 | 36 · 11 · 3 |
 | 4 | RL 240k, best-of-4 | 82 | 0.82 | 290 | 16 / 10 | 36 · 10 · 4 |
-| 9 | SFT, best-of-1 | 42 | 0.42 | 437 | — | 13 · 16 · 21 |
-| 9 | RL 400k, best-of-1 | 49 | 0.49 | 418 | 21 / 14 | — |
-| 9 | base-conditioned actor (offline probe, 400k critic), best-of-1 | 57 | 0.57 | 393 | 33 / 18 | — |
-| 9 | base-conditioned actor (offline probe, 400k critic), best-of-4 | 69 | 0.69 | 365 | 39 / 12 | — |
-| 9 | RL 400k, best-of-4 | 63 | 0.63 | 382 | 33 / 12 | 20 · 23 · 7 |
-| 9 | RL 480k, best-of-4 | 55 | 0.55 | 401 | 32 / 19 | 17 · 21 · 12 |
-| 9 | RL 660k, best-of-4 | 52 | 0.52 | 404 | 27 / 17 | 15 · 22 · 13 |
+| 4 | base-conditioned actor (offline probe, 660k critic), best-of-1 | 84 | 0.84 | 285 | 14 / 6 | 35 · 14 · 1 |
+| 9 | SFT, best-of-1 | 42 | 0.42 | 437 | — | 11 · 20 · 19 |
+| 9 | RL 400k, best-of-1 | 49 | 0.49 | 418 | 28 / 21 | 14 · 21 · 15 |
+| 9 | RL 400k, best-of-4 | 63 | 0.63 | 382 | 33 / 12 | 21 · 21 · 8 |
+| 9 | RL 480k, best-of-4 | 55 | 0.55 | 401 | 32 / 19 | 16 · 23 · 11 |
+| 9 | RL 660k, best-of-4 | 52 | 0.52 | 404 | 27 / 17 | 10 · 32 · 8 |
+| 9 | base-conditioned actor (offline probe, 400k critic), best-of-1 | 57 | 0.57 | 393 | 33 / 18 | 17 · 23 · 10 |
+| 9 | base-conditioned actor (offline probe, 400k critic), best-of-4 | 69 | 0.69 | 365 | 39 / 12 | 25 · 19 · 6 |
 
 "Gained / lost" pairs each RL episode with the SFT episode on the same init state and seed. "States 2/2 · 1/2 · 0/2" counts init states succeeded on both seeds, one seed, neither. Every failure on every policy is a truncation at 520 steps; no policy fails by termination.
 
