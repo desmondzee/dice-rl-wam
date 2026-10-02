@@ -1,0 +1,19 @@
+task,policy,candidates,episodes,successes,success_rate,ci95_halfwidth,mean_steps,pass1_successes,pass2_successes,gained_vs_sft,lost_vs_sft,states_2of2,states_1of2,states_0of2,result_dir
+0,SFT step 600,1,100,63,0.63,0.095,388.5,30,33,0,0,21,21,8,result/heldout/sft-step000600/task_00
+0,"RL (s,z) 660k",1,100,81,0.81,0.077,354.9,41,40,26,8,32,17,1,result/heldout/dice-t0-step660000-k1/task_00
+0,"RL (s,z) 660k",4,100,90,0.9,0.059,335.1,46,44,34,7,40,10,0,result/heldout/dice-t0-step660000/task_00
+0,"offline probe actor (s,a_base), 660k critic",1,100,80,0.8,0.078,347.0,37,43,23,6,34,12,4,result/heldout/dice-t0-step660000-base-probe-k1/task_00
+4,SFT step 600,1,100,76,0.76,0.084,316.9,38,38,0,0,29,18,3,result/heldout/sft-step000600/task_04
+4,"RL (s,z) 660k",1,100,71,0.71,0.089,325.1,34,37,8,13,28,15,7,result/heldout/dice-t4-step660000-k1/task_04
+4,"RL (s,z) 480k",1,100,75,0.75,0.085,313.1,37,38,13,14,26,23,1,result/heldout/dice-t4-step480000-k1/task_04
+4,"RL (s,z) 660k",4,100,78,0.78,0.081,300.1,39,39,12,10,32,14,4,result/heldout/dice-t4-step660000/task_04
+4,"RL (s,z) 480k",4,100,83,0.83,0.074,293.5,42,41,15,8,36,11,3,result/heldout/dice-t4-step480000/task_04
+4,"RL (s,z) 240k",4,100,82,0.82,0.075,290.1,42,40,16,10,36,10,4,result/heldout/dice-t4-step240000/task_04
+4,"offline probe actor (s,a_base), 660k critic",1,100,84,0.84,0.072,285.4,38,46,14,6,35,14,1,result/heldout/dice-t4-step660000-base-probe-k1/task_04
+9,SFT step 600,1,100,42,0.42,0.097,436.9,21,21,0,0,11,20,19,result/heldout/sft-step000600/task_09
+9,"RL (s,z) 400k",1,100,49,0.49,0.098,417.6,27,22,28,21,14,21,15,result/heldout/dice-t9-step400000-k1/task_09
+9,"RL (s,z) 400k",4,100,63,0.63,0.095,382.0,29,34,33,12,21,21,8,result/heldout/dice-t9-step400000/task_09
+9,"RL (s,z) 480k",4,100,55,0.55,0.098,401.4,26,29,32,19,16,23,11,result/heldout/dice-t9-step480000/task_09
+9,"RL (s,z) 660k",4,100,52,0.52,0.098,403.9,27,25,27,17,10,32,8,result/heldout/dice-t9-step660000/task_09
+9,"offline probe actor (s,a_base), 400k critic",1,100,57,0.57,0.097,392.8,23,34,33,18,17,23,10,result/heldout/dice-t9-step400000-base-probe-k1/task_09
+9,"offline probe actor (s,a_base), 400k critic",4,100,69,0.69,0.091,364.7,28,41,39,12,25,19,6,result/heldout/dice-t9-step400000-base-probe-k4/task_09
