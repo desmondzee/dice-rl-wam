@@ -7,9 +7,9 @@ Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 
 ```mermaid
 xychart-beta
     title "Held-out success rate, 100 episodes per bar"
-    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4", "t9 a_base-run 480k k4", "t9 filter-probe k4", "t9 filter-probe k1"]
+    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4", "t9 a_base-run 480k k4", "t9 filter-probe k4", "t9 filter-probe k1", "t9 no-filter control k1"]
     y-axis "success rate" 0 --> 1
-    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75, 0.74, 0.72, 0.77]
+    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75, 0.74, 0.72, 0.77, 0.66]
 ```
 
 | task | policy | successes | rate | mean steps | vs SFT paired: gained / lost | states 2/2 · 1/2 · 0/2 |
@@ -37,6 +37,7 @@ xychart-beta
 | 9 | RL (s, a_base) trained from scratch, 480k, best-of-4 | 74 | 0.74 | 353 | 41 / 9 | 29 · 16 · 5 |
 | 9 | (s, a_base) actor retrained offline with the BC filter at ε = −0.3 (660k critic), best-of-4 | 72 | 0.72 | 345 | 40 / 10 | 28 · 16 · 6 |
 | 9 | (s, a_base) actor retrained offline with the BC filter at ε = −0.3 (660k critic), best-of-1 | 77 | 0.77 | 342 | 43 / 8 | 29 · 19 · 2 |
+| 9 | (s, a_base) actor retrained offline without the filter, control (660k critic), best-of-1 | 66 | 0.66 | 375 | 38 / 14 | 22 · 22 · 6 |
 
 "Gained / lost" pairs each RL episode with the SFT episode on the same init state and seed. "States 2/2 · 1/2 · 0/2" counts init states succeeded on both seeds, one seed, neither. Every failure on every policy is a truncation at 520 steps; no policy fails by termination.
 
@@ -141,7 +142,7 @@ The filter (paper Eq. 6) releases BC on a row when Q(s, a_cur) > Q(s, a_base) an
 
 Critic calibration on the same rows, Q(s, a_stored) against Ĝ: succeeded episodes 0.72 vs 0.92 (base), 0.73 vs 0.91 (z); failed episodes −0.03 vs 0 (base), +0.21 vs 0 (z). Both critics under-predict successes by about 0.19; the z critic is additionally optimistic on failures. The under-prediction follows from the target, which averages the next-state value over the K stored candidates while the data and Ĝ come from the argmax candidate, and from the min over 10 heads; it is not produced by the BC term, which touches only the actor.
 
-Offline probe (`script/lingbot_rl_actor_probe.py --epsilon -0.3`, variant base, 8000 steps against the base run's 660k critic and buffer, with a no-filter control trained identically): BC keep rate 0.87; on held-out buffer rows residual RMS 0.042 vs 0.036, mean ΔV 0.179 vs 0.165, ΔH +0.011 vs +0.010, Δlog-std +0.076 vs +0.067, r(ΔV, ΔH) +0.12 vs +0.04. Held-out episodes with the same 660k critic: best-of-4 72/100 (40 / 10 vs SFT; 16 / 19 vs the online actor's 75), best-of-1 77/100 (43 / 8 vs SFT; 25 / 11 vs the online actor's best-of-1 at 63; 21 / 16 vs its own best-of-4). The best-of-1 gain over the online actor exceeds the interval half-width; whether it comes from the filter or from offline retraining itself is measured by the control actor's best-of-1 eval.
+Offline probe (`script/lingbot_rl_actor_probe.py --epsilon -0.3`, variant base, 8000 steps against the base run's 660k critic and buffer, with a no-filter control trained identically): BC keep rate 0.87; on held-out buffer rows residual RMS 0.042 vs 0.036, mean ΔV 0.179 vs 0.165, ΔH +0.011 vs +0.010, Δlog-std +0.076 vs +0.067, r(ΔV, ΔH) +0.12 vs +0.04. Held-out episodes with the same 660k critic: best-of-4 72/100 (40 / 10 vs SFT; 16 / 19 vs the online actor's 75), best-of-1 77/100 (43 / 8 vs SFT; 25 / 11 vs the online actor's best-of-1 at 63; 21 / 16 vs its own best-of-4). The no-filter control actor, trained identically against the same critic, scores 66/100 best-of-1 (38 / 14 vs SFT; 21 / 18 vs the online actor; 12 / 23 vs the filtered actor). Offline retraining alone therefore reproduces the online actor; the 11-point difference between the two offline actors, 23 episodes gained against 12 lost on identical init states and seeds, is the filter's. Both offline actors were evaluated with the same frozen critic, so this measures the actor-side effect only; the online loop the paper describes, where released rows change what is collected, is untested.
 
 ## Decomposition across tasks
 
