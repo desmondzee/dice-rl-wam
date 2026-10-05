@@ -17,3 +17,5 @@ task,policy,candidates,episodes,successes,success_rate,ci95_halfwidth,mean_steps
 9,"RL (s,z) 660k",4,100,52,0.52,0.098,403.9,27,25,27,17,10,32,8,result/heldout/dice-t9-step660000/task_09
 9,"offline probe actor (s,a_base), 400k critic",1,100,57,0.57,0.097,392.8,23,34,33,18,17,23,10,result/heldout/dice-t9-step400000-base-probe-k1/task_09
 9,"offline probe actor (s,a_base), 400k critic",4,100,69,0.69,0.091,364.7,28,41,39,12,25,19,6,result/heldout/dice-t9-step400000-base-probe-k4/task_09
+9,"RL (s,a_base) 660k",1,100,63,0.63,0.095,372.9,31,32,34,13,17,29,4,result/heldout/dice-t9-base-step660000-k1/task_09
+9,"RL (s,a_base) 660k",4,100,75,0.75,0.085,343.2,41,34,43,10,26,23,1,result/heldout/dice-t9-base-step660000-k4/task_09

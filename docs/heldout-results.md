@@ -7,9 +7,9 @@ Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 
 ```mermaid
 xychart-beta
     title "Held-out success rate, 100 episodes per bar"
-    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4"]
+    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4"]
     y-axis "success rate" 0 --> 1
-    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69]
+    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75]
 ```
 
 | task | policy | successes | rate | mean steps | vs SFT paired: gained / lost | states 2/2 · 1/2 · 0/2 |
@@ -32,6 +32,8 @@ xychart-beta
 | 9 | RL 660k, best-of-4 | 52 | 0.52 | 404 | 27 / 17 | 10 · 32 · 8 |
 | 9 | base-conditioned actor (offline probe, 400k critic), best-of-1 | 57 | 0.57 | 393 | 33 / 18 | 17 · 23 · 10 |
 | 9 | base-conditioned actor (offline probe, 400k critic), best-of-4 | 69 | 0.69 | 365 | 39 / 12 | 25 · 19 · 6 |
+| 9 | RL (s, a_base) trained from scratch, 660k, best-of-1 | 63 | 0.63 | 373 | 34 / 13 | 17 · 29 · 4 |
+| 9 | RL (s, a_base) trained from scratch, 660k, best-of-4 | 75 | 0.75 | 343 | 43 / 10 | 26 · 23 · 1 |
 
 "Gained / lost" pairs each RL episode with the SFT episode on the same init state and seed. "States 2/2 · 1/2 · 0/2" counts init states succeeded on both seeds, one seed, neither. Every failure on every policy is a truncation at 520 steps; no policy fails by termination.
 
@@ -125,12 +127,17 @@ Facts: mean ΔH is positive on all nine combinations (the residual spreads the c
 
 The (s, a_base) probe actors, each paired with its run's critic, scored on the held-out protocol (table above): task 9 at 400k, 57 best-of-1 and 69 best-of-4 (z-actor: 49 / 63); task 0 at 660k, 80 best-of-1 (z-actor: 81); task 4 at 660k, 84 best-of-1 (z-actor: 71; SFT 76). No new environment data was used for any of them. `residual_input` is now a recipe option (`z`, `base`, `z_base`); a training run with `base` is the pending test.
 
+## Task 9 retrained with the base-conditioned residual
+
+Run `dice-t9-base`: identical recipe, `residual_input: base`, actor and critic trained together from scratch for 660k env steps (W&B `dice-t9-base`). Held-out at 660k: best-of-4 75/100 (43 gained / 10 lost vs SFT; 35 / 12 vs the z-run's 660k; 26 / 14 vs the z-run's best checkpoint at 400k), best-of-1 63/100 (34 / 13 vs SFT; 30 / 16 vs the z-run's 400k best-of-1). Training signals over the same range as the z run: train-evals 4 / 5 / 6 / 6 / 8 (z: 4 / 8 / 5 / 6 / 3), ΔV 0.15–0.22 at every checkpoint (z: 0.001–0.024), collection success 0.77–0.78 at 400k–480k (z: 0.59–0.66), online overestimation negative throughout (−0.02 → −0.11), critic loss flat at 0.028 and actor gradient norm plateaued at 0.85 from 240k (z: both rising late), residual RMS 0.035 (z: 0.026). The late decline of the z run did not occur.
+
 ## Decomposition across tasks
 
 | task | SFT | residual only (best-of-1) | residual + selection (best-of-4) | checkpoint |
 |---|---|---|---|---|
 | 0 | 63 | 81 (+18) | 90 (+9 more) | 660k |
-| 9 | 42 | 49 (+7) | 63 (+14 more) | 400k |
+| 9 | 42 | 49 (+7) | 63 (+14 more) | 400k, (s, z) |
+| 9 | 42 | 63 (+21) | 75 (+12 more) | 660k, (s, a_base) |
 | 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
 
 Selection by the trained critic contributed on all three tasks (+9, +14, +7); the residual's own contribution ranged from +18 to −5 and ordered the tasks the same way the train-eval ΔV did.
