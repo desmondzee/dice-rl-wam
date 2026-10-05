@@ -7,9 +7,9 @@ Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 
 ```mermaid
 xychart-beta
     title "Held-out success rate, 100 episodes per bar"
-    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4"]
+    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4", "t9 a_base-run 480k k4"]
     y-axis "success rate" 0 --> 1
-    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75]
+    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75, 0.74]
 ```
 
 | task | policy | successes | rate | mean steps | vs SFT paired: gained / lost | states 2/2 · 1/2 · 0/2 |
@@ -34,6 +34,7 @@ xychart-beta
 | 9 | base-conditioned actor (offline probe, 400k critic), best-of-4 | 69 | 0.69 | 365 | 39 / 12 | 25 · 19 · 6 |
 | 9 | RL (s, a_base) trained from scratch, 660k, best-of-1 | 63 | 0.63 | 373 | 34 / 13 | 17 · 29 · 4 |
 | 9 | RL (s, a_base) trained from scratch, 660k, best-of-4 | 75 | 0.75 | 343 | 43 / 10 | 26 · 23 · 1 |
+| 9 | RL (s, a_base) trained from scratch, 480k, best-of-4 | 74 | 0.74 | 353 | 41 / 9 | 29 · 16 · 5 |
 
 "Gained / lost" pairs each RL episode with the SFT episode on the same init state and seed. "States 2/2 · 1/2 · 0/2" counts init states succeeded on both seeds, one seed, neither. Every failure on every policy is a truncation at 520 steps; no policy fails by termination.
 
@@ -130,7 +131,7 @@ The (s, a_base) probe actors, each paired with its run's critic, scored on the h
 
 ## Task 9 retrained with the base-conditioned residual
 
-Run `dice-t9-base`: identical recipe, `residual_input: base`, actor and critic trained together from scratch for 660k env steps (W&B `dice-t9-base`). Held-out at 660k: best-of-4 75/100 (43 gained / 10 lost vs SFT; 35 / 12 vs the z-run's 660k; 26 / 14 vs the z-run's best checkpoint at 400k), best-of-1 63/100 (34 / 13 vs SFT; 30 / 16 vs the z-run's 400k best-of-1). Training signals over the same range as the z run: train-evals 4 / 5 / 6 / 6 / 8 (z: 4 / 8 / 5 / 6 / 3), ΔV 0.15–0.22 at every checkpoint (z: 0.001–0.024), collection success 0.77–0.78 at 400k–480k (z: 0.59–0.66), online overestimation negative throughout (−0.02 → −0.11), critic loss flat at 0.028 and actor gradient norm plateaued at 0.85 from 240k (z: both rising late), residual RMS 0.035 (z: 0.026). The late decline of the z run did not occur. On its own replay buffer the trained (s, a_base) actor leaves the candidate spread almost unchanged (mean ΔH +0.008, Δlog-std +0.06 at 660k, against +0.067 / +0.21 for the z run) while the critic-predicted gain is three times larger (0.19 vs 0.07), and the ΔV–ΔH coupling stays near zero at every checkpoint (r = 0.09–0.12) instead of rising to +0.43.
+Run `dice-t9-base`: identical recipe, `residual_input: base`, actor and critic trained together from scratch for 660k env steps (W&B `dice-t9-base`). Held-out at 660k: best-of-4 75/100 (43 gained / 10 lost vs SFT; 35 / 12 vs the z-run's 660k; 26 / 14 vs the z-run's best checkpoint at 400k), best-of-1 63/100 (34 / 13 vs SFT; 30 / 16 vs the z-run's 400k best-of-1). Training signals over the same range as the z run: train-evals 4 / 5 / 6 / 6 / 8 (z: 4 / 8 / 5 / 6 / 3), ΔV 0.15–0.22 at every checkpoint (z: 0.001–0.024), collection success 0.77–0.78 at 400k–480k (z: 0.59–0.66), online overestimation negative throughout (−0.02 → −0.11), critic loss flat at 0.028 and actor gradient norm plateaued at 0.85 from 240k (z: both rising late), residual RMS 0.035 (z: 0.026). The late decline of the z run did not occur. The 480k checkpoint, best-of-4, scores 74/100 (41 gained / 9 lost vs SFT; 15 / 16 vs the 660k checkpoint), so the last 180k env steps changed which episodes succeed but not how many. On its own replay buffer the trained (s, a_base) actor leaves the candidate spread almost unchanged (mean ΔH +0.008, Δlog-std +0.06 at 660k, against +0.067 / +0.21 for the z run) while the critic-predicted gain is three times larger (0.19 vs 0.07), and the ΔV–ΔH coupling stays near zero at every checkpoint (r = 0.09–0.12) instead of rising to +0.43.
 
 ## Decomposition across tasks
 
