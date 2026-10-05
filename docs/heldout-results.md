@@ -7,9 +7,9 @@ Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 
 ```mermaid
 xychart-beta
     title "Held-out success rate, 100 episodes per bar"
-    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4", "t9 a_base-run 480k k4"]
+    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4", "t9 a_base-run 480k k4", "t9 filter-probe k4", "t9 filter-probe k1"]
     y-axis "success rate" 0 --> 1
-    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75, 0.74]
+    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75, 0.74, 0.72, 0.77]
 ```
 
 | task | policy | successes | rate | mean steps | vs SFT paired: gained / lost | states 2/2 · 1/2 · 0/2 |
@@ -35,6 +35,8 @@ xychart-beta
 | 9 | RL (s, a_base) trained from scratch, 660k, best-of-1 | 63 | 0.63 | 373 | 34 / 13 | 17 · 29 · 4 |
 | 9 | RL (s, a_base) trained from scratch, 660k, best-of-4 | 75 | 0.75 | 343 | 43 / 10 | 26 · 23 · 1 |
 | 9 | RL (s, a_base) trained from scratch, 480k, best-of-4 | 74 | 0.74 | 353 | 41 / 9 | 29 · 16 · 5 |
+| 9 | (s, a_base) actor retrained offline with the BC filter at ε = −0.3 (660k critic), best-of-4 | 72 | 0.72 | 345 | 40 / 10 | 28 · 16 · 6 |
+| 9 | (s, a_base) actor retrained offline with the BC filter at ε = −0.3 (660k critic), best-of-1 | 77 | 0.77 | 342 | 43 / 8 | 29 · 19 · 2 |
 
 "Gained / lost" pairs each RL episode with the SFT episode on the same init state and seed. "States 2/2 · 1/2 · 0/2" counts init states succeeded on both seeds, one seed, neither. Every failure on every policy is a truncation at 520 steps; no policy fails by termination.
 
@@ -132,6 +134,14 @@ The (s, a_base) probe actors, each paired with its run's critic, scored on the h
 ## Task 9 retrained with the base-conditioned residual
 
 Run `dice-t9-base`: identical recipe, `residual_input: base`, actor and critic trained together from scratch for 660k env steps (W&B `dice-t9-base`). Held-out at 660k: best-of-4 75/100 (43 gained / 10 lost vs SFT; 35 / 12 vs the z-run's 660k; 26 / 14 vs the z-run's best checkpoint at 400k), best-of-1 63/100 (34 / 13 vs SFT; 30 / 16 vs the z-run's 400k best-of-1). Training signals over the same range as the z run: train-evals 4 / 5 / 6 / 6 / 8 (z: 4 / 8 / 5 / 6 / 3), ΔV 0.15–0.22 at every checkpoint (z: 0.001–0.024), collection success 0.77–0.78 at 400k–480k (z: 0.59–0.66), online overestimation negative throughout (−0.02 → −0.11), critic loss flat at 0.028 and actor gradient norm plateaued at 0.85 from 240k (z: both rising late), residual RMS 0.035 (z: 0.026). The late decline of the z run did not occur. The 480k checkpoint, best-of-4, scores 74/100 (41 gained / 9 lost vs SFT; 15 / 16 vs the 660k checkpoint), so the last 180k env steps changed which episodes succeed but not how many. On its own replay buffer the trained (s, a_base) actor leaves the candidate spread almost unchanged (mean ΔH +0.008, Δlog-std +0.06 at 660k, against +0.067 / +0.21 for the z run) while the critic-predicted gain is three times larger (0.19 vs 0.07), and the ΔV–ΔH coupling stays near zero at every checkpoint (r = 0.09–0.12) instead of rising to +0.43.
+
+## BC filter: why it never fires, and an offline probe at ε = −0.3
+
+The filter (paper Eq. 6) releases BC on a row when Q(s, a_cur) > Q(s, a_base) and Q(s, a_stored) − Ĝ(s) < ε. With ε = −0.5 taken literally from the paper's Table 2 it released at most 0.13% of rows in every run. Two measurements on the saved replays explain this. The first condition is non-selective: 99.3% of the base run's online rows (79.7% of the z run's) satisfy it. The second condition is on the wrong scale: the reference n-step target sums 17 overlapping chunk-reward windows, so its Q spans several units and −0.5 is a small margin, whereas ours is bounded by 1. Release fractions of online rows at other ε, measured with each run's critic on its final replay buffer (all / succeeded-episode rows / failed-episode rows): base run 660k critic, ε = 0: 0.87 / 0.99 / 0.72; −0.1: 0.63 / 0.70 / 0.54; −0.2: 0.34 / 0.42 / 0.25; −0.3: 0.14 / 0.20 / 0.06; −0.5: 0.015 / 0.03 / 0.00. z run 400k critic: ε = 0: 0.53 / 0.80 / 0.31; −0.2: 0.10 / 0.21 / 0.01; −0.3: 0.04 / 0.08 / 0.00. Releases on failed-episode rows near ε = 0 come from the unbounded min-ensemble sitting slightly below zero where Ĝ = 0.
+
+Critic calibration on the same rows, Q(s, a_stored) against Ĝ: succeeded episodes 0.72 vs 0.92 (base), 0.73 vs 0.91 (z); failed episodes −0.03 vs 0 (base), +0.21 vs 0 (z). Both critics under-predict successes by about 0.19; the z critic is additionally optimistic on failures. The under-prediction follows from the target, which averages the next-state value over the K stored candidates while the data and Ĝ come from the argmax candidate, and from the min over 10 heads; it is not produced by the BC term, which touches only the actor.
+
+Offline probe (`script/lingbot_rl_actor_probe.py --epsilon -0.3`, variant base, 8000 steps against the base run's 660k critic and buffer, with a no-filter control trained identically): BC keep rate 0.87; on held-out buffer rows residual RMS 0.042 vs 0.036, mean ΔV 0.179 vs 0.165, ΔH +0.011 vs +0.010, Δlog-std +0.076 vs +0.067, r(ΔV, ΔH) +0.12 vs +0.04. Held-out episodes with the same 660k critic: best-of-4 72/100 (40 / 10 vs SFT; 16 / 19 vs the online actor's 75), best-of-1 77/100 (43 / 8 vs SFT; 25 / 11 vs the online actor's best-of-1 at 63; 21 / 16 vs its own best-of-4). The best-of-1 gain over the online actor exceeds the interval half-width; whether it comes from the filter or from offline retraining itself is measured by the control actor's best-of-1 eval.
 
 ## Decomposition across tasks
 

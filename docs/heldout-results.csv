@@ -20,3 +20,5 @@ task,policy,candidates,episodes,successes,success_rate,ci95_halfwidth,mean_steps
 9,"RL (s,a_base) 660k",1,100,63,0.63,0.095,372.9,31,32,34,13,17,29,4,result/heldout/dice-t9-base-step660000-k1/task_09
 9,"RL (s,a_base) 660k",4,100,75,0.75,0.085,343.2,41,34,43,10,26,23,1,result/heldout/dice-t9-base-step660000-k4/task_09
 9,"RL (s,a_base) 480k",4,100,74,0.74,0.086,352.6,37,37,41,9,29,16,5,result/heldout/dice-t9-base-step480000/task_09
+9,"(s,a_base) actor retrained offline with BC filter eps=-0.3 (660k critic)",4,100,72,0.72,0.088,344.5,39,33,40,10,28,16,6,result/heldout/dice-t9-base-step660000-eps03-probe-k4/task_09
+9,"(s,a_base) actor retrained offline with BC filter eps=-0.3 (660k critic)",1,100,77,0.77,0.082,342.4,36,41,43,8,29,19,2,result/heldout/dice-t9-base-step660000-eps03-probe-k1/task_09
