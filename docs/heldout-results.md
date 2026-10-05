@@ -114,6 +114,7 @@ Not established by these data: whether the task-4 residual would transfer with a
 | t0 240k / 480k / 660k | 0.022 / 0.033 / 0.047 | +0.037 / +0.034 / +0.032 | +0.14 / +0.14 / +0.13 | +0.28 / +0.49 / +0.56 |
 | t4 240k / 480k / 660k | 0.025 / 0.056 / 0.063 | +0.053 / +0.051 / +0.048 | +0.18 / +0.17 / +0.16 | +0.35 / +0.43 / +0.60 |
 | t9 240k / 400k / 660k | 0.042 / 0.066 / 0.111 | +0.072 / +0.069 / +0.067 | +0.23 / +0.22 / +0.21 | −0.03 / +0.10 / +0.43 |
+| t9 (s, a_base) run, 240k / 400k / 660k | 0.163 / 0.177 / 0.192 | +0.013 / +0.009 / +0.008 | +0.07 / +0.06 / +0.06 | +0.12 / +0.09 / +0.09 |
 
 Facts: mean ΔH is positive on all nine combinations (the residual spreads the candidates; the paper reports contraction with r = −0.18); r(ΔV, ΔH) rises to +0.43..+0.60 by 660k on every task. On the buffers, z adds nothing to predicting a_base beyond the state (ridge R² 0.47–0.55 with or without z), and the candidate-specific part of the residual is uncorrelated with the candidate's offset (−0.04 to −0.08). The residual's input (s, z) does not locate the candidate it corrects: with this base policy a_base is a 50-step denoise of the 5B model, unlike the paper's small flow.
 
@@ -129,7 +130,7 @@ The (s, a_base) probe actors, each paired with its run's critic, scored on the h
 
 ## Task 9 retrained with the base-conditioned residual
 
-Run `dice-t9-base`: identical recipe, `residual_input: base`, actor and critic trained together from scratch for 660k env steps (W&B `dice-t9-base`). Held-out at 660k: best-of-4 75/100 (43 gained / 10 lost vs SFT; 35 / 12 vs the z-run's 660k; 26 / 14 vs the z-run's best checkpoint at 400k), best-of-1 63/100 (34 / 13 vs SFT; 30 / 16 vs the z-run's 400k best-of-1). Training signals over the same range as the z run: train-evals 4 / 5 / 6 / 6 / 8 (z: 4 / 8 / 5 / 6 / 3), ΔV 0.15–0.22 at every checkpoint (z: 0.001–0.024), collection success 0.77–0.78 at 400k–480k (z: 0.59–0.66), online overestimation negative throughout (−0.02 → −0.11), critic loss flat at 0.028 and actor gradient norm plateaued at 0.85 from 240k (z: both rising late), residual RMS 0.035 (z: 0.026). The late decline of the z run did not occur.
+Run `dice-t9-base`: identical recipe, `residual_input: base`, actor and critic trained together from scratch for 660k env steps (W&B `dice-t9-base`). Held-out at 660k: best-of-4 75/100 (43 gained / 10 lost vs SFT; 35 / 12 vs the z-run's 660k; 26 / 14 vs the z-run's best checkpoint at 400k), best-of-1 63/100 (34 / 13 vs SFT; 30 / 16 vs the z-run's 400k best-of-1). Training signals over the same range as the z run: train-evals 4 / 5 / 6 / 6 / 8 (z: 4 / 8 / 5 / 6 / 3), ΔV 0.15–0.22 at every checkpoint (z: 0.001–0.024), collection success 0.77–0.78 at 400k–480k (z: 0.59–0.66), online overestimation negative throughout (−0.02 → −0.11), critic loss flat at 0.028 and actor gradient norm plateaued at 0.85 from 240k (z: both rising late), residual RMS 0.035 (z: 0.026). The late decline of the z run did not occur. On its own replay buffer the trained (s, a_base) actor leaves the candidate spread almost unchanged (mean ΔH +0.008, Δlog-std +0.06 at 660k, against +0.067 / +0.21 for the z run) while the critic-predicted gain is three times larger (0.19 vs 0.07), and the ΔV–ΔH coupling stays near zero at every checkpoint (r = 0.09–0.12) instead of rising to +0.43.
 
 ## Decomposition across tasks
 
