@@ -34,7 +34,9 @@ def load_rows(resume_path):
     s = torch.from_numpy(np.stack([r["s"] for r in rows])).float()
     z = torch.from_numpy(np.stack([r["z_all"] for r in rows])).float()
     base = torch.from_numpy(np.stack([r["a_base_all"] for r in rows])).float()
-    return s, z, base
+    a = torch.from_numpy(np.stack([r["a"] for r in rows])).float()
+    mc = torch.tensor([float(r["mc_return"]) for r in rows])
+    return payload, s, z, base, a, mc
 
 
 def flat(s, z, base):
@@ -70,23 +72,31 @@ def diagnostics(actor, critic, s, z, base, batch=1024):
     }
 
 
-def train(actor, critic, s, z, base, steps, batch, seed):
+def train(actor, critic, s, z, base, a_stored, mc, steps, batch, seed, epsilon):
     generator = torch.Generator().manual_seed(seed)
     opt = torch.optim.Adam(actor.parameters(), lr=ADAM_LR, weight_decay=WEIGHT_DECAY)
+    keep_rate = 1.0
     for step in range(steps):
         pick = torch.randint(0, s.shape[0], (batch,), generator=generator)
         sk, zk, bk, n, k = flat(s[pick], z[pick], base[pick])
         a = apply_residual(bk, actor(sk, zk, bk))
         q = critic(sk, a).reshape(n, k)
-        scale = q.abs().mean().detach().clamp(min=1e-8)
+        with torch.no_grad():
+            scale = q.abs().mean().clamp(min=1e-8)
+            keep = torch.ones_like(q)
+            if epsilon is not None:
+                gap = critic(s[pick], a_stored[pick]) - mc[pick].unsqueeze(-1)
+                keep = 1.0 - (q > critic(sk, bk).reshape(n, k)).float() * (gap < epsilon).float()
+            keep_rate = 0.99 * keep_rate + 0.01 * float(keep.mean())
         bc = ((a - bk) ** 2).sum(dim=(1, 2)).reshape(n, k) / (HORIZON * USED_DOF)
-        loss = -(q.mean(dim=1)).mean() / scale + BETA * bc.mean()
+        loss = -(q.mean(dim=1)).mean() / scale + BETA * (keep * bc).mean()
         opt.zero_grad(set_to_none=True)
         loss.backward()
         nn.utils.clip_grad_norm_(actor.parameters(), MAX_GRAD_NORM)
         opt.step()
         if (step + 1) % 500 == 0:
-            print(f"step {step + 1} loss {float(loss):.4f} q {float(q.mean()):.4f} bc {float(bc.mean()):.5f}", flush=True)
+            print(f"step {step + 1} loss {float(loss):.4f} q {float(q.mean()):.4f} bc {float(bc.mean()):.5f} keep {keep_rate:.3f}", flush=True)
+    return keep_rate
 
 
 def main():
@@ -98,22 +108,28 @@ def main():
     parser.add_argument("--steps", type=int, default=8000)
     parser.add_argument("--batch", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--epsilon", type=float)
     args = parser.parse_args()
     torch.manual_seed(args.seed)
-    s, z, base = load_rows(args.resume)
+    _, s, z, base, a_stored, mc = load_rows(args.resume)
     split = int(s.shape[0] * 0.9)
+    weights = torch.load(args.residual, map_location="cpu", weights_only=True)
     model = DiceResidualModel()
-    model.load_inference_state_dict(torch.load(args.residual, map_location="cpu", weights_only=True))
+    model.critic.load_state_dict(weights["critic"])
     for parameter in model.critic.parameters():
         parameter.requires_grad_(False)
     actor = ProbeActor(VARIANTS[args.variant])
-    train(actor, model.critic, s[:split], z[:split], base[:split], args.steps, args.batch, args.seed)
-    summary = {"variant": args.variant, "steps": args.steps, "train_rows": split, "heldout_rows": s.shape[0] - split,
+    keep_rate = train(actor, model.critic, s[:split], z[:split], base[:split], a_stored[:split], mc[:split],
+                      args.steps, args.batch, args.seed, args.epsilon)
+    summary = {"variant": args.variant, "epsilon": args.epsilon, "bc_keep_rate": keep_rate, "steps": args.steps,
+               "train_rows": split, "heldout_rows": s.shape[0] - split,
                "heldout": diagnostics(actor, model.critic, s[split:], z[split:], base[split:]),
                "train": diagnostics(actor, model.critic, s[:split][:4000], z[:split][:4000], base[:split][:4000])}
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     torch.save(actor.state_dict(), args.out / "actor.pt")
+    torch.save({"actor": actor.state_dict(), "critic": weights["critic"], "target_critic": weights["target_critic"]},
+               args.out / "residual.pt")
     print(json.dumps(summary, indent=2))
 
 
