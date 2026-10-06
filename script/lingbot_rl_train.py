@@ -12,11 +12,13 @@ from script.lingbot_rl_buffer import ChunkReplay
 from script.lingbot_rl_config import RLConfig, config_from_dict
 from script.lingbot_rl_data import featurize_experts, load_manifest_episodes
 from script.lingbot_rl_model import (
-    ACTOR_EVERY, BATCH, GRADIENT_STEPS, UPDATE_EVERY_CHUNKS, DiceResidualModel, apply_residual,
+    ACTION_DIM, ACTOR_EVERY, BATCH, GRADIENT_STEPS, HORIZON, UPDATE_EVERY_CHUNKS, DiceResidualModel, apply_residual,
+    mlp_float,
 )
 from script.lingbot_rl_policy import (
     env_action_count, histogram_entropy, load_residual_policy, slice_env_actions,
 )
+from script.lingbot_rl_sharpen import bin_entropy, log_std
 
 LiberoEnv = None
 RESUME_KEYS = {
@@ -52,6 +54,22 @@ def sharpening_metrics(model, state, a_base, action):
         delta_v = float((model.critic(state, action) - model.critic(state, a_base)).mean())
         delta_h = histogram_entropy(a_base) - histogram_entropy(action)
     return {"delta_h": delta_h, "delta_v": delta_v}
+
+
+def replay_sharpening(model, sample):
+    online = mlp_float(sample["is_expert"]).reshape(-1) == 0
+    if int(online.sum()) < 2:
+        return {}
+    state, z_all, base_all = mlp_float(sample["s"])[online], mlp_float(sample["z_all"])[online], mlp_float(sample["a_base_all"])[online]
+    batch, k = z_all.shape[:2]
+    state_k = state.unsqueeze(1).expand(batch, k, -1).reshape(batch * k, -1)
+    base_flat = base_all.reshape(batch * k, HORIZON, ACTION_DIM)
+    with torch.no_grad():
+        action = apply_residual(base_flat, model.actor(state_k, z_all.reshape(batch * k, HORIZON, ACTION_DIM), base_flat))
+        delta_v = float((model.critic(state_k, action) - model.critic(state_k, base_flat)).mean())
+    before, after = base_all.cpu().numpy(), action.reshape(batch, k, HORIZON, ACTION_DIM).cpu().numpy()
+    return {"replay_delta_v": delta_v, "replay_delta_h": float((bin_entropy(before) - bin_entropy(after)).mean()),
+            "replay_delta_log_std": float((log_std(after) - log_std(before)).mean())}
 
 
 def recipe_of(config):
@@ -229,6 +247,7 @@ def _update_from_buffer(model, buffer, expert_ratio, device, filter_active):
         info.update(model.update_critic(sample["s"], sample["a"], target))
         if (step + 1) % ACTOR_EVERY == 0:
             model.polyak_update()
+    info.update(replay_sharpening(model, sample))
     return info
 
 

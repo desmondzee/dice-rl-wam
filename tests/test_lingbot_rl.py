@@ -1074,6 +1074,18 @@ def test_save_inference_checkpoints_keeps_latest_and_step_copy(tmp_path):
     assert "replay" not in loaded_latest
 
 
+def test_replay_sharpening_reports_per_state_candidate_spread():
+    from script.lingbot_rl_train import replay_sharpening
+    model = DiceResidualModel(device="cpu")
+    torch.manual_seed(0)
+    sample = {"s": torch.randn(6, STATE_DIM), "z_all": torch.randn(6, 4, HORIZON, ACTION_DIM),
+              "a_base_all": torch.rand(6, 4, HORIZON, ACTION_DIM) * 2 - 1, "is_expert": torch.tensor([0, 0, 1, 0, 0, 1.0])}
+    metrics = replay_sharpening(model, sample)
+    assert set(metrics) == {"replay_delta_v", "replay_delta_h", "replay_delta_log_std"}
+    assert metrics["replay_delta_h"] == 0.0 and metrics["replay_delta_log_std"] == 0.0 and metrics["replay_delta_v"] == 0.0
+    assert replay_sharpening(model, {**sample, "is_expert": torch.ones(6)}) == {}
+
+
 def test_sharpening_metrics_not_residual_rms():
     from script.lingbot_rl_train import sharpening_metrics
 
