@@ -192,7 +192,7 @@ bash brev/train.sh smoke-t0 0 --max-env-steps 300
 bash brev/train.sh dice-t9-base-eps03 9 --residual-input base --epsilon -0.3 --env-steps 480000
 ```
 
-`--residual-input`, `--epsilon` (BC filter margin, default −0.5) and `--env-steps` (budget, default 660k) are written into the run's `config.json` and enter the recipe fingerprint. Every update cycle (4 chunks) W&B also receives `replay_delta_v`, `replay_delta_h` and `replay_delta_log_std`, computed on the online rows of the last minibatch with the current actor: ΔV is the critic gain over the base candidates, ΔH the per-state entropy drop of the 4 candidates (positive = contraction), Δlog-std the change in their spread.
+`--residual-input`, `--epsilon` (BC filter margin, default −0.5) and `--env-steps` (budget, default 660k) are written into the run's `config.json` and enter the recipe fingerprint. Every 5k env steps W&B also receives `replay_delta_v`, `replay_delta_h` and `replay_delta_log_std`, computed on the online rows of one replay minibatch with the current actor: ΔV is the critic gain over the base candidates, ΔH the per-state entropy drop of the 4 candidates (positive = contraction), Δlog-std the change in their spread.
 
 `brev/sync.sh` runs as the checkpoint hook and uploads each checkpoint, the resume state and logs to `dice-lingbot-rl-runs` (workspace `desmond-zee`); `brev/pull.sh RUN` downloads a run into `result/runs/RUN`. W&B project `dice-lingbot-va-rl`.
 

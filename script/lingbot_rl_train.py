@@ -21,6 +21,7 @@ from script.lingbot_rl_policy import (
 from script.lingbot_rl_sharpen import bin_entropy, log_std
 
 LiberoEnv = None
+SHARPEN_EVERY_STEPS = 5_000
 RESUME_KEYS = {
     "actor", "critic", "target_critic", "actor_opt", "critic_opt", "actor_lr", "critic_lr",
     "replay", "rng", "env_steps", "chunks", "recipe", "checkpointed", "wandb_id",
@@ -247,7 +248,6 @@ def _update_from_buffer(model, buffer, expert_ratio, device, filter_active):
         info.update(model.update_critic(sample["s"], sample["a"], target))
         if (step + 1) % ACTOR_EVERY == 0:
             model.polyak_update()
-    info.update(replay_sharpening(model, sample))
     return info
 
 
@@ -368,6 +368,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     smoke = max_env_steps is not None
     budget = max_env_steps if smoke else config.online_env_steps
     min_online_rows = 1 if smoke else BATCH
+    next_sharpen = 0
     eval_points = set(config.train_eval_schedule())
 
     def maybe_checkpoint():
@@ -472,6 +473,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 if chunks % UPDATE_EVERY_CHUNKS == 0 and buffer.ready_online_count() >= min_online_rows:
                     update_info = _update_from_buffer(
                         model, buffer, expert_ratio, device, env_steps >= config.bc_filter_warmup_steps)
+                    if env_steps >= next_sharpen:
+                        update_info.update(replay_sharpening(model, _sample_batch(buffer, expert_ratio, device)))
+                        next_sharpen = env_steps - env_steps % SHARPEN_EVERY_STEPS + SHARPEN_EVERY_STEPS
                     run.log({
                         **update_info, "env_steps": env_steps, "chunks": chunks, "expert_ratio": expert_ratio,
                         "buffer_online_rows": buffer.ready_online_count(),
