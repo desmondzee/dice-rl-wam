@@ -28,6 +28,7 @@ class RLConfig:
     rlpd_end: float = 0.1
     rlpd_steps: int = 208_000
     residual_input: str = "z"
+    epsilon: float = -0.5
 
     def validate(self):
         validate_name(self.source_run)
@@ -47,6 +48,8 @@ class RLConfig:
             raise ValueError("Warmup windows must be non-negative")
         if self.residual_input not in ("z", "base", "z_base"):
             raise ValueError("residual_input must be z, base, or z_base")
+        if self.epsilon > 0:
+            raise ValueError("epsilon must be non-positive")
         if type(self.seed) is not int or not 0 <= self.seed < 2**32:
             raise ValueError("Invalid seed")
         if not self.wandb_project:
@@ -118,7 +121,7 @@ class RLConfig:
             "mlp_hidden": [1024, 1024, 1024],
             "critic_ensemble": 10,
             "beta": 100.0,
-            "epsilon": -0.5,
+            "epsilon": self.epsilon,
             "n_step_chunks": 3,
             "gamma": 0.99,
             "gradient_steps": 10,

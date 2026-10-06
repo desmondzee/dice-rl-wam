@@ -302,7 +302,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     else:
         norm = prepared.get("normalization") or {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
     policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture)
-    model = DiceResidualModel(device=device, residual_input=config.residual_input)
+    model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon)
     policy.residual_model = model
     policy.eval_candidates = config.k_candidates
     buffer = ChunkReplay()
@@ -499,7 +499,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
     metadata = read_checkpoint_metadata(prepared["checkpoint"])
     policy = load_residual_policy(prepared["checkpoint"], prepared["model_path"], prepared.get("architecture") or metadata.get("architecture") or {})
-    model = DiceResidualModel(device=device, residual_input=config.residual_input)
+    model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon)
     residual_path = Path(residual_path or Path(output_dir) / "residual.pt")
     try:
         model.load_inference_state_dict(torch.load(residual_path, map_location="cpu", weights_only=True))

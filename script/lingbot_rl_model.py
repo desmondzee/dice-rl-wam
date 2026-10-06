@@ -104,8 +104,9 @@ class CriticEnsemble(nn.Module):
 
 
 class DiceResidualModel:
-    def __init__(self, device="cpu", residual_input="z"):
+    def __init__(self, device="cpu", residual_input="z", epsilon=EPSILON):
         self.device = device
+        self.epsilon = epsilon
         self.actor = ResidualActor(residual_input).to(device)
         self.critic = CriticEnsemble().to(device)
         self.target_critic = copy.deepcopy(self.critic).to(device)
@@ -160,7 +161,7 @@ class DiceResidualModel:
             better = (q_a > q_base).float()
             keep = torch.ones_like(better)
             if filter_active:
-                keep = 1.0 - better * (overestimation < EPSILON).float()
+                keep = 1.0 - better * (overestimation < self.epsilon).float()
             keep = torch.maximum(keep, 1.0 - online)
             q_scale = (q_a.abs() * online).sum() / (online.sum() * k).clamp(min=1.0)
         q_term = -(q_a.mean(dim=1, keepdim=True) * online).mean()

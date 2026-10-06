@@ -189,7 +189,10 @@ One L40S per task (~0.33 s per env step, ~62 h per run). Secrets live in `brev/e
 bash brev/setup.sh                       # lerobot env, SFT checkpoint, model cache, dataset, prepared index
 bash brev/train.sh dice-t0 0             # tmux session dice-dice-t0, resumes from the Modal store if a resume file exists
 bash brev/train.sh smoke-t0 0 --max-env-steps 300
+bash brev/train.sh dice-t9-base-eps03 9 --residual-input base --epsilon -0.3 --env-steps 480000
 ```
+
+`--residual-input`, `--epsilon` (BC filter margin, default −0.5) and `--env-steps` (budget, default 660k) are written into the run's `config.json` and enter the recipe fingerprint.
 
 `brev/sync.sh` runs as the checkpoint hook and uploads each checkpoint, the resume state and logs to `dice-lingbot-rl-runs` (workspace `desmond-zee`); `brev/pull.sh RUN` downloads a run into `result/runs/RUN`. W&B project `dice-lingbot-va-rl`.
 

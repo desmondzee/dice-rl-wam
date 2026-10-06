@@ -75,6 +75,16 @@ def test_config_rejects_sampler_and_recipe_drift(changes):
         replace(RLConfig(), **changes).validate()
 
 
+def test_config_epsilon_and_budget_enter_the_fingerprint_and_model():
+    cfg = config_from_dict({"epsilon": -0.3, "online_env_steps": 480_000, "task_ids": [9]})
+    assert cfg.protocol()["epsilon"] == -0.3 and cfg.protocol()["online_env_steps"] == 480_000
+    assert cfg.protocol() != RLConfig().protocol()
+    assert cfg.checkpoint_schedule()[-1] == 480_000 and cfg.train_eval_schedule() == [0, 80_000, 240_000, 400_000]
+    assert DiceResidualModel(device="cpu", epsilon=cfg.epsilon).epsilon == -0.3
+    with pytest.raises(ValueError, match="epsilon"):
+        config_from_dict({"epsilon": 0.1})
+
+
 def test_config_from_dict_restores_task_ids_and_validates():
     cfg = RLConfig(task_ids=(0, 3)).validate()
     payload = cfg.to_dict()
@@ -913,7 +923,7 @@ class _StubPolicy:
         return None
 
 
-def _sum_critic_model(device="cpu", residual_input="z"):
+def _sum_critic_model(device="cpu", residual_input="z", epsilon=-0.5):
     model = DiceResidualModel(device=device, residual_input=residual_input)
     model.critic = _SumCritic()
     return model
