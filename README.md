@@ -207,7 +207,7 @@ MODAL_PROFILE=nobel .cache/eval-venv/bin/python -m modal run script/lingbot_eval
   --residual dice-t0/step_660000/residual.pt --eval-candidates 4 --policy dice-t0-step660000
 ```
 
-The SFT baseline runs best-of-1; RL checkpoints run best-of-4 (the method) and best-of-1 (residual only). Residual weights are uploaded to the `dice-lingbot-rl-weights` volume first. `--stage merge` reprocesses finished shards without compute. W&B logging from the client needs the team `WANDB_API_KEY` in the environment.
+The SFT baseline runs best-of-1; RL checkpoints run best-of-4 (the method) and best-of-1 (residual only). Residual weights are uploaded to the `dice-lingbot-rl-weights` volume first. Upload and download multi-gigabyte files with a `modal>=1.2` client (`uv run --no-project --with 'modal>=1.2,<2' modal volume put ...`); the pinned 1.1.4 client corrupts large transfers. `--stage merge` reprocesses finished shards without compute. W&B logging from the client needs the team `WANDB_API_KEY` in the environment.
 
 Results: `result/heldout/<policy>/task_XX/` per episode JSON plus `summary.csv`; RL run mirrors in `result/runs/`; pre-restart results in `result/legacy/`.
 

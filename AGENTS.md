@@ -115,6 +115,8 @@ bash -n brev/setup.sh brev/train.sh brev/sync.sh brev/pull.sh
 
 Recipe values are pinned in `script/lingbot_rl_config.py` (schedules, budget, task ids) and `script/lingbot_rl_model.py` (losses, cadence, optimiser); a resume file carries the protocol fingerprint and refuses to load under a different recipe. Held-out evaluation (100 episodes per task, 50 canonical init states × 2 seeds) runs sharded on Modal workspace `nobel` through `script/lingbot_eval_modal.py`; results land in `result/heldout/`.
 
+The pinned `modal==1.1.4` client silently corrupts multi-gigabyte `modal volume get`/`put` transfers (same size, different bytes; a 2.7 GB resume file lost its Adam moments, a 10 GB checkpoint failed outright). Transfer large volume files only with a newer client, `uv run --no-project --with 'modal>=1.2,<2' modal volume get|put ...`, and verify them with a container-side SHA-256 against the local file before depending on them.
+
 Modal image builders use an internal PyPI mirror by default. LeRobot's pinned lockfile records https://pypi.org/simple, so evaluation image uv sync, uv export, and constrained uv pip install commands explicitly pass --index-url https://pypi.org/simple. Without that flag, uv reports a missing remote index, re-resolves, and fails --locked. Keep --locked and the upstream lockfile unchanged; upgrading uv or regenerating the lock is not the fix.
 
 ## Local evaluation reports
