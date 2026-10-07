@@ -296,17 +296,17 @@ def download_inference(run_name, download_dir):
 @app.local_entrypoint()
 def main(stage: str = "train", run_name: str = "", resume: bool = False,
          wandb_project: str = "dice-lingbot-va-rl", wandb_entity: str = "",
-         download_dir: str = "result/lingbot-rl", task_ids: str = "0"):
+         download_dir: str = "result/lingbot-rl", task_ids: str = "0", config_json: str = ""):
     if stage not in ("prepare", "train", "eval", "smoke", "download"):
         raise ValueError("Stage must be prepare, train, eval, smoke, or download")
     eval_cfg = EvalConfig(
         source_run="libero30-sft", checkpoint_step=600, stage="eval", seed=42,
         wandb_project="dice-lingbot-va-eval", wandb_entity=wandb_entity or None,
     ).validate()
-    rl_cfg = RLConfig(
-        wandb_project=wandb_project, wandb_entity=wandb_entity or None,
-        task_ids=tuple(int(task) for task in task_ids.split(",")),
-    ).validate()
+    rl_cfg = config_from_dict({
+        "wandb_project": wandb_project, "wandb_entity": wandb_entity or None,
+        "task_ids": [int(task) for task in task_ids.split(",")], **(json.loads(config_json) if config_json else {}),
+    })
     if stage == "smoke":
         run_names = [validate_name(run_name or "libero30-dice-smoke")]
     elif stage in ("eval", "download"):
