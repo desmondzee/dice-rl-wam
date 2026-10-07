@@ -142,7 +142,7 @@ def prepare(config):
         cache.commit()
 
 
-@app.function(image=image, gpu="H100", cpu=16, memory=98304, timeout=43200, retries=0,
+@app.function(image=image, gpu="L40S", cpu=16, memory=98304, timeout=86400, retries=0,
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/rl": results},
               secrets=[wandb_secret], max_containers=1)
 def run_train(config, prepared_path, run_name, resume=False):
