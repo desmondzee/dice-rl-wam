@@ -18,7 +18,7 @@ RESULT_VOLUME = "dice-lingbot-eval-results"
 WEIGHTS_VOLUME = "dice-lingbot-rl-weights"
 EVAL_PYTHON = "/opt/lerobot/.venv/bin/python"
 FILES = ("lingbot_eval_config.py", "lingbot_eval.py", "lingbot_sft_config.py", "lingbot_rl_config.py",
-         "lingbot_rl_model.py", "lingbot_rl_buffer.py", "lingbot_rl_data.py", "lingbot_rl_policy.py", "lingbot_rl_train.py")
+         "lingbot_rl_model.py", "lingbot_rl_buffer.py", "lingbot_rl_data.py", "lingbot_rl_policy.py", "lingbot_rl_train.py", "lingbot_rl_sharpen.py")
 
 
 def build_image():

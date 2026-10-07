@@ -27,7 +27,7 @@ FILES = (
     "lingbot_eval_config.py", "lingbot_eval.py", "lingbot_eval_report.py", "lingbot_sft_config.py",
     "lingbot_sft_data.py",
     "lingbot_rl_config.py", "lingbot_rl_model.py", "lingbot_rl_buffer.py", "lingbot_rl_policy.py",
-    "lingbot_rl_data.py", "lingbot_rl_train.py",
+    "lingbot_rl_data.py", "lingbot_rl_train.py", "lingbot_rl_sharpen.py",
 )
 
 
