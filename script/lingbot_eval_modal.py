@@ -74,7 +74,7 @@ def prepare(config):
         cache.commit()
 
 
-@app.function(image=image, gpu="L40S", cpu=8, memory=49152, timeout=21600, retries=0,
+@app.function(image=image, gpu="L40S", cpu=4, memory=32768, timeout=21600, retries=0,
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/results": results}, max_containers=16)
 def run_shard(config, prepared_path, run_dir, resume=False):
     cfg = eval_config_from_dict(config)
@@ -93,7 +93,7 @@ def run_shard(config, prepared_path, run_dir, resume=False):
     return json.loads((Path("/results") / run_dir / "summary" / f"shard_{cfg.shard}.json").read_text())
 
 
-@app.function(image=image, gpu="L40S", cpu=8, memory=49152, timeout=21600, retries=0,
+@app.function(image=image, gpu="L40S", cpu=4, memory=32768, timeout=21600, retries=0,
               volumes={"/cache": cache.read_only(), "/sft": source.read_only(), "/weights": weights.read_only(), "/results": results},
               max_containers=16)
 def run_rl_shard(config, prepared_path, run_dir, residual, eval_candidates, resume=False, residual_input="z"):
