@@ -51,7 +51,6 @@ def histogram_entropy(samples, bins=32):
 
 
 def frozen_prior_kwargs():
-    """Sampler/camera kwargs copied from `script.lingbot_eval.load_policy` — the 69% eval."""
     return {
         "text_encoder_device": "cpu",
         "device": "cuda",
@@ -78,7 +77,6 @@ def frozen_prior_kwargs():
 
 
 def reraise_action_batch_failure(exc):
-    """Keep OOM visible. Spec: fail explicitly rather than dropping K or rewriting CUDA errors."""
     if "out of memory" in str(exc).lower():
         raise exc
     if str(exc) == "action candidate batching failed":
@@ -87,7 +85,6 @@ def reraise_action_batch_failure(exc):
 
 
 def expand_conditional_kv(transformer, k):
-    """Repeat video-CFG batch index 0 to K. Never expand the uncond row (that would be batch 8)."""
     for block in transformer.blocks:
         cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
         if cache is None or "k" not in cache or cache["k"].shape[0] < 1:
@@ -156,7 +153,6 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
 
     @torch.no_grad()
     def extract_critic_state(self, batch):
-        """Independent real-obs pool. Call after `reset()` (experts). Live AR uses `decode_candidates`['s']."""
         self.eval()
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
@@ -165,7 +161,6 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
 
     @torch.no_grad()
     def extract_critic_state_from_latent(self, latent, batch):
-        """Pool published start-of-chunk VAE latents. Same critic cache as RGB `extract_critic_state`."""
         self.eval()
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
@@ -211,7 +206,6 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             block.attn1.attn_caches["pos"] = _clone_cache(snap)
 
     def _start_raw_obs(self, batch):
-        """Live batch on collection; `select_action` later chunks pass `None` and use the last keyframe."""
         if self._first_chunk:
             if batch is None:
                 raise RuntimeError("First chunk requires a live observation batch")
@@ -248,7 +242,6 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
                 vae.clear_cache()
 
     def _encode_isolated(self, raw_frames):
-        """1-frame critic encode must not continue the AR streaming-VAE cache (kernel T=3)."""
         snap = self._snapshot_vae_cache()
         try:
             self._clear_vae_cache()

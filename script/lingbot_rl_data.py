@@ -146,7 +146,6 @@ def featurize_experts(policy, dataset, manifest=None, norm=None, cache_path=None
 
 
 def load_manifest_episodes(dataset_root, manifest, task_to_id=None, norm=None):
-    """Load the 300 SFT demos listed in the checkpoint manifest from a LeRobot snapshot."""
     import pyarrow.parquet as pq
 
     if norm is None:
@@ -262,7 +261,6 @@ def _load_episode_videos(root, info, episode):
 
 
 def _load_episode_frames(root, info, episode, table):
-    """RGB frames for critic pooling. Prefer parquet image columns; else video files."""
     from script.lingbot_sft_config import CAMERAS as SFT_CAMERAS
 
     features = info.get("features", {})
