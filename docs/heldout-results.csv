@@ -23,3 +23,5 @@ task,policy,candidates,episodes,successes,success_rate,ci95_halfwidth,mean_steps
 9,"(s,a_base) actor retrained offline with BC filter eps=-0.3 (660k critic)",4,100,72,0.72,0.088,344.5,39,33,40,10,28,16,6,result/heldout/dice-t9-base-step660000-eps03-probe-k4/task_09
 9,"(s,a_base) actor retrained offline with BC filter eps=-0.3 (660k critic)",1,100,77,0.77,0.082,342.4,36,41,43,8,29,19,2,result/heldout/dice-t9-base-step660000-eps03-probe-k1/task_09
 9,"(s,a_base) actor retrained offline without filter, control (660k critic)",1,100,66,0.66,0.093,375.2,30,36,38,14,22,22,6,result/heldout/dice-t9-base-step660000-ctrl-probe-k1/task_09
+9,"RL (s,a_base) eps=-0.3 online, 480k",4,100,73,0.73,0.087,352.6,34,39,44,13,27,19,4,result/heldout/dice-t9-base-eps03-step480000-k4/task_09
+9,"RL (s,a_base) eps=-0.3 online, 480k",1,100,73,0.73,0.087,356.1,33,40,40,9,27,19,4,result/heldout/dice-t9-base-eps03-step480000-k1/task_09

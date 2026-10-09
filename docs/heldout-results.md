@@ -7,9 +7,9 @@ Protocol: LIBERO-10, one task per run, 100 evaluation episodes per policy = the 
 ```mermaid
 xychart-beta
     title "Held-out success rate, 100 episodes per bar"
-    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4", "t9 a_base-run 480k k4", "t9 filter-probe k4", "t9 filter-probe k1", "t9 no-filter control k1"]
+    x-axis ["t0 SFT", "t0 RL k1", "t0 RL k4", "t0 base-probe k1", "t4 SFT", "t4 660k k1", "t4 480k k1", "t4 660k k4", "t4 480k k4", "t4 240k k4", "t4 base-probe k1", "t9 SFT", "t9 400k k1", "t9 400k k4", "t9 480k k4", "t9 660k k4", "t9 base-probe k1", "t9 base-probe k4", "t9 a_base-run k1", "t9 a_base-run k4", "t9 a_base-run 480k k4", "t9 filter-probe k4", "t9 filter-probe k1", "t9 no-filter control k1", "t9 eps-run k4", "t9 eps-run k1"]
     y-axis "success rate" 0 --> 1
-    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75, 0.74, 0.72, 0.77, 0.66]
+    bar [0.63, 0.81, 0.90, 0.80, 0.76, 0.71, 0.75, 0.78, 0.83, 0.82, 0.84, 0.42, 0.49, 0.63, 0.55, 0.52, 0.57, 0.69, 0.63, 0.75, 0.74, 0.72, 0.77, 0.66, 0.73, 0.73]
 ```
 
 | task | policy | successes | rate | mean steps | vs SFT paired: gained / lost | states 2/2 · 1/2 · 0/2 |
@@ -38,6 +38,8 @@ xychart-beta
 | 9 | (s, a_base) actor retrained offline with the BC filter at ε = −0.3 (660k critic), best-of-4 | 72 | 0.72 | 345 | 40 / 10 | 28 · 16 · 6 |
 | 9 | (s, a_base) actor retrained offline with the BC filter at ε = −0.3 (660k critic), best-of-1 | 77 | 0.77 | 342 | 43 / 8 | 29 · 19 · 2 |
 | 9 | (s, a_base) actor retrained offline without the filter, control (660k critic), best-of-1 | 66 | 0.66 | 375 | 38 / 14 | 22 · 22 · 6 |
+| 9 | RL (s, a_base) with the filter at ε = −0.3 online, trained from scratch, 480k, best-of-4 | 73 | 0.73 | 353 | 44 / 13 | 27 · 19 · 4 |
+| 9 | RL (s, a_base) with the filter at ε = −0.3 online, trained from scratch, 480k, best-of-1 | 73 | 0.73 | 356 | 40 / 9 | 27 · 19 · 4 |
 
 "Gained / lost" pairs each RL episode with the SFT episode on the same init state and seed. "States 2/2 · 1/2 · 0/2" counts init states succeeded on both seeds, one seed, neither. Every failure on every policy is a truncation at 520 steps; no policy fails by termination.
 
@@ -144,6 +146,12 @@ Critic calibration on the same rows, Q(s, a_stored) against Ĝ: succeeded episod
 
 Offline probe (`script/lingbot_rl_actor_probe.py --epsilon -0.3`, variant base, 8000 steps against the base run's 660k critic and buffer, with a no-filter control trained identically): BC keep rate 0.87; on held-out buffer rows residual RMS 0.042 vs 0.036, mean ΔV 0.179 vs 0.165, ΔH +0.011 vs +0.010, Δlog-std +0.076 vs +0.067, r(ΔV, ΔH) +0.12 vs +0.04. Held-out episodes with the same 660k critic: best-of-4 72/100 (40 / 10 vs SFT; 16 / 19 vs the online actor's 75), best-of-1 77/100 (43 / 8 vs SFT; 25 / 11 vs the online actor's best-of-1 at 63; 21 / 16 vs its own best-of-4). The no-filter control actor, trained identically against the same critic, scores 66/100 best-of-1 (38 / 14 vs SFT; 21 / 18 vs the online actor; 12 / 23 vs the filtered actor). Offline retraining alone therefore reproduces the online actor; the 11-point difference between the two offline actors, 23 episodes gained against 12 lost on identical init states and seeds, is the filter's. Both offline actors were evaluated with the same frozen critic, so this measures the actor-side effect only; the online loop the paper describes, where released rows change what is collected, is untested.
 
+## Task 9 with the BC filter active online
+
+Run `dice-t9-base-eps03`: the base-conditioned recipe with ε = −0.3 and a 480k budget, otherwise identical to `dice-t9-base` (W&B `l273q2h0`; 320k env steps on a Brev L40S, the remaining 160k resumed from the 320k save on a Modal L40S; the W&B run carries dead segments between 320k and 342k from a corrupt resume transfer and one preemption, the real continuation is the segment logged from 2026-10-08 07:55 UTC). The filter became live at 128k and released 1–4% of rows by 300k, 5% at 320–360k and 9% by 440–480k (BC keep rate 0.99 → 0.91). Training signals matched the base run throughout: critic loss 0.027–0.029, Q mean 0.49–0.50, critic gain 0.14–0.15, online overestimation −0.06 → −0.10, residual RMS 0.034, collection success 0.72–0.78; train-evals 4 / 6 / 8 / 6 at 0 / 80k / 240k / 400k (base run: 4 / 5 / 6 / 6). No late decline.
+
+Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 480k best-of-4 at 74; 17 / 19 vs its 660k at 75) and best-of-1 73/100 (40 / 9 vs SFT; 24 / 14 vs the base run's 660k best-of-1 at 63; 18 / 22 vs the offline filtered actor at 77; 22 / 15 vs the offline control at 66). The residual alone gains 10 points over the base run's residual alone, which reproduces the offline probe's direction (77 vs 66) within the interval, and selection adds nothing on top of it (73 vs 73, 18 / 18 paired). With selection the two recipes are indistinguishable (73 vs 74–75).
+
 ## Decomposition across tasks
 
 | task | SFT | residual only (best-of-1) | residual + selection (best-of-4) | checkpoint |
@@ -151,6 +159,7 @@ Offline probe (`script/lingbot_rl_actor_probe.py --epsilon -0.3`, variant base, 
 | 0 | 63 | 81 (+18) | 90 (+9 more) | 660k |
 | 9 | 42 | 49 (+7) | 63 (+14 more) | 400k, (s, z) |
 | 9 | 42 | 63 (+21) | 75 (+12 more) | 660k, (s, a_base) |
+| 9 | 42 | 73 (+31) | 73 (+0 more) | 480k, (s, a_base), ε = −0.3 online |
 | 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
 
 Selection by the trained critic contributed on all three tasks (+9, +14, +7); the residual's own contribution ranged from +18 to −5 and ordered the tasks the same way the train-eval ΔV did.
