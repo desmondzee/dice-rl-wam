@@ -1,0 +1,111 @@
+\documentclass[10pt,twocolumn]{article}
+\usepackage[margin=0.6in,columnsep=0.25in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\sg}{sg}
+
+\title{\vspace{-2.5em}Plan-Level Selection for Residual Reinforcement Learning on a Video-Action World Model}
+\date{\vspace{-3.5em}}
+
+\begin{document}
+\maketitle
+
+\section{Preliminaries}
+
+We post-train LingBot-VA, a dual-stream Mixture-of-Transformers world-action model in which a 5B video stream (hidden width 3072) and a 768-wide action stream share 30 blocks. At each decision the model samples a video noise $\xi$ and denoises one chunk of four latent frames for 20 flow-matching steps with classifier-free guidance 5 against a KV cache of observed history; only the final step writes to the cache. The action stream then denoises a chunk of $h = 16$ environment actions for 50 steps from a fresh Gaussian noise $z$, reading the plan through the cache. We treat the model as a frozen stochastic proposal $\pi_{\mathrm{pre}}$.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{@{}l p{0.72\linewidth}@{}}
+\toprule
+Symbol & Meaning \\
+\midrule
+$s \in \mathbb{R}^{3072}$ & critic state: mean-pooled pre-projection tokens of a history-free encode of the current frame \\
+$p \in \mathbb{R}^{3072}$ & plan pool: the same pooling of the video stream's tokens at a chosen denoising step \\
+$h = 16$, $d = 30$ & chunk horizon and action width; 7 of the $d$ channels are live \\
+$a^{(k)}_{\mathrm{base}}$, $k = 1..K$ & base chunks decoded from one plan with $K = 4$ action noises $z^{(k)}$ \\
+$s_\theta$, $Q_j$, $V_\phi$ & residual actor; action-critic heads, $j = 1..J$, $J = 10$, $Q = \min_j Q_j$, $Q'$ its Polyak copy; plan critic \\
+$\hat G(s)$ & Monte-Carlo return-to-go stored at episode finalisation \\
+$M$, $k$, $E$ & number of sampled plans, ranking step and execution step of the video schedule \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Decoding is near-deterministic given the plan: over the replay buffers of our runs the four candidates decoded from one plan differ by a standard deviation of 0.033 in normalised action units, against 0.44 across states. The stochasticity of $\pi_{\mathrm{pre}}$ that matters for control enters through $\xi$, sampled once per chunk, and not through $z$.
+
+\section{Residual reinforcement learning on the action stream}
+
+DICE-RL (Eq.~2) adds a residual conditioned on the action noise, $a = \pi_{\mathrm{pre}}(s, z) + s_\theta(s, z)$. Here $a_{\mathrm{base}}$ is a 50-step denoise of the 5B model and $z$ carries no information about it: actors retrained on a frozen buffer and critic with inputs $(s, z)$, $(s, a_{\mathrm{base}})$ and $(s, z, a_{\mathrm{base}})$ reach critic gains of 0.006, 0.133 and 0.053. We therefore condition on the decoded base action,
+\begin{equation}
+a^{(k)} = a^{(k)}_{\mathrm{base}} + s_\theta\!\left(s, a^{(k)}_{\mathrm{base}}\right),
+\label{eq:residual}
+\end{equation}
+with $s_\theta$ a zero-initialised MLP ($[1024, 1024, 1024]$, GELU, LayerNorm) masked to the seven live channels.
+
+The critic is an ensemble of $J = 10$ heads of the same shape on $(s, a)$, trained by summed per-head squared error to an $n$-step target. Each replay row stores the $K$ base actions of its chunk and of the next decision state, so the target averages the current actor's corrections over the stored next-state candidates, as in DICE-RL (Eq.~4) with stored rather than fresh samples:
+\begin{equation}
+\begin{split}
+y = \sum_{i=0}^{n-1} \gamma^{i} r_{t+i} + \gamma^{n} (1 - d)\, \frac{1}{K} \sum_{k=1}^{K} Q'\!\left(s', a'^{(k)}\right), \\
+a'^{(k)} = a'^{(k)}_{\mathrm{base}} + s_\theta\!\left(s', a'^{(k)}_{\mathrm{base}}\right),
+\end{split}
+\label{eq:target}
+\end{equation}
+with per-chunk rewards, $n \le 3$ chunks clipped at the episode boundary, $\gamma = 0.99$, and $d = 1$ on success, termination or truncation. The chunk reward is one unit at the first success, so returns and targets lie in $[0, 1]$.
+
+The actor minimises a filtered TD3+BC objective (DICE-RL, Eqs.~5--8). For a minibatch of $B = 256$ rows with online indicator $o_i$ and $\bar q = \frac{1}{K \sum_i o_i} \sum_{i,k} o_i \,|Q(s_i, a^{(k)}_i)|$ held fixed,
+\begin{equation}
+\begin{split}
+\mathcal{L}(\theta) = {}& -\frac{1}{B K \bar q} \sum_{i=1}^{B} o_i \sum_{k=1}^{K} Q\!\left(s_i, a^{(k)}_i\right) \\
+& + \frac{\beta}{B K} \sum_{i=1}^{B} \sum_{k=1}^{K} \kappa^{(k)}_i\, \frac{\bigl\| a^{(k)}_i - a^{(k)}_{\mathrm{base},i} \bigr\|_2^2}{7h},
+\end{split}
+\label{eq:actor}
+\end{equation}
+with $\beta = 100$; the $Q$ term is normalised by the mean $|Q|$ over online entries and divided by the full batch, so its weight falls as the expert fraction rises. The filter follows DICE-RL (Eq.~6) with the Monte-Carlo return as anchor,
+\begin{equation}
+\begin{split}
+\kappa^{(k)}_i = 1 - {}& \mathbf{1}\!\left[Q(s_i, a^{(k)}_i) > Q(s_i, a^{(k)}_{\mathrm{base},i})\right] \\
+& \cdot \mathbf{1}\!\left[Q(s_i, a^{\mathrm{stored}}_i) - \hat G(s_i) < \varepsilon\right],
+\end{split}
+\label{eq:filter}
+\end{equation}
+where $a^{\mathrm{stored}}_i$ is the chunk executed at collection; expert rows keep $\kappa = 1$ and the filter is enabled after 128k environment steps. DICE-RL's $\varepsilon = -0.5$ is set against a target that sums 17 overlapping chunk-reward windows and spans several units; on targets bounded by one it is inert, releasing at most 0.13\% of rows in every run while the first condition alone holds on 99.3\% of online rows. On the base-conditioned run's final buffer the release fraction of online rows is 0.87, 0.63, 0.34, 0.14 and 0.015 at $\varepsilon = 0, -0.1, -0.2, -0.3, -0.5$. We use $\varepsilon = -0.3$, which released 1--9\% of rows online.
+
+Minibatches mix expert and online rows as in RLPD, with the expert fraction decreasing linearly from 0.9 to 0.1 over the first 208k environment steps; expert rows carry the demonstration chunk as both $a_{\mathrm{base}}$ and $a$ with $z = 0$. At collection and evaluation the executed candidate is DICE-RL's best-of-$N$ choice, $k^\star = \argmax_k Q(s, a^{(k)})$, after a 64k-step warm-up during which $k^\star$ is uniform. Updates run every 4 chunks once 256 online rows are finalised: 10 gradient steps on fresh minibatches, the critic on every step, the actor and the Polyak update ($\tau = 0.01$) on every second step, with Adam at $10^{-4}$, weight decay $10^{-5}$, gradient clipping at 1.0 and cosine restarts.
+
+\section{Empirical motivation for plan-level selection}
+
+The recipe of Section~2 does not contract the proposal in the sense DICE-RL reports. The within-plan candidate spread (0.033) equals the residual's size (0.034 RMS) and is below one bin of the 50-bin entropy histogram on $[-1, 1]$ (0.04), so the residual cannot act on the candidates' relative positions. The entropy change $\Delta H$ of the four candidates after correction is positive on all nine run-checkpoint combinations; on the base-conditioned runs it is $+0.007$ to $+0.013$ with $r(\Delta V, \Delta H) = 0.09$--$0.17$ per state, and the expansion sits on rows from failed episodes ($+0.015$) while rows from succeeded episodes are unchanged ($+0.001$) and carry the larger critic gain. Candidate selection and the filtered residual are substitutes on task 9: best-of-4 over best-of-1 adds 12 points without the filter (63 to 75) and nothing with it (73 to 73). The policy's modes lie in the plan, so a contraction operator for this model must choose among plans.
+
+\section{Plan-level selection with a distilled plan critic}
+
+At each decision we draw $M$ video noises and run the video schedule from step 1 to step $k$ for each; rejected plans leave no trace because only the final step writes to the cache. At step $k$ we pool each plan's tokens into $p_m$ and select
+\begin{equation}
+m^\star = \argmax_{m} \; \min_{j} V_{\phi,j}(s, p_m).
+\label{eq:select}
+\end{equation}
+Plan $m^\star$ continues to the execution step $E$; its $K$ candidates are decoded and ranked with the extended action critic $Q(s, p_{m^\star}, a)$, whose input concatenates the frame pool, the plan pool and the chunk and whose target~\eqref{eq:target} carries the executed plan pool of the next state. The chunk receives the residual~\eqref{eq:residual} and is executed. Each decision costs $M k + (E - k)$ video passes against $E$ for the single-plan policy at the same schedule.
+
+$V_\phi$ is trained by regression only, on every stored $(s, p_m)$ including rejected plans. For plan $m$ with stored base actions $a_{\mathrm{base},mk}$,
+\begin{equation}
+\begin{split}
+y_m &= \max_{k} \; \min_{j} \; Q_j\!\left(s, p_m, \; a_{\mathrm{base},mk} + s_\theta(s, a_{\mathrm{base},mk})\right), \\
+\mathcal{L}(\phi) &= \sum_{j} \left( V_{\phi,j}(s, p_m) - \sg[y_m] \right)^2,
+\end{split}
+\label{eq:plancritic}
+\end{equation}
+where $\sg$ denotes stop-gradient through $Q$, $s_\theta$ and the stored actions, so $Q$ remains the single TD-trained quantity and the actor is never optimised to make plans look valuable. The target uses the live critic and the maximum over candidates, matching the within-plan selection executed at collection; $V_\phi$ has no target network and no bootstrap. A TD-trained plan critic would train on its own argmax choices while being queried on the plans it rejects, and would bootstrap through a further argmax. The construction follows the noise-aliased critic of DSRL (Wagenmaker et al., 2025), which regresses a noise-space critic onto an action-space critic at fresh noises; here sampled plans play the role of noises and $V_\phi$ ranks rather than serving as an actor objective.
+
+During collection the executed plan is uniform over the $M$ with probability 0.1 after the 64k-step warm-up (during which it is always uniform), and every plan receives $K$ decoded candidates so that it can be scored; evaluation always executes $m^\star$. Demonstrations have no sampled plan but have the true future: for each demonstration chunk we encode the real next four frames, noise the latent to the step-$k$ level, run one transformer pass against the demonstration's own history cache and pool, which is the model's own training augmentation. Expert rows keep $z = 0$ and $a_{\mathrm{base}}$ equal to the demonstration action, and their plan-critic target is the single candidate's $Q$.
+
+The execution step $E$ is chosen by a held-out sweep of the supervised prior at video steps $20, 12, 10, 6, 3$ on task 9, taking the shortest schedule whose success stays within the interval of the 20-step prior ($42 \pm 10$). Post-training noises the video conditioning with probability 0.5 to $s \in [0.5, 1]$, so the action stream was trained to decode from partially denoised plans; if every shortened schedule degrades, we re-post-train for 1,000 updates with the augmentation range set to the target noise level and repeat the sweep. The ranking step $k \in \{3, 6, 10\} \cap [1, E]$ is fixed by the agreement between actions decoded at step $k$ and at $E$, and all baselines are re-run at $E$.
+
+\section{Evaluation protocol}
+
+Each policy is evaluated on 100 held-out episodes per task: the 50 canonical LIBERO-10 initial states under two seeds each, with identical states and seeds for every policy and a 520-step horizon at which every failure is a truncation. We report success counts with paired gained/lost counts on the same state and seed; 95\% intervals are $\pm 0.06$--$0.10$ at $n = 100$. For the plan-selection run we compare three policies at the same execution step $E$: the $M$-plan policy, the same residual and critics with $M = 1$, which isolates plan selection, and the filtered residual of Section~2 evaluated at $E$ as the baseline. Contraction is measured at the plan level, as the variance of episode outcome across the $M$ sampled plans against the outcome of the executed plan, together with the spread of $V_\phi$ over the $M$ plans per state; this replaces the action-entropy statistic $\Delta H$, which Section~3 shows cannot register a change in this model.
+
+\end{document}
