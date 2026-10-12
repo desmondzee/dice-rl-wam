@@ -612,7 +612,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         return self._apply_residual_choice(decoded, index)
 
 
-def load_residual_policy(checkpoint, model_path, architecture, video_exec_step=-1):
+def load_residual_policy(checkpoint, model_path, architecture, video_exec_step=-1, video_steps=20, action_steps=50):
     from pathlib import Path
 
     from lerobot.configs.types import FeatureType, PolicyFeature
@@ -620,19 +620,21 @@ def load_residual_policy(checkpoint, model_path, architecture, video_exec_step=-
     from safetensors.torch import load_file
 
     from script.lingbot_eval import REQUIRED_FILES
-    from script.lingbot_eval_config import ARCHITECTURE_KEYS, CAMERAS, validate_video_exec_step
+    from script.lingbot_eval_config import ARCHITECTURE_KEYS, CAMERAS, validate_sampler_steps
 
+    validate_sampler_steps(video_steps, action_steps, video_exec_step)
     config = LingBotVAConfig(
         **{key: architecture[key] for key in ARCHITECTURE_KEYS},
         input_features={key: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 128, 128)) for key in CAMERAS},
         output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))},
         wan_pretrained_path=str(model_path),
-        **{**frozen_prior_kwargs(), "video_exec_step": validate_video_exec_step(video_exec_step)},
+        **{**frozen_prior_kwargs(), "num_inference_steps": video_steps, "video_exec_step": video_exec_step,
+           "action_num_inference_steps": action_steps},
     )
     if (
-        config.num_inference_steps != 20
+        config.num_inference_steps != video_steps
         or config.video_exec_step != video_exec_step
-        or config.action_num_inference_steps != 50
+        or config.action_num_inference_steps != action_steps
         or config.guidance_scale != 5.0
         or config.action_guidance_scale != 1.0
         or config.snr_shift != 5.0

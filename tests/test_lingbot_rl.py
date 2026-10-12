@@ -66,7 +66,8 @@ def test_config_pins_released_libero_sampler_and_step_600():
 
 
 @pytest.mark.parametrize("changes", [
-    {"video_steps": 3}, {"action_steps": 10}, {"video_exec_step": 0}, {"video_exec_step": 21}, {"checkpoint_step": 400},
+    {"video_steps": 0}, {"video_steps": 51}, {"action_steps": 0}, {"action_steps": 51}, {"video_steps": 6, "video_exec_step": 10},
+    {"video_exec_step": 0}, {"video_exec_step": 21}, {"checkpoint_step": 400},
     {"source_run": "other-run"}, {"k_candidates": 16}, {"task_ids": ()}, {"task_ids": (0, 0)},
     {"task_ids": (11,)}, {"online_env_steps": 0}, {"checkpoint_every": 0}, {"train_eval_episodes": 0},
 ])
@@ -93,6 +94,16 @@ def test_config_video_exec_step_enters_the_fingerprint():
     assert strip(cfg.protocol()) == strip(RLConfig().protocol())
 
 
+def test_config_sampler_steps_enter_the_fingerprint():
+    cfg = config_from_dict({"video_steps": 6, "action_steps": 8, "video_exec_step": 6})
+    proto = cfg.protocol()
+    assert (proto["video_steps"], proto["action_steps"], proto["video_exec_step"]) == (6, 8, 6)
+    keys = ("video_steps", "action_steps", "video_exec_step")
+    strip = lambda protocol: {key: value for key, value in protocol.items() if key not in keys}
+    assert proto != RLConfig().protocol() and strip(proto) == strip(RLConfig().protocol())
+    assert config_from_dict({"video_steps": 10, "video_exec_step": 10}).video_exec_step == 10
+
+
 def test_evaluate_records_video_exec_step_and_passes_it_to_the_policy(tmp_path, monkeypatch):
     import script.lingbot_eval as eval_module
     import script.lingbot_rl_train as train
@@ -117,13 +128,16 @@ def test_evaluate_records_video_exec_step_and_passes_it_to_the_policy(tmp_path, 
     prepared = tmp_path / "prepared.json"
     prepared.write_text(json.dumps({"checkpoint": "ckpt", "model_path": "model", "assets_path": "assets",
                                     "source_run": "libero30-sft", "checkpoint_step": 600}))
-    summary = train.evaluate(config_from_dict({"task_ids": [9], "video_exec_step": 10}), prepared, tmp_path / "out",
-                             residual_path=tmp_path / "residual.pt", eval_candidates=2, shard=1, shards=50)
+    summary = train.evaluate(config_from_dict({"task_ids": [9], "video_exec_step": 10, "video_steps": 12, "action_steps": 8}),
+                             prepared, tmp_path / "out", residual_path=tmp_path / "residual.pt", eval_candidates=2, shard=1, shards=50)
     assert summary["complete"] and summary["completed_episodes"] == 2
-    assert loaded[0][3] == 10
+    assert loaded[0][3:] == (10, 12, 8)
     settings = json.loads((tmp_path / "out" / "settings" / "shard_1.json").read_text())
     assert settings["config"]["video_exec_step"] == 10 and settings["config"]["protocol"]["video_exec_step"] == 10
+    assert (settings["config"]["video_steps"], settings["config"]["action_steps"]) == (12, 8)
+    assert (settings["config"]["protocol"]["video_steps"], settings["config"]["protocol"]["action_steps"]) == (12, 8)
     assert settings["rl"]["video_exec_step"] == 10 and settings["eval_candidates"] == 2
+    assert (settings["rl"]["video_steps"], settings["rl"]["action_steps"]) == (12, 8)
     assert [entry["episode_index"] for entry in settings["episode_plan"]] == [1, 51]
 
 

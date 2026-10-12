@@ -81,6 +81,8 @@ def test_eval_config_round_trip_and_shard_validation():
     {"seed": -1}, {"checkpoint_step": 1001}, {"task_ids": (0, 0)}, {"task_ids": ()},
     {"shard": 1}, {"shard": -1, "shards": 2}, {"shards": 0},
     {"video_exec_step": 0}, {"video_exec_step": 21}, {"video_exec_step": -2}, {"video_exec_step": 10.0},
+    {"video_steps": 0}, {"video_steps": 51}, {"video_steps": 20.0}, {"action_steps": 0}, {"action_steps": 51},
+    {"video_steps": 6, "video_exec_step": 10},
 ])
 def test_invalid_config(changes):
     with pytest.raises(ValueError):
@@ -97,6 +99,20 @@ def test_video_exec_step_defaults_to_full_video_and_is_recorded_when_set():
     assert eval_config_from_dict(EvalConfig(video_exec_step=10).to_dict()).video_exec_step == 10
     assert EvalConfig(video_exec_step=20).validate().protocol()["video_exec_step"] == 20
     assert EvalConfig(video_exec_step=1).validate().protocol()["video_exec_step"] == 1
+
+
+def test_sampler_steps_default_to_released_values_and_are_recorded_when_set():
+    default = EvalConfig().protocol()
+    assert (default["video_steps"], default["action_steps"]) == (20, 50)
+    custom = EvalConfig(video_steps=6, action_steps=8, video_exec_step=6).validate().protocol()
+    assert (custom["video_steps"], custom["action_steps"], custom["video_exec_step"]) == (6, 8, 6)
+    keys = ("video_steps", "action_steps", "video_exec_step")
+    strip = lambda protocol: {key: value for key, value in protocol.items() if key not in keys}
+    assert strip(custom) == strip(default) and custom != default
+    restored = eval_config_from_dict(EvalConfig(video_steps=6, action_steps=8).to_dict())
+    assert (restored.video_steps, restored.action_steps) == (6, 8)
+    assert EvalConfig(video_steps=1, action_steps=1, video_exec_step=1).validate()
+    assert EvalConfig(video_steps=50, action_steps=50, video_exec_step=50).validate()
 
 
 def observation():
@@ -367,11 +383,13 @@ def test_shard_evaluation_persists_resumes_and_never_touches_wandb(tmp_path, mon
         f"episode_{index:03d}.json" for index in (0, 1, 4, 5, 8, 9, 12, 13, 16, 17)]
     assert module.read_json(output / "episodes/task_04/episode_000.json")["video"] == "videos/task_04.mp4"
     assert sys.modules["wandb"] is None
-    assert loaded and all(args[3] == -1 for args in loaded)
-    early = module.evaluate(replace(cfg, shard=2, video_exec_step=10), prepared_path, output, "test-run")
-    assert early["complete"] and loaded[-1][3] == 10 and len(visited) == 30
+    assert loaded and all(args[3:] == (-1, 20, 50) for args in loaded)
+    early = module.evaluate(replace(cfg, shard=2, video_exec_step=10, video_steps=12, action_steps=8), prepared_path, output, "test-run")
+    assert early["complete"] and loaded[-1][3:] == (10, 12, 8) and len(visited) == 30
     recorded = module.read_json(output / "settings" / "shard_2.json")["config"]
     assert recorded["video_exec_step"] == 10 and recorded["protocol"]["video_exec_step"] == 10
+    assert (recorded["video_steps"], recorded["action_steps"]) == (12, 8)
+    assert (recorded["protocol"]["video_steps"], recorded["protocol"]["action_steps"]) == (12, 8)
 
 
 def test_non_boolean_success_is_not_counted_as_success():

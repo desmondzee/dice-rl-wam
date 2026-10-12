@@ -25,10 +25,12 @@ def validate_name(name):
     return name
 
 
-def validate_video_exec_step(value):
-    if type(value) is not int or not (value == -1 or 1 <= value <= 20):
-        raise ValueError("video_exec_step must be -1 or an integer in [1, 20]")
-    return value
+def validate_sampler_steps(video_steps, action_steps, video_exec_step):
+    for name, value in (("video_steps", video_steps), ("action_steps", action_steps)):
+        if type(value) is not int or not 1 <= value <= 50:
+            raise ValueError(f"{name} must be an integer in [1, 50]")
+    if type(video_exec_step) is not int or not (video_exec_step == -1 or 1 <= video_exec_step <= video_steps):
+        raise ValueError("video_exec_step must be -1 or an integer in [1, video_steps]")
 
 
 @dataclass(frozen=True)
@@ -43,12 +45,14 @@ class EvalConfig:
     shard: int = 0
     shards: int = 1
     video_exec_step: int = -1
+    video_steps: int = 20
+    action_steps: int = 50
 
     def validate(self):
         validate_name(self.source_run)
         if self.stage not in ("smoke", "eval", "heldout"):
             raise ValueError("Evaluation stage must be smoke, eval, or heldout")
-        validate_video_exec_step(self.video_exec_step)
+        validate_sampler_steps(self.video_steps, self.action_steps, self.video_exec_step)
         if not self.task_ids or any(task not in TASK_IDS for task in self.task_ids) or len(set(self.task_ids)) != len(self.task_ids):
             raise ValueError("task_ids must be distinct LIBERO-10 task ids")
         if type(self.shards) is not int or type(self.shard) is not int or not 0 <= self.shard < self.shards:
@@ -95,8 +99,8 @@ class EvalConfig:
             "resolution": [128, 128],
             "frame_chunk_size": 4,
             "action_per_frame": 4,
-            "video_steps": 20,
-            "action_steps": 50,
+            "video_steps": self.video_steps,
+            "action_steps": self.action_steps,
             "video_exec_step": self.video_exec_step,
             "video_guidance": 5.0,
             "action_guidance": 1.0,

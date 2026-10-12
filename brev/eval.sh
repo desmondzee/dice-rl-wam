@@ -4,27 +4,38 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] || { echo "copy brev/env.example to brev/env.sh and fill it in" >&2; exit 1; }
 source "$ENV_FILE"
-USAGE="usage: eval.sh <sft|run-name> <step> <candidates> <shard> <shards> [--video-exec-step E] [--residual-input z|base|z_base] [--task 9] [--no-tmux]"
+USAGE="usage: eval.sh <sft|run-name> <step> <candidates> <shard> <shards> [--video-steps V] [--video-exec-step E] [--action-steps A] [--residual-input z|base|z_base] [--task 9] [--no-tmux]"
 RUN="${1:?$USAGE}"
 STEP="${2:?$USAGE}"
 K="${3:?$USAGE}"
 SHARD="${4:?$USAGE}"
 SHARDS="${5:?$USAGE}"
 shift 5
+VIDEO_STEPS=20
 VIDEO_EXEC_STEP=-1
+ACTION_STEPS=50
 RESIDUAL_INPUT=z
 TASK=9
 NO_TMUX=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --video-steps) VIDEO_STEPS="$2"; shift 2 ;;
     --video-exec-step) VIDEO_EXEC_STEP="$2"; shift 2 ;;
+    --action-steps) ACTION_STEPS="$2"; shift 2 ;;
     --residual-input) RESIDUAL_INPUT="$2"; shift 2 ;;
     --task) TASK="$2"; shift 2 ;;
     --no-tmux) NO_TMUX=1; shift ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
-case "$VIDEO_EXEC_STEP" in -1|[1-9]|1[0-9]|20) ;; *) echo "--video-exec-step must be -1 or in [1, 20]" >&2; exit 2 ;; esac
+for STEPS in "$VIDEO_STEPS" "$ACTION_STEPS"; do
+  case "$STEPS" in [1-9]|[1-4][0-9]|50) ;; *) echo "--video-steps and --action-steps must be in [1, 50]" >&2; exit 2 ;; esac
+done
+case "$VIDEO_EXEC_STEP" in
+  -1) ;;
+  [1-9]|[1-4][0-9]|50) [ "$VIDEO_EXEC_STEP" -le "$VIDEO_STEPS" ] || { echo "--video-exec-step must be -1 or in [1, --video-steps]" >&2; exit 2; } ;;
+  *) echo "--video-exec-step must be -1 or in [1, --video-steps]" >&2; exit 2 ;;
+esac
 : "${DICE_REPO:=$(cd "$HERE/.." && pwd)}"
 : "${DICE_DATA:=/ephemeral/dice}"
 PY="$DICE_DATA/lerobot/.venv/bin/python"
@@ -32,7 +43,7 @@ PREPARED="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(
 STEP6="$(printf '%06d' "$STEP")"
 TT="$(printf '%02d' "$TASK")"
 SUFFIX=""
-[ "$VIDEO_EXEC_STEP" = "-1" ] || SUFFIX="-exec$VIDEO_EXEC_STEP"
+[ "$VIDEO_STEPS" = 20 ] && [ "$VIDEO_EXEC_STEP" = -1 ] && [ "$ACTION_STEPS" = 50 ] || SUFFIX="-v${VIDEO_STEPS}e${VIDEO_EXEC_STEP}a${ACTION_STEPS}"
 if [ "$RUN" = "sft" ]; then
   POLICY="sft-step$STEP6$SUFFIX"
   [ -f "$DICE_DATA/sft/libero30-sft/checkpoints/step_$STEP6/norm_stats.json" ] || { echo "missing SFT checkpoint step_$STEP6 under $DICE_DATA/sft" >&2; exit 1; }
@@ -44,10 +55,10 @@ fi
 OUT="$DICE_DATA/heldout/$POLICY/task_$TT"
 mkdir -p "$OUT"
 if [ "$RUN" = "sft" ]; then
-  CONFIG="$(python3 -c 'import json,sys; print(json.dumps({"source_run": "libero30-sft", "checkpoint_step": int(sys.argv[1]), "stage": "heldout", "task_ids": [int(sys.argv[2])], "shard": int(sys.argv[3]), "shards": int(sys.argv[4]), "video_exec_step": int(sys.argv[5])}))' "$STEP" "$TASK" "$SHARD" "$SHARDS" "$VIDEO_EXEC_STEP")"
+  CONFIG="$(python3 -c 'import json,sys; print(json.dumps({"source_run": "libero30-sft", "checkpoint_step": int(sys.argv[1]), "stage": "heldout", "task_ids": [int(sys.argv[2])], "shard": int(sys.argv[3]), "shards": int(sys.argv[4]), "video_exec_step": int(sys.argv[5]), "video_steps": int(sys.argv[6]), "action_steps": int(sys.argv[7])}))' "$STEP" "$TASK" "$SHARD" "$SHARDS" "$VIDEO_EXEC_STEP" "$VIDEO_STEPS" "$ACTION_STEPS")"
   ARGS=(-m script.lingbot_eval run --config-json "$CONFIG" --prepared-path "$PREPARED" --output-dir "$OUT" --run-name "$POLICY-task$TT")
 else
-  CONFIG="$(python3 -c 'import json,sys; print(json.dumps({"task_ids": [int(sys.argv[1])], "residual_input": sys.argv[2], "video_exec_step": int(sys.argv[3])}))' "$TASK" "$RESIDUAL_INPUT" "$VIDEO_EXEC_STEP")"
+  CONFIG="$(python3 -c 'import json,sys; print(json.dumps({"task_ids": [int(sys.argv[1])], "residual_input": sys.argv[2], "video_exec_step": int(sys.argv[3]), "video_steps": int(sys.argv[4]), "action_steps": int(sys.argv[5])}))' "$TASK" "$RESIDUAL_INPUT" "$VIDEO_EXEC_STEP" "$VIDEO_STEPS" "$ACTION_STEPS")"
   ARGS=(-m script.lingbot_rl_train eval --config-json "$CONFIG" --prepared-path "$PREPARED" --output-dir "$OUT" --residual-path "$RESIDUAL" --eval-candidates "$K" --shard "$SHARD" --shards "$SHARDS")
 fi
 [ -f "$OUT/settings/shard_$SHARD.json" ] && ARGS+=(--resume)
