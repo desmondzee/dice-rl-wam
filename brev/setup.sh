@@ -31,6 +31,7 @@ git -C "$LEROBOT" checkout "$REVISION"
 uv sync --index-url https://pypi.org/simple --project "$LEROBOT" --python 3.12 --locked --no-default-groups --extra lingbot_va --extra libero --extra evaluation --no-editable
 uv export --index-url https://pypi.org/simple --project "$LEROBOT" --locked --no-default-groups --extra lingbot_va --extra libero --extra evaluation --no-emit-project --no-hashes --output-file "$DICE_DATA/lingbot-eval-deps.txt"
 uv pip install --index-url https://pypi.org/simple --python "$PY" --constraint "$DICE_DATA/lingbot-eval-deps.txt" --exclude-newer 2026-09-05T00:00:00Z modal==1.1.4
+[ -z "${DICE_TORCH_INDEX:-}" ] || uv pip install --python "$PY" --index-url "$DICE_TORCH_INDEX" --reinstall-package torch --reinstall-package torchvision "torch==$("$PY" -c "import torch; print(torch.__version__.split('+')[0])")" "torchvision==$("$PY" -c "import torchvision; print(torchvision.__version__.split('+')[0])")"
 [ "${DICE_NO_SYNC:-0}" = "1" ] || for profile in "$MODAL_SFT_PROFILE" "$MODAL_PROFILE"; do
   grep -q "^\[$profile\]" "$HOME/.modal.toml" 2>/dev/null || { echo "run: $MODAL token new --profile $profile --no-verify" >&2; exit 1; }
 done
