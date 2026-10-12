@@ -700,7 +700,7 @@ def test_featurize_experts_pools_published_latents(tmp_path):
             raise AssertionError("RGB path should not run when published latents exist")
 
         def extract_critic_state_from_latent(self, latent, batch):
-            assert latent.shape[2] == 1
+            assert latent.shape[2] in (1, 4)
             return torch.full((1, 3072), float(latent[0, 0, 0, 0, 0]))
 
     latents = torch.zeros(1, 48, 8, 8, 16)
@@ -712,6 +712,28 @@ def test_featurize_experts_pools_published_latents(tmp_path):
     assert len(rows) == 2
     assert float(rows[0]["s"][0]) == 0.0
     assert float(rows[1]["s"][0]) == 7.0
+
+
+def test_expert_rows_pool_the_true_plan_frames(tmp_path):
+    from script.lingbot_rl_data import featurize_experts
+    calls = []
+
+    class StubPolicy:
+        config = type("C", (), {"device": "cpu"})()
+
+        def reset(self):
+            return None
+
+        def extract_critic_state_from_latent(self, latent, batch):
+            calls.append(tuple(latent.shape))
+            return torch.full((1, STATE_DIM), float(latent[0, 0, 0, 0, 0]))
+
+    latents = torch.arange(10, dtype=torch.float32).reshape(1, 1, 10, 1, 1).expand(1, 48, 10, 2, 2).clone()
+    episode = {"actions": np.zeros((36, USED_DOF), np.float32), "task": "t", "task_id": 9, "latents": latents, "success": True}
+    rows = featurize_experts(StubPolicy(), [episode], None, _eval_normalization(), tmp_path / "cache.pt")
+    assert [row["s"][0] for row in rows] == [0.0, 3.0, 7.0]
+    assert [row["plan_pool"][0] for row in rows] == [0.0, 4.0, 8.0]
+    assert (1, 48, 4, 2, 2) in calls
 
 
 def _rewrite_numpy_core_pickle_global(path):

@@ -10,7 +10,7 @@ from script.lingbot_rl_config import RLConfig
 from script.lingbot_rl_model import ACTION_DIM, HORIZON, USED_DOF, mask_unused_dof
 from script.lingbot_rl_policy import env_action_count
 
-EXPERT_RECIPE = "dice-rl-expert-v1"
+EXPERT_RECIPE = "dice-rl-expert-v2"
 EPS = 1e-6
 
 
@@ -98,10 +98,16 @@ def _episode_rows(policy, episode, norm):
                 policy.extract_critic_state_from_latent(
                     latents[:, :, index:index + 1], {"task": [episode["task"]]})
             )
+            start = index if first else index + 1
+            plan_frames = torch.clamp(torch.arange(start, start + 4), max=max(frame_count - 1, 0))
+            plan_pool = _tensor_state(policy.extract_critic_state_from_latent(
+                latents[:, :, plan_frames], {"task": [episode["task"]]}))
         else:
             state = _tensor_state(policy.extract_critic_state(_critic_batch(episode, offset, device)))
+            plan_pool = state.copy()
         rows.append({
             "s": state,
+            "plan_pool": plan_pool,
             "z": np.zeros((HORIZON, ACTION_DIM), dtype=np.float32),
             "a_base": chunk.copy(),
             "a": chunk.copy(),
