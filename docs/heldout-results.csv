@@ -27,3 +27,4 @@ task,policy,candidates,episodes,successes,success_rate,ci95_halfwidth,mean_steps
 9,"RL (s,a_base) eps=-0.3 online, 480k",1,100,73,0.73,0.087,356.1,33,40,40,9,27,19,4,result/heldout/dice-t9-base-eps03-step480000-k1/task_09
 9,"SFT step 600, 5 video / 10 action steps",1,100,60,0.60,0.096,399.7,28,32,33,15,15,30,5,result/heldout/sft-step000600-v5e-1a10/task_09
 9,"SFT step 600, 5 video steps executed at 4 / 10 action steps",1,100,39,0.39,0.096,449.0,20,19,25,28,8,23,19,result/heldout/sft-step000600-v5e4a10/task_09
+0,"SFT step 600, 5 video / 10 action steps",1,100,75,0.75,0.085,364.0,35,40,24,12,28,19,3,result/heldout/sft-step000600-v5e-1a10/task_00

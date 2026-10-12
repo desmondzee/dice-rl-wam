@@ -158,6 +158,7 @@ Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 48
 | task | SFT | residual only (best-of-1) | residual + selection (best-of-4) | checkpoint |
 |---|---|---|---|---|
 | 0 | 63 | 81 (+18) | 90 (+9 more) | 660k |
+| 0 | SFT, best-of-1, 5 / 10 sampler (GB10) | 75 | 0.75 | 364 | 24 / 12 | 28 · 19 · 3 |
 | 9 | 42 | 49 (+7) | 63 (+14 more) | 400k, (s, z) |
 | 9 | 42 | 63 (+21) | 75 (+12 more) | 660k, (s, a_base) |
 | 9 | 42 | 73 (+31) | 73 (+0 more) | 480k, (s, a_base), ε = −0.3 online |
@@ -165,6 +166,6 @@ Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 48
 | 9 | SFT, best-of-1, 5 steps executed at 4 / 10 (GB10) | 39 | 0.39 | 449 | 25 / 28 | 8 · 23 · 19 |
 | 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
 
-Sampler re-bench (2026-10-12, GB10, torch 2.11.0+cu130): the unchanged SFT prior on task 9 at the authors' default 5 video / 10 action steps scores 60 / 100 against 42 / 100 at the released 20 / 50 LIBERO sampler on the same 100 episodes (paired 33 gained / 15 lost; 15 states succeed on both seeds, 30 on one, 5 on neither). Stopping the 5-step schedule after its fourth pass, which leaves the history cache at noise level 0.77, scores 39 / 100. The plan-selection runs and all later evaluations use 5 / 10.
+Sampler re-bench (2026-10-12, GB10, torch 2.11.0+cu130): the unchanged SFT prior on task 9 at the authors' default 5 video / 10 action steps scores 60 / 100 against 42 / 100 at the released 20 / 50 LIBERO sampler on the same 100 episodes (paired 33 gained / 15 lost; 15 states succeed on both seeds, 30 on one, 5 on neither). Stopping the 5-step schedule after its fourth pass, which leaves the history cache at noise level 0.77, scores 39 / 100. Task 0 at 5 / 10 scores 75 / 100 against 63 / 100 at 20 / 50 (paired 24 gained / 12 lost). The plan-selection runs and all later evaluations use 5 / 10.
 
 Selection by the trained critic contributed on all three tasks (+9, +14, +7); the residual's own contribution ranged from +18 to −5 and ordered the tasks the same way the train-eval ΔV did.
