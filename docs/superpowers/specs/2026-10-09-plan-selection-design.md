@@ -59,16 +59,22 @@ with the value trained by regression onto the TD critic in the manner of DSRL's 
 
 ## 4. Throughput
 
-The GB10 is memory-bound on this model: a video pass streams the 10 GB of bf16 transformer weights at about
-240 GB/s whatever the batch, so a CFG batch-2 pass takes about 0.35 s at 55 W with no power cap. Two
-changes raise the arithmetic intensity; both are in v1:
+Measured on the GB10 (profile of one video pass, 2026-10-13): a CFG batch-2 pass takes 175 ms of which
+78 ms is bf16 GEMM time (cuBLAS picks `cutlass_80` kernels; about 70% of the 100 TFLOPS the part measures
+on large GEMMs), the rest launch gaps and elementwise work; at batch 8 the pass takes 606 ms with 392 ms of
+GEMMs. The 5B transformer over 272 tokens per row is compute-bound, not weight-bandwidth-bound, so cost
+scales almost linearly with the number of plans and batching buys only the launch amortisation (about
+10%: 6.7 s per chunk batched against 7.4 s looped at M = 4, 1.9 s at M = 1). Both batched paths are kept
+because they are no more complex than the loop:
 
-1. **M plans in one pass.** The five video passes run at batch 2M = 8 (M conditional rows then M
-   unconditional rows, the port's CFG order), reading the weights once for all plans. Expected cost about
-   1.5× a batch-2 pass, so the four plans cost about 0.4× of four looped passes.
+1. **M plans in one pass.** The five video passes and the clean write pass run at batch 2M = 8 (M
+   conditional rows then M unconditional rows, the port's CFG order).
 2. **M × K action decode in one pass.** The ten action steps run at batch M × K = 16 against a cache whose
    rows are each plan's conditional rows repeated K times (the existing `expand_conditional_kv` pattern,
-   per plan), reading the video cache once for all candidates.
+   per plan).
+
+Batched and looped sampling agree bit for bit at M = 1 and differ at M > 1 only by batch-dependent bf16
+rounding (two ulps on the first pass, amplified through the sampler); both are valid samples of the prior.
 
 Everything else stays: Torch 2.11.0+cu130 (sm_121 kernels, installed by `brev/setup.sh` through
 `DICE_TORCH_INDEX`), `F.scaled_dot_product_attention` in bf16 (`attn_mode: torch`), no FlashAttention
@@ -241,10 +247,9 @@ regression error, else stop and diagnose before spending the second half.
 
 ## 13. Costs
 
-Per chunk at M = 4: 5 video passes at batch 8 plus one action decode at batch 16, against 20 passes at
-batch 2 plus one decode at batch 4 over 50 steps today. Collection should run at or below the 20 / 50
-smoke's 0.64 s per env step; the P0 smoke pins it. 320k env steps ≈ 2 to 2.5 days per run. Evaluation at
-M = 4 is a few times the 65 s per episode of M = 1, roughly 3 to 5 h per 100 episodes.
+Measured in the 1,100-step smoke on Jarvis: 0.49 to 0.65 s per env step at M = 4 (0.23 at M = 1), peak
+GPU memory 38.6 GB, so 320k env steps ≈ 45 to 55 h per run. Evaluation at M = 4 is about 3.5× the 65 s
+per episode of M = 1, roughly 6 h per 100 episodes.
 
 ## 14. Risks
 
