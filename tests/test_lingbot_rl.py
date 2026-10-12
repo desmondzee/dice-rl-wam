@@ -1525,79 +1525,53 @@ def _reference_infer(policy, video_noise, action_noise):
 def test_single_plan_infer_reproduces_baseline_bit_for_bit():
     policy = _mock_policy()
     torch.manual_seed(1)
-    actions, latents, z, video, pools, index = policy._infer(None, 4, k=4)
+    actions, latents, z, video = policy._infer(None, 4, k=4)
     torch.manual_seed(1)
     video_noise = torch.randn(1, 48, 4, 2, 4)
     action_noise = torch.randn(4, ACTION_DIM, 4, 4, 1)
     ref_actions, ref_latents = _reference_infer(_mock_policy(), video_noise, action_noise)
-    assert pools is None and index == 0
     assert torch.equal(video, video_noise) and torch.equal(z, action_noise)
     assert torch.equal(actions, ref_actions) and torch.equal(latents, ref_latents)
-    given = _mock_policy()._infer(
-        None, 4, video_noise=video_noise, action_noise=action_noise, k=4, plans=1, rank_step=None)
+    given = _mock_policy()._infer(None, 4, video_noise=video_noise, action_noise=action_noise, k=4)
     assert torch.equal(given[0], ref_actions) and torch.equal(given[1], ref_latents)
 
 
-@pytest.mark.parametrize("rank_step", [2, 5])
-def test_two_plans_pool_rank_and_write_cache_once(rank_step):
+def test_decode_candidates_keeps_its_keys_on_the_mocked_policy():
     policy = _mock_policy()
     policy._begin_chunk = lambda batch: (False, None, 4, torch.zeros(1, 48, 1, 2, 4))
     policy._pool_from_latent = lambda latent: torch.zeros(1, STATE_DIM)
-    torch.manual_seed(2)
-    video_noise = torch.randn(2, 48, 4, 2, 4)
-    action_noise = torch.randn(4, ACTION_DIM, 4, 4, 1)
-    seen = {}
-
-    def rank_fn(pools):
-        seen["pools"] = pools
-        return 1
-
-    decoded = policy.decode_candidates(
-        {"task": ["t"]}, k=4, video_noise=video_noise, action_noise=action_noise, plans=2, rank_step=rank_step,
-        rank_fn=rank_fn)
-    assert decoded["plan_pools"].shape == (2, STATE_DIM) and seen["pools"] is decoded["plan_pools"]
-    assert not torch.equal(decoded["plan_pools"][0], decoded["plan_pools"][1])
-    assert decoded["plan_index"] == 1
+    decoded = policy.decode_candidates({"task": ["t"]}, k=4)
+    assert set(decoded) == {"s", "z", "a_base", "video_noise", "latents", "first_chunk"}
+    assert decoded["a_base"].shape == decoded["z"].shape == (4, HORIZON, ACTION_DIM)
+    assert decoded["latents"].shape == decoded["video_noise"].shape == (1, 48, 4, 2, 4)
+    assert decoded["first_chunk"] is False and policy._exec_step == 0
     assert [call for call in policy.transformer.calls if call == (False, 1)] == [(False, 1)]
-    actions, latents, *_ = _mock_policy()._infer(None, 4, video_noise=video_noise[1:2], action_noise=action_noise, k=4)
-    assert torch.equal(decoded["a_base"], model_to_mlp(actions).float())
-    assert torch.equal(decoded["latents"], latents)
-    plain = _mock_policy()
-    plain._begin_chunk = policy._begin_chunk
-    plain._pool_from_latent = policy._pool_from_latent
-    single = plain.decode_candidates({"task": ["t"]}, k=4)
-    assert single["plan_pools"] is None and single["plan_index"] == 0
-
-
-def test_rank_step_beyond_exec_step_raises():
-    policy = _mock_policy()
-    with pytest.raises(ValueError, match="rank_step"):
-        policy._infer(None, 4, k=4, plans=2, rank_step=6, exec_step=4)
-    with pytest.raises(ValueError, match="rank_step"):
-        policy._infer(None, 4, k=4, plans=1, rank_step=0)
-    with pytest.raises(ValueError, match="rank_steps"):
-        policy.decode_plans({"task": ["t"]}, plans=2, exec_step=4, k=3, rank_steps=(6,))
 
 
 def test_decode_plans_shapes_and_restores_policy_state():
     policy = _mock_policy()
     policy._begin_chunk = lambda batch: (False, None, 4, torch.zeros(1, 48, 1, 2, 4))
     policy._pool_from_latent = lambda latent: torch.zeros(1, STATE_DIM)
+    with pytest.raises(ValueError, match="exec_step"):
+        policy.decode_plans({"task": ["t"]}, plans=2, exec_step=6, k=3)
     before = policy._snapshot_chunk_state()
-    out = policy.decode_plans({"task": ["t"]}, plans=2, exec_step=4, k=3, rank_steps=(2, 4))
+    out = policy.decode_plans({"task": ["t"]}, plans=2, exec_step=4, k=3)
+    assert set(out) == {"s", "z", "a_base", "plan_pools", "video_noise", "latents", "first_chunk", "exec_step"}
     assert out["a_base"].shape == (2, 3, HORIZON, ACTION_DIM)
     assert out["z"].shape == (3, HORIZON, ACTION_DIM)
     assert out["plan_pools"].shape == (2, STATE_DIM)
     assert out["latents"].shape == (2, 48, 4, 2, 4)
     assert out["video_noise"].shape == (2, 48, 4, 2, 4)
     assert out["exec_step"] == 4 and out["first_chunk"] is False
-    assert set(out["rank_a_base"]) == set(out["rank_pools"]) == {2, 4}
-    assert out["rank_a_base"][2].shape == (2, 3, HORIZON, ACTION_DIM)
-    assert out["rank_pools"][2].shape == (2, STATE_DIM)
-    assert torch.equal(out["rank_a_base"][4], out["a_base"])
-    assert torch.equal(out["rank_pools"][4], out["plan_pools"])
-    assert not torch.equal(out["rank_a_base"][2], out["a_base"])
+    assert not torch.equal(out["plan_pools"][0], out["plan_pools"][1])
     assert torch.count_nonzero(out["a_base"][..., USED_DOF:]) == 0
+    for m in range(2):
+        single = _mock_policy()
+        single.config.video_exec_step = 4
+        actions, latents, *_ = single._infer(
+            None, 4, video_noise=out["video_noise"][m:m + 1], action_noise=mlp_to_model(out["z"]), k=3)
+        assert torch.equal(out["a_base"][m], model_to_mlp(actions).float())
+        assert torch.equal(out["latents"][m:m + 1], latents)
     after = policy._snapshot_chunk_state()
     assert after["attrs"] == before["attrs"]
     for old, new in zip(before["kv"], after["kv"]):

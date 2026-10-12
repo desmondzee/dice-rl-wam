@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run probes P0–P3 of the plan-selection design on the two GB10 units so that E, k and the rejected-plan route are decided from measurements, with every code path they need built once and reused by the full implementation.
+**Goal:** Run probes P0–P2 of the plan-selection design on the two GB10 units so that E is chosen and the across-plan spread is measured, with every code path they need built once and reused by the full implementation.
 
-**Architecture:** A no-sudo, aarch64 setup path for the Brev scripts; a local held-out eval runner with a `video_exec_step` option; the M-plan sampler inside the residual policy (M video noises to step k against one history cache, step-k token pooling, continuation of the chosen plan to E, K decodes per plan) plus a probe script that drives it over train-eval states.
+**Architecture:** A no-sudo, aarch64 setup path for the Brev scripts; a local held-out eval runner with a `video_exec_step` option; the M-plan sampler inside the residual policy (M video noises each fully denoised to E against one history cache, final-step token pooling, K decodes per plan).
 
 **Tech Stack:** LeRobot eval environment (Torch 2.11 cu128 aarch64 wheels from the pinned lock), MuJoCo EGL, uv, tmux, rsync over the Brev tunnel.
 
@@ -50,24 +50,11 @@
 - [ ] Step 4: `brev/eval.sh`: assemble the config JSON with `stage: heldout`, `task_ids`, `shard`, `shards`, `video_exec_step`; call `script.lingbot_eval run` for `sft` and `script.lingbot_rl_train eval --residual-path ... --eval-candidates K --shard --shards` for a run; write `summary/shard_N.json`.
 - [ ] Step 5: tests green; `bash -n brev/eval.sh`; commit.
 
-### Task 3: M-plan sampler and the probe script
-
-**Files:**
-- Modify: `script/lingbot_rl_policy.py` (`_infer(..., m=1, rank_step=None, exec_step=None, rank_fn=None)`: loop M video noises through steps 1..k, capture the pre-projection pool at step k per plan, choose by `rank_fn` or the first plan, continue the chosen plan to E, decode K candidates; `decode_candidates` returns `plan_pools`, `plan_index`, and per-plan candidates when asked)
-- Create: `script/lingbot_rl_plan_probe.py` (over N train-eval states: sample M plans at E, decode base actions, write per-state across-plan and within-plan spreads, current-Q values of each plan's base actions, and for k ∈ {3, 6, 10}: distance between actions decoded at step k and at E for the same noise, plus Q agreement; `summary.json` and `rows.csv`)
-- Test: `tests/test_lingbot_rl.py` (on the mocked transformer: M = 1 reproduces today's actions bit-for-bit; M = 2 returns two pools and one chosen index; rank_step beyond exec_step raises)
-
-- [ ] Step 1: write the three failing tests against the mocked policy used by the existing tests.
-- [ ] Step 2: implement `_infer` changes; the cache must not be written by rejected plans (assert `update_cache` only on the final step of the chosen plan).
-- [ ] Step 3: tests green; `compileall`; commit.
-- [ ] Step 4: write `script/lingbot_rl_plan_probe.py` with CLI `--prepared-path --dataset-root --task 9 --states 200 --plans 4 --exec-step E --rank-steps 3,6,10 --residual-path (optional) --out`.
-- [ ] Step 5: run it for 3 states on a GB10 as a smoke; commit.
-
-### Task 4: Run the probes
+### Task 3: Run the probes
 
 - [ ] P0 on Watson (Task 1, Step 6): s/env-step and GPU utilisation at 20 video steps.
 - [ ] P1: `brev/eval.sh sft 600 1 0 1 --video-exec-step {20,10,6,3}` on task 9, 100 episodes each; cuts 20 and 10 on Watson, 6 and 3 on Jarvis, in tmux; pull each `heldout/` directory to `result/heldout/sft-step000600-exec{E}/task_09` with rsync; paired comparison against the 20-step result on the same box; choose E per the spec rule (42 ± 10 band of the GB10's own 20-step run).
-- [ ] P2 and P3 on Jarvis after Task 3: `lingbot_rl_plan_probe.py` with 200 states, M = 4, at E; summarise across-plan vs within-plan spread and the step-k agreement table; choose k and the rejected-plan route.
+- [ ] P2 on Jarvis: `decode_plans` over 200 train-eval states, M = 4, at E; summarise across-plan vs within-plan spread of the decoded base actions.
 - [ ] Record all numbers in `docs/heldout-results.md` (new section "Probes for plan-level selection") and in the spec's decisions table; commit.
 
 ## Decisions carried into the run (from the spec)
