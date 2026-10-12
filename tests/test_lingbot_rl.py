@@ -437,6 +437,33 @@ def test_rlpd_mix_respects_scheduled_ratio():
     assert abs(sum(counts) / len(counts) - 0.5) < 0.15
 
 
+def test_plan_rows_default_finalize_and_sample_with_one_shape():
+    buffer = ChunkReplay(plans=3)
+    first = _replay_row(0.0, 0.0)
+    first["plan_pool"] = np.full(STATE_DIM, 1.0, np.float32)
+    buffer.add_online(first)
+    second = _replay_row(1.0, 1.0)
+    second["plan_pool"] = np.full(STATE_DIM, 2.0, np.float32)
+    second["plan_pools_all"] = np.stack([np.full(STATE_DIM, v, np.float32) for v in (2.0, 5.0, 7.0)])
+    second["plan_index"] = 0
+    buffer.add_online(second)
+    buffer.finalize_episode()
+    rows = buffer.rows()
+    assert rows[0]["plan_pools_all"].shape == (3, STATE_DIM) and float(rows[0]["plan_pools_all"][2, 0]) == 1.0
+    assert np.array_equal(rows[0]["plan_a_base_all"][1], rows[0]["a_base_all"])
+    assert float(rows[0]["plan_pool_next"][0]) == 2.0 and float(rows[1]["plan_pool_next"][0]) == 2.0
+    batch = buffer.sample(2, 0.0)
+    assert batch["plan_pools_all"].shape == (2, 3, STATE_DIM) and batch["plan_index"].dtype == torch.long
+    assert batch["plan_a_base_all"].shape == (2, 3, K_CANDIDATES, HORIZON, ACTION_DIM)
+    legacy = ChunkReplay(plans=3)
+    payload = buffer.state_dict()
+    for row in payload["data"]:
+        for key in ("plan_pool", "plan_pools_all", "plan_index", "plan_a_base_all", "plan_pool_next"):
+            row.pop(key)
+    legacy.load_state_dict(payload)
+    assert legacy.sample(2, 0.0)["plan_pools_all"].shape == (2, 3, STATE_DIM)
+
+
 def _eval_normalization():
     return {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
 

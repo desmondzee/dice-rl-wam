@@ -1,11 +1,12 @@
 import numpy as np
 import torch
 
-from script.lingbot_rl_model import GAMMA, K_CANDIDATES, N_STEP_CHUNKS, REPLAY_CAPACITY
+from script.lingbot_rl_model import GAMMA, K_CANDIDATES, N_STEP_CHUNKS, REPLAY_CAPACITY, STATE_DIM
 
+PLAN_FLOAT_KEYS = ("plan_pool", "plan_pools_all", "plan_a_base_all", "plan_pool_next")
 FLOAT_KEYS = (
     "s", "z", "a_base", "a", "reward", "done", "s_next", "a_next", "n_steps", "is_expert",
-    "z_all", "a_base_all", "z_next_all", "a_base_next_all", "mc_return",
+    "z_all", "a_base_all", "z_next_all", "a_base_next_all", "mc_return", *PLAN_FLOAT_KEYS,
 )
 
 
@@ -20,14 +21,15 @@ def _host_float(value):
 KEYS = (
     "s", "z", "a_base", "a", "reward", "done", "s_next", "a_next",
     "n_steps", "is_expert", "task_id", "n_env_actions",
-    "z_all", "a_base_all", "z_next_all", "a_base_next_all", "mc_return",
+    "z_all", "a_base_all", "z_next_all", "a_base_next_all", "mc_return", *PLAN_FLOAT_KEYS, "plan_index",
 )
 
 
 class ChunkReplay:
-    def __init__(self, capacity=REPLAY_CAPACITY, device="cpu"):
+    def __init__(self, capacity=REPLAY_CAPACITY, device="cpu", plans=1):
         self.capacity = capacity
         self.device = device
+        self.plans = int(plans)
         self._data = []
         self._episode_start = 0
 
@@ -42,6 +44,18 @@ class ChunkReplay:
         if extra > 0:
             self._data = self._data[extra:]
             self._episode_start = max(0, self._episode_start - extra)
+
+    def _plan_defaults(self, stored):
+        stored.setdefault("plan_pool", np.zeros(STATE_DIM, np.float32))
+        stored.setdefault("plan_pools_all", np.repeat(_host_float(stored["plan_pool"])[None], self.plans, axis=0))
+        stored.setdefault("plan_index", 0)
+        stored.setdefault("plan_a_base_all", np.repeat(_host_float(stored["a_base_all"])[None], self.plans, axis=0))
+        stored.setdefault("plan_pool_next", np.array(stored["plan_pool"], copy=True))
+        if _host_float(stored["plan_pools_all"]).shape[0] != self.plans or \
+                _host_float(stored["plan_a_base_all"]).shape[0] != self.plans:
+            raise ValueError(f"Rows must carry exactly {self.plans} plans")
+        stored["plan_index"] = int(stored["plan_index"])
+        return stored
 
     def _store(self, row, is_expert):
         stored = {**row, "is_expert": np.float32(is_expert)}
@@ -58,6 +72,7 @@ class ChunkReplay:
         stored.setdefault("z_next_all", np.array(stored["z_all"], copy=True))
         stored.setdefault("a_base_next_all", np.array(stored["a_base_all"], copy=True))
         stored.setdefault("mc_return", np.float32(0.0))
+        self._plan_defaults(stored)
         for key in FLOAT_KEYS:
             stored[key] = _host_float(stored[key])
         stored["task_id"] = int(stored["task_id"])
@@ -100,6 +115,7 @@ class ChunkReplay:
             row["done"] = np.float32(done_n)
             row["n_steps"] = np.float32(n_steps)
             row["s_next"] = np.array(episode[nxt]["s"], copy=True)
+            row["plan_pool_next"] = np.array(episode[nxt]["plan_pool"], copy=True)
             row["a_next"] = np.array(episode[nxt]["a"], copy=True)
             row["z_next_all"] = np.array(episode[nxt]["z_all"], copy=True)
             row["a_base_next_all"] = np.array(episode[nxt]["a_base_all"], copy=True)
@@ -132,11 +148,17 @@ class ChunkReplay:
     def state_dict(self):
         return {
             "capacity": self.capacity,
+            "plans": self.plans,
             "episode_start": self._episode_start,
             "data": self._data,
         }
 
     def load_state_dict(self, payload):
         self.capacity = payload["capacity"]
+        self.plans = int(payload.get("plans", self.plans))
         self._episode_start = payload["episode_start"]
         self._data = payload["data"]
+        for row in self._data:
+            self._plan_defaults(row)
+            for key in PLAN_FLOAT_KEYS:
+                row[key] = _host_float(row[key])
