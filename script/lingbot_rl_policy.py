@@ -569,14 +569,6 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
 
     @torch.no_grad()
     def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False):
-        if plans == 1:
-            decoded = self.decode_candidates(batch, k=k)
-            decoded["plan_pools"] = torch.zeros(1, STATE_DIM, device=decoded["s"].device)
-            decoded["plan_pool"] = decoded["plan_pools"]
-            decoded["plan_index"] = 0
-            if decode_all:
-                decoded["plan_a_base_all"] = decoded["a_base"][None]
-            return decoded
         self.eval()
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
@@ -598,10 +590,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             latents = self._video_pass_batched(
                 latents, t, latent_cond, frame_st_id, write=last, advance=not last or exec_step != -1)
         pools = self._pool_from_latent(latents).float()
-        if random_plan:
-            index = int(np.random.randint(plans))
-        else:
-            index = 0 if rank_fn is None else int(rank_fn(state.float(), pools))
+        index = int(np.random.randint(plans)) if random_plan else int(rank_fn(state.float(), pools))
         if not 0 <= index < plans:
             raise ValueError("rank_fn must return a plan index")
         out = {"s": state.float(), "z": model_to_mlp(action_noise).float(), "plan_pools": pools,
@@ -641,7 +630,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
     @torch.no_grad()
     def predict_action_chunk(self, batch, **kwargs):
         k = self.eval_candidates if self.residual_model is not None else 1
-        plans = getattr(self, "eval_plans", 1) if self.residual_model is not None else 1
+        plans = self.eval_plans if self.residual_model is not None else 1
         if plans > 1:
             decoded = self.select_plan(batch, plans, k, rank_fn=self.residual_model.rank_plans)
         else:

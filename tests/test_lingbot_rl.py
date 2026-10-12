@@ -1417,6 +1417,7 @@ def test_predict_action_chunk_executes_highest_q_candidate():
     torch.manual_seed(9)
     policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
     policy.eval_candidates = 4
+    policy.eval_plans = 1
     model = DiceResidualModel(device="cpu")
     for parameter in model.critic.parameters():
         torch.nn.init.normal_(parameter, std=0.05)
