@@ -248,7 +248,7 @@ def test_actor_critic_one_step_update_on_random_tensors():
     before = {k: v.detach().clone() for k, v in model.actor.named_parameters()}
     critic_info = model.update_critic(state, a_base_all[:, 0], target)
     actor_info = model.update_actor(
-        state, a_base_all[:, 0], z_all, a_base_all, is_expert, torch.zeros(8, 1), True)
+        state, state, a_base_all[:, 0], z_all, a_base_all, is_expert, torch.zeros(8, 1), True)
     assert torch.isfinite(torch.tensor(critic_info["critic_loss"]))
     assert set(critic_info) == {"critic_loss", "critic_grad_norm", "critic_q_mean"}
     assert torch.isfinite(torch.tensor(actor_info["actor_loss"]))
@@ -275,7 +275,7 @@ def test_actor_q_term_is_normalised_by_online_mean_abs_q():
     q_scale = float((q.abs() * online).sum() / (online.sum() * K_CANDIDATES))
     expected = float(-(q.mean(dim=1) * online.squeeze(1)).sum() / 4) / q_scale
     info = model.update_actor(
-        state, a_base_all[:, 0], z_all, a_base_all, is_expert, torch.zeros(4, 1), False)
+        state, state, a_base_all[:, 0], z_all, a_base_all, is_expert, torch.zeros(4, 1), False)
     assert info["actor_q_loss"] == pytest.approx(expected, rel=1e-4)
     assert info["q_mean"] == pytest.approx(float(q.mean()), rel=1e-4)
     assert info["q_advantage"] == pytest.approx(0.0, abs=1e-6)
@@ -300,7 +300,7 @@ def test_bc_filter_drops_better_overestimated_online_rows_only():
     for filter_active in (False, True):
         with torch.no_grad():
             model.actor.net[-1].bias.fill_(1.0)
-        info = model.update_actor(state, stored, z_all, a_base_all, is_expert, mc_return, filter_active)
+        info = model.update_actor(state, state, stored, z_all, a_base_all, is_expert, mc_return, filter_active)
         rates.append(info["bc_filter_rate"])
     assert info["residual_rms"] == pytest.approx(1.0, rel=1e-3)
     assert info["actor_bc_loss"] == pytest.approx(rates[1], rel=1e-3)
@@ -308,6 +308,37 @@ def test_bc_filter_drops_better_overestimated_online_rows_only():
     assert info["q_overestimation"] == pytest.approx(-2.0 / 3.0)
     assert info["q_overestimation_online"] == pytest.approx(-0.5)
     assert rates == [1.0, pytest.approx(2.0 / 3.0)]
+
+
+def test_plan_critic_regresses_onto_max_candidate_min_q_and_leaves_q_and_actor_alone():
+    torch.manual_seed(0)
+    single = DiceResidualModel(device="cpu")
+    model = DiceResidualModel(device="cpu", residual_input="base", plan_candidates=2)
+    assert single.plan_critic is None and single.critic.heads[0][0].in_features == STATE_DIM + HORIZON * ACTION_DIM
+    assert model.critic.heads[0][0].in_features == 2 * STATE_DIM + HORIZON * ACTION_DIM
+    assert set(single.inference_state_dict()) == {"actor", "critic", "target_critic"}
+    assert {"plan_critic", "plan_opt", "plan_lr"} <= set(model.resume_state_dict())
+    for parameter in model.critic.parameters():
+        torch.nn.init.normal_(parameter, std=0.05)
+    state, pools = torch.randn(5, STATE_DIM), torch.randn(5, 2, STATE_DIM)
+    z_all = torch.randn(5, 4, HORIZON, ACTION_DIM)
+    a_base = mask_unused_dof(torch.randn(5, 2, 4, HORIZON, ACTION_DIM))
+    critic_before = [p.detach().clone() for p in model.critic.parameters()]
+    actor_before = [p.detach().clone() for p in model.actor.parameters()]
+    with torch.no_grad():
+        flat_state = state[:, None, None].expand(5, 2, 4, STATE_DIM).reshape(-1, STATE_DIM)
+        flat_pool = pools[:, :, None].expand(5, 2, 4, STATE_DIM).reshape(-1, STATE_DIM)
+        flat_z = z_all[:, None].expand(5, 2, 4, HORIZON, ACTION_DIM).reshape(-1, HORIZON, ACTION_DIM)
+        flat_base = a_base.reshape(-1, HORIZON, ACTION_DIM)
+        action = apply_residual(flat_base, model.actor(flat_state, flat_z, flat_base))
+        expected = model.critic(model.critic_state(flat_state, flat_pool), action).reshape(5, 2, 4).max(dim=2).values
+    losses = [model.update_plan_critic(state, pools, z_all, a_base)["plan_critic_loss"] for _ in range(30)]
+    info = model.update_plan_critic(state, pools, z_all, a_base)
+    assert losses[-1] < losses[0] and abs(info["plan_target_mean"] - float(expected.mean())) < 1e-5
+    assert all(torch.equal(a, b) for a, b in zip(critic_before, model.critic.parameters()))
+    assert all(torch.equal(a, b) for a, b in zip(actor_before, model.actor.parameters()))
+    values = model.plan_critic(state[:1].expand(2, -1), pools[0])
+    assert model.rank_plans(state[:1], pools[0]) == int(values.reshape(-1).argmax())
 
 
 def _replay_row(reward, done, expert=False):
@@ -989,8 +1020,8 @@ class _StubPolicy:
         return None
 
 
-def _sum_critic_model(device="cpu", residual_input="z", epsilon=-0.5):
-    model = DiceResidualModel(device=device, residual_input=residual_input)
+def _sum_critic_model(device="cpu", residual_input="z", epsilon=-0.5, plan_candidates=1):
+    model = DiceResidualModel(device=device, residual_input=residual_input, plan_candidates=plan_candidates)
     model.critic = _SumCritic()
     return model
 

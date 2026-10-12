@@ -23,8 +23,8 @@ from script.lingbot_rl_sharpen import bin_entropy, log_std
 LiberoEnv = None
 SHARPEN_EVERY_STEPS = 5_000
 RESUME_KEYS = {
-    "actor", "critic", "target_critic", "actor_opt", "critic_opt", "actor_lr", "critic_lr",
-    "replay", "rng", "env_steps", "chunks", "recipe", "checkpointed", "wandb_id",
+    "actor", "critic", "target_critic", "plan_critic", "actor_opt", "critic_opt", "plan_opt",
+    "actor_lr", "critic_lr", "plan_lr", "replay", "rng", "env_steps", "chunks", "recipe", "checkpointed", "wandb_id",
 }
 
 
@@ -100,7 +100,7 @@ def _atomic_torch(path, payload):
 
 def save_inference(path, model):
     payload = model.inference_state_dict()
-    if set(payload) - {"actor", "critic", "target_critic"}:
+    if set(payload) - {"actor", "critic", "target_critic", "plan_critic"}:
         raise ValueError("Inference dump may only contain actor and critic weights")
     _atomic_torch(path, payload)
 
@@ -243,7 +243,7 @@ def _update_from_buffer(model, buffer, expert_ratio, device, filter_active):
             sample["z_next_all"], sample["a_base_next_all"], sample["n_steps"])
         if (step + 1) % ACTOR_EVERY == 0:
             info.update(model.update_actor(
-                sample["s"], sample["a"], sample["z_all"], sample["a_base_all"], sample["is_expert"],
+                sample["s"], sample["s"], sample["a"], sample["z_all"], sample["a_base_all"], sample["is_expert"],
                 sample["mc_return"], filter_active))
         info.update(model.update_critic(sample["s"], sample["a"], target))
         if (step + 1) % ACTOR_EVERY == 0:
