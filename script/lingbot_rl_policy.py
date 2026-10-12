@@ -98,6 +98,12 @@ def _clone_cache(cache):
     return {key: value.clone() if torch.is_tensor(value) else value for key, value in cache.items()}
 
 
+CHUNK_STATE = (
+    "_first_chunk", "_started", "_exec_step", "_frame_st_id", "_obs_buffer", "_executed_actions", "_init_latent",
+    "_cache_initialised", "_last_real_latent",
+)
+
+
 class ResidualLingBotPolicy(LingBotVAPolicy):
     def __init__(self, config):
         super().__init__(config)
@@ -249,11 +255,23 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         finally:
             self._restore_vae_cache(snap)
 
-    @torch.no_grad()
-    def decode_candidates(self, batch, k=4, video_noise=None, action_noise=None):
-        self.eval()
-        self._ensure_frozen_modules()
-        self._maybe_init_prompt(batch)
+    def _snapshot_chunk_state(self):
+        kv = []
+        for block in self.transformer.blocks:
+            cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
+            kv.append(None if cache is None else _clone_cache(cache))
+        return {"kv": kv, "vae": self._snapshot_vae_cache(),
+                "attrs": {name: getattr(self, name, None) for name in CHUNK_STATE}}
+
+    def _restore_chunk_state(self, saved):
+        for block, cache in zip(self.transformer.blocks, saved["kv"]):
+            if block.attn1.attn_caches is not None:
+                block.attn1.attn_caches["pos"] = None if cache is None else _clone_cache(cache)
+        self._restore_vae_cache(saved["vae"])
+        for name, value in saved["attrs"].items():
+            setattr(self, name, value)
+
+    def _begin_chunk(self, batch):
         first = self._first_chunk
         start_obs = self._start_raw_obs(batch)
         if first:
@@ -261,17 +279,23 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             self._init_latent = init_latent
             self._init_streaming_cache(init_latent)
             self._obs_buffer = []
-            frame_st_id = 0
-            critic_latent = init_latent
-        else:
-            critic_latent = self._encode_isolated([start_obs])
-            self._compute_kv_cache(self._obs_buffer, self._executed_actions)
-            self._obs_buffer = []
-            init_latent = None
-            frame_st_id = self._frame_st_id
+            return first, init_latent, 0, init_latent
+        critic_latent = self._encode_isolated([start_obs])
+        self._compute_kv_cache(self._obs_buffer, self._executed_actions)
+        self._obs_buffer = []
+        return first, None, self._frame_st_id, critic_latent
+
+    @torch.no_grad()
+    def decode_candidates(self, batch, k=4, video_noise=None, action_noise=None, plans=1, rank_step=None,
+                          exec_step=None, rank_fn=None):
+        self.eval()
+        self._ensure_frozen_modules()
+        self._maybe_init_prompt(batch)
+        first, init_latent, frame_st_id, critic_latent = self._begin_chunk(batch)
         state = self._pool_from_latent(critic_latent)
-        actions, latents, z_model, video = self._infer(
-            init_latent, frame_st_id, video_noise=video_noise, action_noise=action_noise, k=k
+        actions, latents, z_model, video, plan_pools, plan_index = self._infer(
+            init_latent, frame_st_id, video_noise=video_noise, action_noise=action_noise, k=k,
+            plans=plans, rank_step=rank_step, exec_step=exec_step, rank_fn=rank_fn,
         )
         if first:
             self._first_chunk = False
@@ -284,19 +308,78 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             "video_noise": video,
             "latents": latents,
             "first_chunk": first,
+            "plan_pools": plan_pools,
+            "plan_index": plan_index,
         }
 
+    def _video_timesteps(self, exec_step=None):
+        cfg = self.config
+        self._scheduler.set_timesteps(cfg.num_inference_steps)
+        timesteps = F.pad(self._scheduler.timesteps, (0, 1), mode="constant", value=0)
+        exec_step = cfg.video_exec_step if exec_step is None else int(exec_step)
+        if exec_step != -1:
+            if not 1 <= exec_step <= cfg.num_inference_steps:
+                raise ValueError("exec_step must lie in [1, num_inference_steps] or be -1")
+            timesteps = timesteps[:exec_step]
+        return timesteps, exec_step
+
+    def _video_pass(self, latents, t, latent_cond, frame_st_id, write, advance, capture=None):
+        cfg = self.config
+        latent_h, latent_w = self._latent_hw
+        input_dict = self._prepare_latent_input(latents, None, t, t, latent_cond, None, frame_st_id=frame_st_id)
+        handle = None
+        if capture is not None:
+            handle = self.transformer.proj_out.register_forward_hook(
+                lambda module, inputs, output: capture.append(inputs[0]))
+        try:
+            video_noise_pred = self.transformer(
+                self._repeat_input_for_cfg(input_dict["latent_res_lst"]),
+                update_cache=1 if write else 0,
+                cache_name="pos",
+                action_mode=False,
+            )
+        finally:
+            if handle is not None:
+                handle.remove()
+        if advance:
+            video_noise_pred = data_seq_to_patch(
+                cfg.patch_size,
+                video_noise_pred,
+                cfg.frame_chunk_size,
+                latent_h,
+                latent_w,
+                batch_size=2 if self._use_cfg else 1,
+            )
+            if cfg.guidance_scale > 1:
+                video_noise_pred = video_noise_pred[1:] + cfg.guidance_scale * (
+                    video_noise_pred[:1] - video_noise_pred[1:]
+                )
+            else:
+                video_noise_pred = video_noise_pred[:1]
+            latents = self._scheduler.step(video_noise_pred, t, latents, return_dict=False)
+        if frame_st_id == 0 and latent_cond is not None:
+            latents[:, :, 0:1] = latent_cond
+        return latents
+
+    def _plan_pool(self, captured):
+        if not captured:
+            raise RuntimeError("Failed to capture pre-proj_out video tokens")
+        text_tokens = self.transformer.condition_embedder.text_embedder(self._prompt_embeds.to(self.dtype)).float()
+        return pool_critic_state(captured[0][:1].float(), text_tokens)
+
     @torch.no_grad()
-    def _infer(self, init_latent, frame_st_id=0, video_noise=None, action_noise=None, k=1):
+    def _infer(self, init_latent, frame_st_id=0, video_noise=None, action_noise=None, k=1, plans=1, rank_step=None,
+               exec_step=None, rank_fn=None):
         cfg = self.config
         device = self.config.device
         latent_h, latent_w = self._latent_hw
         frame_chunk_size = cfg.frame_chunk_size
         latents = (
             video_noise if video_noise is not None else torch.randn(
-                1, 48, frame_chunk_size, latent_h, latent_w, device=device, dtype=self.dtype
+                plans, 48, frame_chunk_size, latent_h, latent_w, device=device, dtype=self.dtype
             )
         ).clone()
+        plans = latents.shape[0]
         if action_noise is None:
             actions = torch.randn(
                 k, cfg.action_dim, frame_chunk_size, cfg.action_per_frame, 1, device=device, dtype=self.dtype
@@ -307,48 +390,55 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         video_used = latents.clone()
         z_used = actions.clone()
 
-        self._scheduler.set_timesteps(cfg.num_inference_steps)
+        timesteps, exec_step = self._video_timesteps(exec_step)
         self._action_scheduler.set_timesteps(cfg.action_num_inference_steps)
-        timesteps = F.pad(self._scheduler.timesteps, (0, 1), mode="constant", value=0)
-        if cfg.video_exec_step != -1:
-            timesteps = timesteps[: cfg.video_exec_step]
-        action_timesteps = F.pad(self._action_scheduler.timesteps, (0, 1), mode="constant", value=0)
+        n = len(timesteps)
+        ranked = rank_step is not None or plans > 1
+        rank = n if rank_step is None else int(rank_step)
+        if not 1 <= rank <= n:
+            raise ValueError("rank_step must lie in [1, exec_step]")
+        latent_cond = (
+            init_latent[:, :, 0:1].to(self.dtype)
+            if frame_st_id == 0 and init_latent is not None
+            else None
+        )
 
-        for i, t in enumerate(timesteps):
-            last_step = i == len(timesteps) - 1
-            latent_cond = (
-                init_latent[:, :, 0:1].to(self.dtype)
-                if frame_st_id == 0 and init_latent is not None
-                else None
-            )
-            input_dict = self._prepare_latent_input(
-                latents, None, t, t, latent_cond, None, frame_st_id=frame_st_id
-            )
-            video_noise_pred = self.transformer(
-                self._repeat_input_for_cfg(input_dict["latent_res_lst"]),
-                update_cache=1 if last_step else 0,
-                cache_name="pos",
-                action_mode=False,
-            )
-            if not last_step or cfg.video_exec_step != -1:
-                video_noise_pred = data_seq_to_patch(
-                    cfg.patch_size,
-                    video_noise_pred,
-                    frame_chunk_size,
-                    latent_h,
-                    latent_w,
-                    batch_size=2 if self._use_cfg else 1,
+        pools = []
+        plan_latents = []
+        for m in range(plans):
+            x = latents[m:m + 1]
+            captured = []
+            for i in range(rank):
+                last = i == n - 1
+                x = self._video_pass(
+                    x, timesteps[i], latent_cond, frame_st_id,
+                    write=last and not ranked,
+                    advance=(not last or exec_step != -1) and not (last and ranked),
+                    capture=captured if ranked and i == rank - 1 else None,
                 )
-                if cfg.guidance_scale > 1:
-                    video_noise_pred = video_noise_pred[1:] + cfg.guidance_scale * (
-                        video_noise_pred[:1] - video_noise_pred[1:]
-                    )
-                else:
-                    video_noise_pred = video_noise_pred[:1]
-                latents = self._scheduler.step(video_noise_pred, t, latents, return_dict=False)
-            if frame_st_id == 0 and latent_cond is not None:
-                latents[:, :, 0:1] = latent_cond
+            plan_latents.append(x)
+            if ranked:
+                pools.append(self._plan_pool(captured))
+        plan_pools = torch.cat(pools, dim=0) if ranked else None
+        plan_index = 0
+        if rank_fn is not None:
+            plan_index = int(rank_fn(plan_pools))
+            if not 0 <= plan_index < plans:
+                raise ValueError("rank_fn must return a plan index")
+        latents = plan_latents[plan_index]
+        start = (rank if rank < n else n - 1) if ranked else n
+        for i in range(start, n):
+            last = i == n - 1
+            latents = self._video_pass(
+                latents, timesteps[i], latent_cond, frame_st_id, write=last, advance=not last or exec_step != -1)
+        actions = self._decode_actions(actions, frame_st_id, k)
+        return actions, latents, z_used, video_used, plan_pools, plan_index
 
+    def _decode_actions(self, actions, frame_st_id, k):
+        cfg = self.config
+        device = self.config.device
+        frame_chunk_size = cfg.frame_chunk_size
+        action_timesteps = F.pad(self._action_scheduler.timesteps, (0, 1), mode="constant", value=0)
         if k == 1:
             for i, t in enumerate(action_timesteps):
                 last_step = i == len(action_timesteps) - 1
@@ -384,7 +474,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
                 if frame_st_id == 0 and action_cond is not None:
                     actions[:, :, 0:1] = action_cond
             actions[:, ~self._action_mask] *= 0
-            return actions, latents, z_used[:1], video_used
+            return actions
 
         post_video = self._snapshot_kv()
         try:
@@ -420,7 +510,75 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             self._restore_kv(post_video)
             reraise_action_batch_failure(exc)
         self._restore_kv(post_video)
-        return actions, latents, z_used, video_used
+        return actions
+
+    @torch.no_grad()
+    def decode_plans(self, batch, plans, exec_step, k, rank_steps=()):
+        self.eval()
+        self._ensure_frozen_modules()
+        self._maybe_init_prompt(batch)
+        cfg = self.config
+        device = cfg.device
+        rank_steps = sorted({int(step) for step in rank_steps})
+        timesteps, exec_step = self._video_timesteps(exec_step)
+        self._action_scheduler.set_timesteps(cfg.action_num_inference_steps)
+        n = len(timesteps)
+        if rank_steps and not 1 <= rank_steps[0] <= rank_steps[-1] <= n:
+            raise ValueError("rank_steps must lie in [1, exec_step]")
+        saved = self._snapshot_chunk_state()
+        try:
+            first, init_latent, frame_st_id, critic_latent = self._begin_chunk(batch)
+            state = self._pool_from_latent(critic_latent)
+            latent_h, latent_w = self._latent_hw
+            video_noise = torch.randn(
+                plans, 48, cfg.frame_chunk_size, latent_h, latent_w, device=device, dtype=self.dtype)
+            action_noise = torch.randn(
+                k, cfg.action_dim, cfg.frame_chunk_size, cfg.action_per_frame, 1, device=device, dtype=self.dtype)
+            latent_cond = (
+                init_latent[:, :, 0:1].to(self.dtype)
+                if frame_st_id == 0 and init_latent is not None
+                else None
+            )
+            history = self._snapshot_kv()
+            a_base, pools, latents = [], [], []
+            rank_a_base = {step: [] for step in rank_steps}
+            rank_pools = {step: [] for step in rank_steps}
+            for m in range(plans):
+                x = video_noise[m:m + 1].clone()
+                for i in range(n):
+                    step = i + 1
+                    last = i == n - 1
+                    wanted = last or step in rank_steps
+                    captured = []
+                    x = self._video_pass(
+                        x, timesteps[i], latent_cond, frame_st_id, write=wanted,
+                        advance=not last or exec_step != -1, capture=captured if wanted else None)
+                    if not wanted:
+                        continue
+                    decoded = model_to_mlp(self._decode_actions(action_noise.clone(), frame_st_id, k)).float()
+                    self._restore_kv(history)
+                    pool = self._plan_pool(captured)
+                    if last:
+                        a_base.append(decoded)
+                        pools.append(pool)
+                        latents.append(x)
+                    if step in rank_steps:
+                        rank_a_base[step].append(decoded)
+                        rank_pools[step].append(pool)
+            return {
+                "s": state.float(),
+                "z": model_to_mlp(action_noise).float(),
+                "a_base": torch.stack(a_base),
+                "plan_pools": torch.cat(pools),
+                "rank_a_base": {step: torch.stack(value) for step, value in rank_a_base.items()},
+                "rank_pools": {step: torch.cat(value) for step, value in rank_pools.items()},
+                "video_noise": video_noise,
+                "latents": torch.cat(latents),
+                "first_chunk": first,
+                "exec_step": exec_step,
+            }
+        finally:
+            self._restore_chunk_state(saved)
 
     def _apply_residual_choice(self, decoded, index):
         a_base = decoded["a_base"][index:index + 1].float()

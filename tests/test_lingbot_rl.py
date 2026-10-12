@@ -1364,3 +1364,185 @@ def test_train_loop_runs_with_base_conditioned_residual(tmp_path, monkeypatch):
     actor = torch.load(tmp_path / "residual.pt", map_location="cpu", weights_only=True)["actor"]
     assert actor["net.0.weight"].shape[1] == STATE_DIM + HORIZON * ACTION_DIM
     assert json.loads((tmp_path / "settings.json").read_text())["recipe"]["residual_input"] == "base"
+
+
+def _mock_policy(seed=0, blocks=2):
+    from types import SimpleNamespace
+
+    from einops import rearrange
+    from lerobot.policies.lingbot_va.utils import FlowMatchScheduler
+
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    class Transformer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = torch.nn.Linear(48 * 4, STATE_DIM)
+            self.proj_out = torch.nn.Linear(STATE_DIM, 48 * 4)
+            self.action_map = torch.nn.Linear(ACTION_DIM, ACTION_DIM)
+            self.condition_embedder = SimpleNamespace(text_embedder=torch.nn.Linear(8, STATE_DIM))
+            self.blocks = [SimpleNamespace(attn1=SimpleNamespace(attn_caches={
+                "pos": {"k": torch.zeros(2, 1, 1, 1), "v": torch.zeros(2, 1, 1, 1)}})) for _ in range(blocks)]
+            self.calls = []
+
+        def forward(self, payload, update_cache=0, cache_name="pos", action_mode=False):
+            self.calls.append((action_mode, update_cache))
+            bias = self.blocks[0].attn1.attn_caches["pos"]["k"].float().mean()
+            x = payload["noisy_latents"]
+            if action_mode:
+                return self.action_map(rearrange(x, "b c f h w -> b (f h w) c")) + bias
+            tokens = rearrange(x, "b c (f p1) (h p2) (w p3) -> b (f h w) (c p1 p2 p3)", p1=1, p2=2, p3=2)
+            hidden = torch.tanh(self.embed(tokens) + payload["timesteps"][:, :1, None] / 1000 + bias)
+            out = rearrange(self.proj_out(hidden), "b l (n c) -> b (l n) c", n=4)
+            if update_cache == 1:
+                for block in self.blocks:
+                    cache = block.attn1.attn_caches["pos"]
+                    cache["k"] = cache["k"] + hidden.float().mean()
+            return out
+
+    torch.manual_seed(seed)
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    torch.nn.Module.__init__(policy)
+    policy.config = SimpleNamespace(
+        device="cpu", frame_chunk_size=4, action_dim=ACTION_DIM, action_per_frame=4, num_inference_steps=4,
+        video_exec_step=-1, action_num_inference_steps=3, guidance_scale=5.0, action_guidance_scale=1.0,
+        patch_size=(1, 2, 2), used_action_channel_ids=list(range(USED_DOF)), camera_layout="width_concat",
+        height=32, width=32, obs_cam_keys=("a", "b"))
+    policy.dtype = torch.float32
+    policy._use_cfg = True
+    policy._frozen = None
+    policy._prompt_embeds = torch.randn(1, 2, 8)
+    policy._negative_prompt_embeds = torch.randn(1, 2, 8)
+    policy._scheduler = FlowMatchScheduler(shift=5.0, sigma_min=0.0, extra_one_step=True)
+    policy._action_scheduler = FlowMatchScheduler(shift=0.05, sigma_min=0.0, extra_one_step=True)
+    policy.transformer = Transformer()
+    policy._ensure_frozen_modules = lambda: None
+    policy._first_chunk = False
+    policy._started = True
+    policy._exec_step = 5
+    policy._frame_st_id = 4
+    policy._obs_buffer = []
+    policy._executed_actions = None
+    policy.residual_model = None
+    return policy
+
+
+def _reference_infer(policy, video_noise, action_noise):
+    import torch.nn.functional as F
+    from einops import rearrange
+    from lerobot.policies.lingbot_va.utils import data_seq_to_patch
+
+    from script.lingbot_rl_policy import expand_conditional_kv
+
+    cfg = policy.config
+    h, w = policy._latent_hw
+    latents, actions, k = video_noise.clone(), action_noise.clone(), action_noise.shape[0]
+    policy._scheduler.set_timesteps(cfg.num_inference_steps)
+    policy._action_scheduler.set_timesteps(cfg.action_num_inference_steps)
+    timesteps = F.pad(policy._scheduler.timesteps, (0, 1), value=0)
+    action_timesteps = F.pad(policy._action_scheduler.timesteps, (0, 1), value=0)
+    for i, t in enumerate(timesteps):
+        last = i == len(timesteps) - 1
+        payload = policy._prepare_latent_input(latents, None, t, t, None, None, frame_st_id=4)["latent_res_lst"]
+        pred = policy.transformer(policy._repeat_input_for_cfg(payload), update_cache=int(last), action_mode=False)
+        if not last:
+            pred = data_seq_to_patch(cfg.patch_size, pred, cfg.frame_chunk_size, h, w, batch_size=2)
+            pred = pred[1:] + cfg.guidance_scale * (pred[:1] - pred[1:])
+            latents = policy._scheduler.step(pred, t, latents, return_dict=False)
+    snap = policy._snapshot_kv()
+    expand_conditional_kv(policy.transformer, k)
+    for i, t in enumerate(action_timesteps):
+        last = i == len(action_timesteps) - 1
+        payload = policy._prepare_latent_input(None, actions, t, t, None, None, frame_st_id=4)["action_res_lst"]
+        payload["text_emb"] = policy._prompt_embeds.expand(k, -1, -1).clone()
+        payload["grid_id"] = payload["grid_id"][None].repeat(k, 1, 1)
+        payload["timesteps"] = payload["timesteps"][None].repeat(k, 1)
+        pred = policy.transformer(payload, update_cache=int(last), action_mode=True)
+        if not last:
+            pred = rearrange(pred, "b (f n) c -> b c f n 1", f=cfg.frame_chunk_size)
+            actions = policy._action_scheduler.step(pred, t, actions, return_dict=False)
+    actions[:, ~policy._action_mask] *= 0
+    policy._restore_kv(snap)
+    return actions, latents
+
+
+def test_single_plan_infer_reproduces_baseline_bit_for_bit():
+    policy = _mock_policy()
+    torch.manual_seed(1)
+    actions, latents, z, video, pools, index = policy._infer(None, 4, k=4)
+    torch.manual_seed(1)
+    video_noise = torch.randn(1, 48, 4, 2, 4)
+    action_noise = torch.randn(4, ACTION_DIM, 4, 4, 1)
+    ref_actions, ref_latents = _reference_infer(_mock_policy(), video_noise, action_noise)
+    assert pools is None and index == 0
+    assert torch.equal(video, video_noise) and torch.equal(z, action_noise)
+    assert torch.equal(actions, ref_actions) and torch.equal(latents, ref_latents)
+    given = _mock_policy()._infer(
+        None, 4, video_noise=video_noise, action_noise=action_noise, k=4, plans=1, rank_step=None)
+    assert torch.equal(given[0], ref_actions) and torch.equal(given[1], ref_latents)
+
+
+@pytest.mark.parametrize("rank_step", [2, 5])
+def test_two_plans_pool_rank_and_write_cache_once(rank_step):
+    policy = _mock_policy()
+    policy._begin_chunk = lambda batch: (False, None, 4, torch.zeros(1, 48, 1, 2, 4))
+    policy._pool_from_latent = lambda latent: torch.zeros(1, STATE_DIM)
+    torch.manual_seed(2)
+    video_noise = torch.randn(2, 48, 4, 2, 4)
+    action_noise = torch.randn(4, ACTION_DIM, 4, 4, 1)
+    seen = {}
+
+    def rank_fn(pools):
+        seen["pools"] = pools
+        return 1
+
+    decoded = policy.decode_candidates(
+        {"task": ["t"]}, k=4, video_noise=video_noise, action_noise=action_noise, plans=2, rank_step=rank_step,
+        rank_fn=rank_fn)
+    assert decoded["plan_pools"].shape == (2, STATE_DIM) and seen["pools"] is decoded["plan_pools"]
+    assert not torch.equal(decoded["plan_pools"][0], decoded["plan_pools"][1])
+    assert decoded["plan_index"] == 1
+    assert [call for call in policy.transformer.calls if call == (False, 1)] == [(False, 1)]
+    actions, latents, *_ = _mock_policy()._infer(None, 4, video_noise=video_noise[1:2], action_noise=action_noise, k=4)
+    assert torch.equal(decoded["a_base"], model_to_mlp(actions).float())
+    assert torch.equal(decoded["latents"], latents)
+    plain = _mock_policy()
+    plain._begin_chunk = policy._begin_chunk
+    plain._pool_from_latent = policy._pool_from_latent
+    single = plain.decode_candidates({"task": ["t"]}, k=4)
+    assert single["plan_pools"] is None and single["plan_index"] == 0
+
+
+def test_rank_step_beyond_exec_step_raises():
+    policy = _mock_policy()
+    with pytest.raises(ValueError, match="rank_step"):
+        policy._infer(None, 4, k=4, plans=2, rank_step=6, exec_step=4)
+    with pytest.raises(ValueError, match="rank_step"):
+        policy._infer(None, 4, k=4, plans=1, rank_step=0)
+    with pytest.raises(ValueError, match="rank_steps"):
+        policy.decode_plans({"task": ["t"]}, plans=2, exec_step=4, k=3, rank_steps=(6,))
+
+
+def test_decode_plans_shapes_and_restores_policy_state():
+    policy = _mock_policy()
+    policy._begin_chunk = lambda batch: (False, None, 4, torch.zeros(1, 48, 1, 2, 4))
+    policy._pool_from_latent = lambda latent: torch.zeros(1, STATE_DIM)
+    before = policy._snapshot_chunk_state()
+    out = policy.decode_plans({"task": ["t"]}, plans=2, exec_step=4, k=3, rank_steps=(2, 4))
+    assert out["a_base"].shape == (2, 3, HORIZON, ACTION_DIM)
+    assert out["z"].shape == (3, HORIZON, ACTION_DIM)
+    assert out["plan_pools"].shape == (2, STATE_DIM)
+    assert out["latents"].shape == (2, 48, 4, 2, 4)
+    assert out["video_noise"].shape == (2, 48, 4, 2, 4)
+    assert out["exec_step"] == 4 and out["first_chunk"] is False
+    assert set(out["rank_a_base"]) == set(out["rank_pools"]) == {2, 4}
+    assert out["rank_a_base"][2].shape == (2, 3, HORIZON, ACTION_DIM)
+    assert out["rank_pools"][2].shape == (2, STATE_DIM)
+    assert torch.equal(out["rank_a_base"][4], out["a_base"])
+    assert torch.equal(out["rank_pools"][4], out["plan_pools"])
+    assert not torch.equal(out["rank_a_base"][2], out["a_base"])
+    assert torch.count_nonzero(out["a_base"][..., USED_DOF:]) == 0
+    after = policy._snapshot_chunk_state()
+    assert after["attrs"] == before["attrs"]
+    for old, new in zip(before["kv"], after["kv"]):
+        torch.testing.assert_close(new["k"], old["k"])
