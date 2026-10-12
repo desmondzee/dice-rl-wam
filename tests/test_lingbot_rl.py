@@ -1186,7 +1186,8 @@ def test_train_with_plans_stores_plan_rows_trains_the_plan_critic_and_logs_metri
     assert float(rows[0]["plan_pool"][0]) == float(rows[0]["plan_index"])
     assert all(call[2] is False and call[3] is True for call in _StubPolicy.plan_calls)
     logged = [entry for entry in out["logs"] if "plan_critic_loss" in entry]
-    assert logged and {"plan_agreement", "plan_regret", "plan_value_spread", "plan_random_rate", "seconds_per_env_step"} <= set(logged[0])
+    assert logged and {"plan_agreement", "plan_regret", "plan_value_spread", "plan_random_rate", "seconds_per_env_step",
+                       "replay_plan_delta_v", "replay_plan_delta_h"} <= set(logged[0])
     assert {"plan_critic", "plan_opt", "plan_lr"} <= set(out["resume"])
     _StubPolicy.plan_calls = []
     _smoke_train(tmp_path / "warm", monkeypatch, 42, model_factory=lambda **kw: DiceResidualModel(**kw),

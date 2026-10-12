@@ -82,6 +82,11 @@ def replay_sharpening(model, sample):
             v_plan = model.plan_critic(state.unsqueeze(1).expand(batch, plans, -1).reshape(batch * plans, -1),
                                        pools_all.reshape(batch * plans, -1)).reshape(batch, plans)
             metrics["replay_plan_value_spread"] = float((v_plan.max(dim=1).values - v_plan.min(dim=1).values).mean())
+            index = sample["plan_index"].reshape(-1)[online]
+            executed = pools_all[torch.arange(batch, device=pools_all.device), index]
+            metrics["replay_plan_delta_v"] = float((v_plan.gather(1, index.reshape(-1, 1)).squeeze(1) - v_plan.mean(dim=1)).mean())
+            metrics["replay_plan_delta_h"] = float((torch.log(pools_all.reshape(batch * plans, -1).std(dim=0) + 1e-6)
+                                                    - torch.log(executed.std(dim=0) + 1e-6)).mean())
     return metrics
 
 
