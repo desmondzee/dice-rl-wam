@@ -29,6 +29,8 @@ class RLConfig:
     rlpd_steps: int = 208_000
     residual_input: str = "z"
     epsilon: float = -0.5
+    plan_candidates: int = 1
+    plan_random_prob: float = 0.1
 
     def validate(self):
         validate_name(self.source_run)
@@ -53,6 +55,10 @@ class RLConfig:
             raise ValueError("Invalid seed")
         if not self.wandb_project:
             raise ValueError("W&B project is required")
+        if type(self.plan_candidates) is not int or not 1 <= self.plan_candidates <= 8:
+            raise ValueError("plan_candidates must be an integer in [1, 8]")
+        if not 0.0 <= float(self.plan_random_prob) <= 1.0:
+            raise ValueError("plan_random_prob must lie in [0, 1]")
         return self
 
     @property
@@ -121,6 +127,10 @@ class RLConfig:
             "critic_ensemble": 10,
             "beta": 100.0,
             "epsilon": self.epsilon,
+            "plan_candidates": self.plan_candidates,
+            "plan_random_prob": self.plan_random_prob,
+            "plan_critic": "regression_max_k_min_q" if self.plan_candidates > 1 else "none",
+            "plan_pool": "critic_pool_of_denoised_chunk" if self.plan_candidates > 1 else "none",
             "n_step_chunks": 3,
             "gamma": 0.99,
             "gradient_steps": 10,

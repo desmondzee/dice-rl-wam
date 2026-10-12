@@ -104,6 +104,16 @@ def test_config_sampler_steps_enter_the_fingerprint():
     assert config_from_dict({"video_steps": 10, "video_exec_step": 10}).video_exec_step == 10
 
 
+def test_config_plan_fields_enter_the_fingerprint():
+    base = RLConfig().protocol()
+    assert base["plan_candidates"] == 1 and base["plan_critic"] == "none" and base["plan_pool"] == "none"
+    plan = RLConfig(plan_candidates=4).protocol()
+    assert plan["plan_critic"] == "regression_max_k_min_q" and plan["plan_pool"] == "critic_pool_of_denoised_chunk"
+    assert plan != base
+    with pytest.raises(ValueError):
+        RLConfig(plan_candidates=9).validate()
+
+
 def test_evaluate_records_video_exec_step_and_passes_it_to_the_policy(tmp_path, monkeypatch):
     import script.lingbot_eval as eval_module
     import script.lingbot_rl_train as train
