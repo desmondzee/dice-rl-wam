@@ -83,9 +83,9 @@ Per chunk, with the history cache holding 2 rows (conditional, unconditional):
 
 1. Snapshot the history. Repeat each cache row M times so the cache has 2M rows ordered [cond × M, uncond × M].
 2. Draw M video noises (M, 48, 4, h, w). Run the 5 video passes at batch 2M; the last pass writes the cache,
-   so the cache now holds 2M rows each ending in its own plan's chunk. Capture the last pass's
-   pre-`proj_out` tokens of the M conditional rows and pool each with the text tokens through
-   `pool_critic_state` → p_m (M, 3072). The returned latents are the M fully denoised chunks.
+   so the cache now holds 2M rows each ending in its own plan's chunk. Pool each denoised chunk latent
+   (M, 48, 4, h, w) through the history-free critic pool (`_pool_from_latent`, one batch-M pass against
+   the empty critic cache, the same function that produces s from the current frame) → p_m (M, 3072).
 3. m* = argmax over m of min over heads j of V_plan_j(s, p_m), where s is the current-frame pool
    (`_pool_from_latent`, 3072-d) as today.
 4. Action decode at evaluation: repeat plan m*'s conditional row K times into a 1 × K cache, draw K action
@@ -146,17 +146,19 @@ anchored on Q(s, a_stored) against the Monte Carlo return, after `bc_filter_warm
 
 ## 8. Expert rows
 
-Demos have no sampled plan but have the true future. For each demo chunk: encode the real next 4 frames,
-noise the latent to σ = 0.015, run one video pass against the demo's own history cache, pool → p. This is
-the final-pass feature the online rows carry, computed from the true future instead of a sample. One-off
-precompute in the expert featurisation (about 900 passes for 30 demos), stored beside `expert_features.pt`.
-Expert rows keep z = 0 and a_base = demo action.
+Demos have no sampled plan but have the true future. For each demo chunk the plan pool is the history-free
+critic pool of the published latents of the next 4 frames (clamped and padded at the episode end), the
+same function and cache the online rows use on their denoised chunk, so expert and online pools differ
+only in where the chunk came from. One-off precompute in the expert featurisation (about 900 pooling
+passes for 30 demos), stored beside `expert_features.pt` under expert recipe v2. Expert rows keep z = 0 and
+a_base = demo action.
 
 ## 9. Replay rows
 
-Added per online row: plan_pool (executed, 3072), plan_pools_all (M × 3072), plan_index, plan_a_base_all
-(M × K × 480), plan_z_all (K × 480), plan_pool_next (filled at finalisation). Expert rows carry plan_pool
-only. Row size grows from about 17 KB to about 21 KB; 20k rows at 320k ≈ 0.42 GB.
+Added per row: plan_pool (executed, 3072), plan_pools_all (M × 3072), plan_index, plan_a_base_all
+(M × K × 480), plan_pool_next (filled at finalisation). Expert rows carry their single pool repeated M
+times and their K-copied demo action repeated M times, so every row has one shape and one target formula.
+Row size grows from about 60 KB to about 165 KB in float32; 20k rows at 320k ≈ 3.3 GB in the resume file.
 
 ## 10. Config
 
