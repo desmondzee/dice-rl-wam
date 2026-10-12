@@ -25,6 +25,12 @@ def validate_name(name):
     return name
 
 
+def validate_video_exec_step(value):
+    if type(value) is not int or not (value == -1 or 1 <= value <= 20):
+        raise ValueError("video_exec_step must be -1 or an integer in [1, 20]")
+    return value
+
+
 @dataclass(frozen=True)
 class EvalConfig:
     source_run: str = "libero30-sft"
@@ -36,11 +42,13 @@ class EvalConfig:
     task_ids: tuple = TASK_IDS
     shard: int = 0
     shards: int = 1
+    video_exec_step: int = -1
 
     def validate(self):
         validate_name(self.source_run)
         if self.stage not in ("smoke", "eval", "heldout"):
             raise ValueError("Evaluation stage must be smoke, eval, or heldout")
+        validate_video_exec_step(self.video_exec_step)
         if not self.task_ids or any(task not in TASK_IDS for task in self.task_ids) or len(set(self.task_ids)) != len(self.task_ids):
             raise ValueError("task_ids must be distinct LIBERO-10 task ids")
         if type(self.shards) is not int or type(self.shard) is not int or not 0 <= self.shard < self.shards:
@@ -89,7 +97,7 @@ class EvalConfig:
             "action_per_frame": 4,
             "video_steps": 20,
             "action_steps": 50,
-            "video_exec_step": -1,
+            "video_exec_step": self.video_exec_step,
             "video_guidance": 5.0,
             "action_guidance": 1.0,
             "snr_shift": 5.0,

@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass
 
 from script.lingbot_eval_config import (
     CAMERAS, LEROBOT_REVISION, LIBERO_ASSETS_REPO, LIBERO_ASSETS_REVISION,
-    TASK_IDS, validate_name,
+    TASK_IDS, validate_name, validate_video_exec_step,
 )
 from script.lingbot_sft_config import MODEL_REPO, MODEL_REVISION
 
@@ -36,8 +36,9 @@ class RLConfig:
             raise ValueError("RL is pinned to libero30-sft")
         if self.checkpoint_step != 600:
             raise ValueError("RL is pinned to checkpoint step 600")
-        if self.video_steps != 20 or self.action_steps != 50 or self.video_exec_step != -1:
-            raise ValueError("RL must use the released 20/50 full-video sampler")
+        if self.video_steps != 20 or self.action_steps != 50:
+            raise ValueError("RL must use the released 20/50 sampler")
+        validate_video_exec_step(self.video_exec_step)
         if self.k_candidates != 4:
             raise ValueError("Collection K is pinned to 4")
         if not self.task_ids or any(task not in TASK_IDS for task in self.task_ids) or len(set(self.task_ids)) != len(self.task_ids):

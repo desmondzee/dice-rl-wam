@@ -320,7 +320,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         norm = metadata["normalization"]
     else:
         norm = prepared.get("normalization") or {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
-    policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture)
+    policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture, config.video_exec_step)
     model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon)
     policy.residual_model = model
     policy.eval_candidates = config.k_candidates
@@ -514,14 +514,16 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     config = (config or RLConfig()).validate()
     eval_cfg = EvalConfig(
         source_run=config.source_run, checkpoint_step=config.checkpoint_step, stage="heldout", seed=42,
-        task_ids=config.task_ids, shard=shard, shards=shards).validate()
+        task_ids=config.task_ids, shard=shard, shards=shards, video_exec_step=config.video_exec_step).validate()
     prepared = _read_prepared(prepared_path)
     device = _device()
     if device == "cuda":
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
     metadata = read_checkpoint_metadata(prepared["checkpoint"])
-    policy = load_residual_policy(prepared["checkpoint"], prepared["model_path"], prepared.get("architecture") or metadata.get("architecture") or {})
+    policy = load_residual_policy(
+        prepared["checkpoint"], prepared["model_path"], prepared.get("architecture") or metadata.get("architecture") or {},
+        eval_cfg.video_exec_step)
     model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon)
     residual_path = Path(residual_path or Path(output_dir) / "residual.pt")
     try:

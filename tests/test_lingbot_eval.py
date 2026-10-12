@@ -80,10 +80,23 @@ def test_eval_config_round_trip_and_shard_validation():
     {"source_run": "../other"}, {"stage": "all"}, {"checkpoint_step": 0},
     {"seed": -1}, {"checkpoint_step": 1001}, {"task_ids": (0, 0)}, {"task_ids": ()},
     {"shard": 1}, {"shard": -1, "shards": 2}, {"shards": 0},
+    {"video_exec_step": 0}, {"video_exec_step": 21}, {"video_exec_step": -2}, {"video_exec_step": 10.0},
 ])
 def test_invalid_config(changes):
     with pytest.raises(ValueError):
         replace(EvalConfig(), **changes).validate()
+
+
+def test_video_exec_step_defaults_to_full_video_and_is_recorded_when_set():
+    default = EvalConfig().protocol()
+    assert default["video_exec_step"] == -1
+    early = EvalConfig(video_exec_step=10).protocol()
+    assert early["video_exec_step"] == 10
+    strip = lambda protocol: {key: value for key, value in protocol.items() if key != "video_exec_step"}
+    assert strip(early) == strip(default)
+    assert eval_config_from_dict(EvalConfig(video_exec_step=10).to_dict()).video_exec_step == 10
+    assert EvalConfig(video_exec_step=20).validate().protocol()["video_exec_step"] == 20
+    assert EvalConfig(video_exec_step=1).validate().protocol()["video_exec_step"] == 1
 
 
 def observation():
@@ -295,7 +308,8 @@ def test_shard_evaluation_persists_resumes_and_never_touches_wandb(tmp_path, mon
     module.write_json(prepared_path, prepared)
     monkeypatch.setattr(module, "read_checkpoint_metadata", lambda path: {"architecture": {}, "normalization": normalization()})
     monkeypatch.setattr(module, "describe_suite", lambda path: (object(), tasks))
-    monkeypatch.setattr(module, "load_policy", lambda *args: object())
+    loaded = []
+    monkeypatch.setattr(module, "load_policy", lambda *args: loaded.append(args) or object())
     monkeypatch.setattr(module.importlib.metadata, "version", lambda name: "pinned-test")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda: None)
@@ -353,6 +367,11 @@ def test_shard_evaluation_persists_resumes_and_never_touches_wandb(tmp_path, mon
         f"episode_{index:03d}.json" for index in (0, 1, 4, 5, 8, 9, 12, 13, 16, 17)]
     assert module.read_json(output / "episodes/task_04/episode_000.json")["video"] == "videos/task_04.mp4"
     assert sys.modules["wandb"] is None
+    assert loaded and all(args[3] == -1 for args in loaded)
+    early = module.evaluate(replace(cfg, shard=2, video_exec_step=10), prepared_path, output, "test-run")
+    assert early["complete"] and loaded[-1][3] == 10 and len(visited) == 30
+    recorded = module.read_json(output / "settings" / "shard_2.json")["config"]
+    assert recorded["video_exec_step"] == 10 and recorded["protocol"]["video_exec_step"] == 10
 
 
 def test_non_boolean_success_is_not_counted_as_success():

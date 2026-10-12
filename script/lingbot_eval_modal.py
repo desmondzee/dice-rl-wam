@@ -103,7 +103,8 @@ def run_rl_shard(config, prepared_path, run_dir, residual, eval_candidates, resu
     weights.reload()
     results.reload()
     command = [
-        EVAL_PYTHON, "-m", "script.lingbot_rl_train", "eval", "--config-json", json.dumps({"task_ids": list(cfg.task_ids), "residual_input": residual_input}),
+        EVAL_PYTHON, "-m", "script.lingbot_rl_train", "eval", "--config-json",
+        json.dumps({"task_ids": list(cfg.task_ids), "residual_input": residual_input, "video_exec_step": cfg.video_exec_step}),
         "--prepared-path", prepared_path, "--output-dir", f"/results/{run_dir}", "--residual-path", f"/weights/{residual}",
         "--eval-candidates", str(eval_candidates), "--shard", str(cfg.shard), "--shards", str(cfg.shards),
         "--result-volume", RESULT_VOLUME,
@@ -170,7 +171,8 @@ def download_task(run_dir, download_dir, resume):
 def main(stage: str = "prepare", source_run: str = "libero30-sft", checkpoint_step: int = 600, policy: str = "",
          task_ids: str = "0,4", shards: int = 4, seed: int = 42, resume: bool = False,
          wandb_project: str = "dice-lingbot-va-eval", wandb_entity: str = "james-j-carver-university-of-cambridge",
-         download_dir: str = "result/heldout", residual: str = "", eval_candidates: int = 4, residual_input: str = "z"):
+         download_dir: str = "result/heldout", residual: str = "", eval_candidates: int = 4, residual_input: str = "z",
+         video_exec_step: int = -1):
     from script.lingbot_eval import read_json
 
     if stage not in ("prepare", "eval", "merge"):
@@ -178,9 +180,10 @@ def main(stage: str = "prepare", source_run: str = "libero30-sft", checkpoint_st
     tasks = tuple(int(task) for task in task_ids.split(","))
     if residual and not policy:
         raise ValueError("--policy names the residual evaluation")
-    policy = validate_name(policy or f"sft-step{checkpoint_step:06d}")
+    policy = validate_name(policy or f"sft-step{checkpoint_step:06d}" + (f"-exec{video_exec_step}" if video_exec_step != -1 else ""))
     base = EvalConfig(source_run=source_run, checkpoint_step=checkpoint_step, stage="heldout", seed=seed,
-                      task_ids=tasks, wandb_project=wandb_project, wandb_entity=wandb_entity or None).validate()
+                      task_ids=tasks, wandb_project=wandb_project, wandb_entity=wandb_entity or None,
+                      video_exec_step=video_exec_step).validate()
     for task in tasks:
         if stage != "prepare" and (Path(download_dir) / policy / f"task_{task:02d}").exists() and not resume:
             raise FileExistsError("Local result directory exists; pass --resume to refresh it")

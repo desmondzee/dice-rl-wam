@@ -322,7 +322,7 @@ def aggregate_results(rows, task_ids=TASK_IDS, episodes_per_task=20, expected=No
         "per_task": per_task}
 
 
-def load_policy(checkpoint, model_path, architecture):
+def load_policy(checkpoint, model_path, architecture, video_exec_step=-1):
     import torch
     from safetensors.torch import load_file
     from lerobot.configs.types import FeatureType, PolicyFeature
@@ -347,7 +347,7 @@ def load_policy(checkpoint, model_path, architecture):
         wan_pretrained_path=str(model_path), text_encoder_device="cpu", device="cuda", dtype="bfloat16",
         attn_mode="torch", image_hflip=False, camera_layout="width_concat", obs_cam_keys=list(CAMERAS),
         height=128, width=128, action_per_frame=4, frame_chunk_size=4, attn_window=30,
-        num_inference_steps=20, video_exec_step=-1, action_num_inference_steps=50,
+        num_inference_steps=20, video_exec_step=video_exec_step, action_num_inference_steps=50,
         guidance_scale=5.0, action_guidance_scale=1.0, snr_shift=5.0, action_snr_shift=0.05,
         used_action_channel_ids=list(range(7)), save_predicted_video=False,
     )
@@ -429,7 +429,7 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
         if summary["complete"]:
             return summary
         torch.cuda.reset_peak_memory_stats()
-        policy = load_policy(checkpoint, prepared["model_path"], metadata["architecture"])
+        policy = load_policy(checkpoint, prepared["model_path"], metadata["architecture"], config.video_exec_step)
         for task in tasks:
             task_id = task["task_id"]
             pending = [entry for entry in plans[task_id] if (task_id, entry["episode_index"]) not in done]
@@ -494,11 +494,13 @@ def main():
         prepared_path = prepare_evaluation(config, args.cache_root, args.checkpoint)
         write_json(args.prepared_output, {"prepared_path": prepared_path})
     else:
-        if any(value is None for value in (args.prepared_path, args.output_dir, args.run_name, args.result_volume)):
-            parser.error("run requires --prepared-path, --output-dir, --run-name, and --result-volume")
-        import modal
-        volume = modal.Volume.from_name(args.result_volume)
-        summary = evaluate(config, args.prepared_path, args.output_dir, args.run_name, args.resume, volume.commit)
+        if any(value is None for value in (args.prepared_path, args.output_dir, args.run_name)):
+            parser.error("run requires --prepared-path, --output-dir, and --run-name")
+        commit = None
+        if args.result_volume:
+            import modal
+            commit = modal.Volume.from_name(args.result_volume).commit
+        summary = evaluate(config, args.prepared_path, args.output_dir, args.run_name, args.resume, commit)
         print(json.dumps(summary, indent=2))
 
 
