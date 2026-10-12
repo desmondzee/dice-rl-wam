@@ -1047,6 +1047,8 @@ def test_load_resume_accepts_legacy_torch_numpy_rng(tmp_path):
 
 
 class _StubPolicy:
+    plan_calls = []
+
     def reset(self):
         self._executed_actions = None
 
@@ -1061,6 +1063,15 @@ class _StubPolicy:
             "video_noise": torch.zeros(1),
             "first_chunk": True,
         }
+
+    def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False):
+        type(self).plan_calls.append((plans, k, random_plan, decode_all))
+        base = self.decode_candidates(batch, k)
+        pools = torch.stack([torch.full((STATE_DIM,), float(m)) for m in range(plans)])
+        all_base = torch.stack([base["a_base"] + 10.0 * m for m in range(plans)])
+        index = 1 if random_plan else int(rank_fn(base["s"], pools))
+        return {**base, "plan_pools": pools, "plan_pool": pools[index:index + 1], "plan_index": index,
+                "plan_a_base_all": all_base, "a_base": all_base[index]}
 
     def commit_executed(self, chunk, first_chunk=False):
         self._executed_actions = chunk
@@ -1163,6 +1174,30 @@ def test_selection_is_random_during_warmup_and_argmax_afterwards(tmp_path, monke
         config=RLConfig(selection_warmup_steps=0))
     assert [float(row["a"][0][0]) for row in greedy["rows"]] == [3.0, 3.0, 3.0]
     assert [entry["selection_active"] for entry in greedy["logs"] if "selection_active" in entry] == []
+
+
+def test_train_with_plans_stores_plan_rows_trains_the_plan_critic_and_logs_metrics(tmp_path, monkeypatch):
+    _StubPolicy.plan_calls = []
+    out = _smoke_train(tmp_path / "ranked", monkeypatch, 42, model_factory=lambda **kw: DiceResidualModel(**kw),
+                       config=RLConfig(plan_candidates=3, plan_random_prob=0.0, selection_warmup_steps=0, residual_input="base"))
+    rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
+    assert rows[0]["plan_pools_all"].shape == (3, STATE_DIM)
+    assert rows[0]["plan_a_base_all"].shape == (3, K_CANDIDATES, HORIZON, ACTION_DIM)
+    assert float(rows[0]["plan_pool"][0]) == float(rows[0]["plan_index"])
+    assert all(call[2] is False and call[3] is True for call in _StubPolicy.plan_calls)
+    logged = [entry for entry in out["logs"] if "plan_critic_loss" in entry]
+    assert logged and {"plan_agreement", "plan_regret", "plan_value_spread", "plan_random_rate", "seconds_per_env_step"} <= set(logged[0])
+    assert {"plan_critic", "plan_opt", "plan_lr"} <= set(out["resume"])
+    _StubPolicy.plan_calls = []
+    _smoke_train(tmp_path / "warm", monkeypatch, 42, model_factory=lambda **kw: DiceResidualModel(**kw),
+                 config=RLConfig(plan_candidates=3, plan_random_prob=0.0, selection_warmup_steps=10_000))
+    assert all(call[2] is True for call in _StubPolicy.plan_calls)
+
+
+def test_single_plan_training_never_calls_select_plan(tmp_path, monkeypatch):
+    _StubPolicy.plan_calls = []
+    out = _smoke_train(tmp_path, monkeypatch, 42, model_factory=lambda **kw: DiceResidualModel(**kw), config=RLConfig(selection_warmup_steps=0))
+    assert _StubPolicy.plan_calls == [] and not any("plan_agreement" in entry for entry in out["logs"])
 
 
 def test_train_resume_reuses_wandb_id_and_skips_ingest(tmp_path, monkeypatch):

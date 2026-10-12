@@ -1,7 +1,9 @@
 import argparse
 import json
 import os
+import platform
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -62,15 +64,25 @@ def replay_sharpening(model, sample):
     if int(online.sum()) < 2:
         return {}
     state, z_all, base_all = mlp_float(sample["s"])[online], mlp_float(sample["z_all"])[online], mlp_float(sample["a_base_all"])[online]
+    pool = sample.get("plan_pool")
     batch, k = z_all.shape[:2]
     state_k = state.unsqueeze(1).expand(batch, k, -1).reshape(batch * k, -1)
+    pool_k = None if pool is None else mlp_float(pool)[online].unsqueeze(1).expand(batch, k, -1).reshape(batch * k, -1)
+    critic_k = model.critic_state(state_k, pool_k)
     base_flat = base_all.reshape(batch * k, HORIZON, ACTION_DIM)
     with torch.no_grad():
         action = apply_residual(base_flat, model.actor(state_k, z_all.reshape(batch * k, HORIZON, ACTION_DIM), base_flat))
-        delta_v = float((model.critic(state_k, action) - model.critic(state_k, base_flat)).mean())
-    before, after = base_all.cpu().numpy(), action.reshape(batch, k, HORIZON, ACTION_DIM).cpu().numpy()
-    return {"replay_delta_v": delta_v, "replay_delta_h": float((bin_entropy(before) - bin_entropy(after)).mean()),
-            "replay_delta_log_std": float((log_std(after) - log_std(before)).mean())}
+        delta_v = float((model.critic(critic_k, action) - model.critic(critic_k, base_flat)).mean())
+        before, after = base_all.cpu().numpy(), action.reshape(batch, k, HORIZON, ACTION_DIM).cpu().numpy()
+        metrics = {"replay_delta_v": delta_v, "replay_delta_h": float((bin_entropy(before) - bin_entropy(after)).mean()),
+                   "replay_delta_log_std": float((log_std(after) - log_std(before)).mean())}
+        if model.plan_critic is not None:
+            pools_all = mlp_float(sample["plan_pools_all"])[online]
+            plans = pools_all.shape[1]
+            v_plan = model.plan_critic(state.unsqueeze(1).expand(batch, plans, -1).reshape(batch * plans, -1),
+                                       pools_all.reshape(batch * plans, -1)).reshape(batch, plans)
+            metrics["replay_plan_value_spread"] = float((v_plan.max(dim=1).values - v_plan.min(dim=1).values).mean())
+    return metrics
 
 
 def recipe_of(config):
@@ -238,14 +250,18 @@ def _update_from_buffer(model, buffer, expert_ratio, device, filter_active):
     info = {}
     for step in range(GRADIENT_STEPS):
         sample = _sample_batch(buffer, expert_ratio, device)
+        critic_state = model.critic_state(sample["s"], sample.get("plan_pool"))
+        next_critic_state = model.critic_state(sample["s_next"], sample.get("plan_pool_next"))
         target = model.n_step_target(
-            sample["reward"], sample["done"], sample["s_next"],
+            sample["reward"], sample["done"], next_critic_state,
             sample["z_next_all"], sample["a_base_next_all"], sample["n_steps"])
         if (step + 1) % ACTOR_EVERY == 0:
             info.update(model.update_actor(
-                sample["s"], sample["s"], sample["a"], sample["z_all"], sample["a_base_all"], sample["is_expert"],
+                sample["s"], critic_state, sample["a"], sample["z_all"], sample["a_base_all"], sample["is_expert"],
                 sample["mc_return"], filter_active))
-        info.update(model.update_critic(sample["s"], sample["a"], target))
+        info.update(model.update_critic(critic_state, sample["a"], target))
+        if model.plan_critic is not None:
+            info.update(model.update_plan_critic(sample["s"], sample["plan_pools_all"], sample["z_all"], sample["plan_a_base_all"]))
         if (step + 1) % ACTOR_EVERY == 0:
             model.polyak_update()
     return info
@@ -278,7 +294,11 @@ def _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir, episo
 
 
 def _maybe_sharpen(model, policy, batch, device):
-    decoded = policy.decode_candidates(batch, k=8)
+    if policy.eval_plans > 1:
+        decoded = policy.select_plan(batch, policy.eval_plans, 8, rank_fn=model.rank_plans)
+    else:
+        decoded = policy.decode_candidates(batch, k=8)
+    pool = decoded["plan_pool"].to(device=device, dtype=torch.float32) if policy.eval_plans > 1 else None
     a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
     noise = decoded["z"].to(device=device, dtype=torch.float32)
     state = decoded["s"].to(device=device, dtype=torch.float32)
@@ -292,7 +312,8 @@ def _maybe_sharpen(model, policy, batch, device):
         pooled = decoded["s"].to(device)
     else:
         pooled = state
-    return sharpening_metrics(model, pooled, a_base, action)
+    critic_state = model.critic_state(pooled, None if pool is None else pool.expand(pooled.shape[0], -1))
+    return sharpening_metrics(model, critic_state, a_base, action)
 
 
 def train(config=None, prepared_path=None, output_dir=None, run_name=None, resume=False,
@@ -308,6 +329,10 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     if prepared.get("source_run") not in (None, config.source_run) or prepared.get("checkpoint_step") not in (None, config.checkpoint_step):
         raise ValueError("Prepared checkpoint does not match the pinned RL recipe")
     device = _device()
+    runtime = {"cuda": torch.version.cuda, "machine": platform.machine(),
+               "flash_sdp_enabled": bool(torch.backends.cuda.flash_sdp_enabled()) if device == "cuda" else None}
+    if device == "cuda" and runtime["machine"] == "aarch64" and not str(runtime["cuda"]).startswith("13"):
+        raise RuntimeError("GB10 hosts need a CUDA 13 torch build (DICE_TORCH_INDEX)")
     if device == "cuda":
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -322,10 +347,12 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         norm = prepared.get("normalization") or {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
     policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture, config.video_exec_step,
                                   config.video_steps, config.action_steps)
-    model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon)
+    model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon,
+                              plan_candidates=config.plan_candidates)
     policy.residual_model = model
     policy.eval_candidates = config.k_candidates
-    buffer = ChunkReplay()
+    policy.eval_plans = config.plan_candidates
+    buffer = ChunkReplay(plans=config.plan_candidates)
     tasks = prepared["tasks"]
     if prepared.get("checkpoint") and not resume:
         cache_path = output_dir / "expert_features.pt"
@@ -352,7 +379,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     if max_env_steps is None and env_steps == 0:
         if not any(float(row["is_expert"]) == 1.0 for row in buffer.rows()):
             raise RuntimeError("Expert features missing; RLPD requires the SFT demos")
-    _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe})
+    _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe, "runtime": runtime})
     wandb_kwargs = {
         "project": config.wandb_project,
         "entity": config.wandb_entity,
@@ -370,6 +397,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     budget = max_env_steps if smoke else config.online_env_steps
     min_online_rows = 1 if smoke else BATCH
     next_sharpen = 0
+    chunk_seconds, chunk_actions, plan_info = 0.0, 0, {}
     eval_points = set(config.train_eval_schedule())
 
     def maybe_checkpoint():
@@ -416,10 +444,18 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         try:
             while env_steps < budget and episode_length < 520:
                 batch = observation_batch(observation, task["instruction"], device)
-                decoded = policy.decode_candidates(batch, k=config.k_candidates)
+                started = time.perf_counter()
+                plans = config.plan_candidates
+                if plans > 1:
+                    random_plan = env_steps < config.selection_warmup_steps or np.random.random() < config.plan_random_prob
+                    decoded = policy.select_plan(batch, plans, config.k_candidates, rank_fn=model.rank_plans,
+                                                 random_plan=random_plan, decode_all=True)
+                else:
+                    decoded = policy.decode_candidates(batch, k=config.k_candidates)
                 state = decoded["s"].to(device=device, dtype=torch.float32)
                 noise = decoded["z"].to(device=device, dtype=torch.float32)
                 a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
+                pool = decoded["plan_pool"].to(device=device, dtype=torch.float32) if plans > 1 else None
                 k = a_base.shape[0]
                 if k != config.k_candidates:
                     raise RuntimeError("action candidate batching failed")
@@ -429,7 +465,20 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     if env_steps < config.selection_warmup_steps:
                         star = int(np.random.randint(k))
                     else:
-                        star = int(model.critic(state_k, executed).reshape(-1).argmax())
+                        critic_k = model.critic_state(state_k, None if pool is None else pool.expand(k, -1))
+                        star = int(model.critic(critic_k, executed).reshape(-1).argmax())
+                    if plans > 1:
+                        pools_all = decoded["plan_pools"].to(device=device, dtype=torch.float32)
+                        all_base = decoded["plan_a_base_all"].to(device=device, dtype=torch.float32)
+                        flat_state = state.expand(plans * k, -1)
+                        flat_base = all_base.reshape(plans * k, HORIZON, ACTION_DIM)
+                        q_all = model.critic(model.critic_state(flat_state, pools_all.repeat_interleave(k, dim=0)),
+                                             apply_residual(flat_base, model.actor(flat_state, noise.repeat(plans, 1, 1), flat_base))).reshape(plans, k).max(dim=1).values
+                        v_all = model.plan_critic(state.expand(plans, -1), pools_all).reshape(-1)
+                        plan_info = {"plan_agreement": float(int(v_all.argmax()) == int(q_all.argmax())),
+                                     "plan_regret": float(q_all.max() - q_all[decoded["plan_index"]]),
+                                     "plan_value_spread": float(v_all.max() - v_all.min()),
+                                     "plan_random_rate": float(random_plan)}
                 chosen = executed[star:star + 1]
                 policy.commit_executed(chosen.cpu(), first_chunk=decoded["first_chunk"])
                 env_actions = slice_env_actions(chosen.cpu(), decoded["first_chunk"])
@@ -453,6 +502,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         break
                     if env_steps >= budget:
                         break
+                chunk_seconds += time.perf_counter() - started
+                chunk_actions += executed_n
                 episode_return += chunk_reward
                 s_cpu = _host_array(state)[0]
                 buffer.add_online({
@@ -468,6 +519,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     "task_id": task_id,
                     "n_env_actions": executed_n,
                     "is_expert": np.float32(0.0),
+                    **({"plan_pool": _host_array(pool)[0], "plan_pools_all": _host_array(pools_all),
+                        "plan_index": int(decoded["plan_index"]), "plan_a_base_all": _host_array(all_base)} if plans > 1 else {}),
                 })
                 chunks += 1
                 expert_ratio = config.rlpd_expert_ratio(env_steps)
@@ -478,10 +531,13 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         update_info.update(replay_sharpening(model, _sample_batch(buffer, expert_ratio, device)))
                         next_sharpen = env_steps - env_steps % SHARPEN_EVERY_STEPS + SHARPEN_EVERY_STEPS
                     run.log({
-                        **update_info, "env_steps": env_steps, "chunks": chunks, "expert_ratio": expert_ratio,
+                        **update_info, **plan_info, "env_steps": env_steps, "chunks": chunks, "expert_ratio": expert_ratio,
                         "buffer_online_rows": buffer.ready_online_count(),
                         "selection_active": float(env_steps >= config.selection_warmup_steps),
+                        "seconds_per_env_step": chunk_seconds / max(chunk_actions, 1),
+                        "peak_gpu_memory_gb": torch.cuda.max_memory_allocated() / 1e9 if device == "cuda" else 0.0,
                     })
+                    chunk_seconds, chunk_actions = 0.0, 0
                 if done:
                     break
             buffer.finalize_episode()
@@ -526,7 +582,8 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     policy = load_residual_policy(
         prepared["checkpoint"], prepared["model_path"], prepared.get("architecture") or metadata.get("architecture") or {},
         eval_cfg.video_exec_step, eval_cfg.video_steps, eval_cfg.action_steps)
-    model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon)
+    model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon,
+                              plan_candidates=config.plan_candidates)
     residual_path = Path(residual_path or Path(output_dir) / "residual.pt")
     try:
         model.load_inference_state_dict(torch.load(residual_path, map_location="cpu", weights_only=True))
@@ -534,6 +591,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
         raise RuntimeError(f"Failed to load residual weights {residual_path}: {exc}") from exc
     policy.residual_model = model
     policy.eval_candidates = eval_candidates or config.k_candidates
+    policy.eval_plans = config.plan_candidates
     suite, tasks = describe_suite(prepared["assets_path"])
     tasks = [task for task in tasks if task["task_id"] in config.task_ids]
     plans = {task["task_id"]: shard_plan(eval_cfg, episode_plan(eval_cfg, task["task_id"], task["initial_state_count"])) for task in tasks}
@@ -541,6 +599,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     output_dir = Path(output_dir)
     write_json(output_dir / "settings" / f"shard_{shard}.json", {
         "config": eval_cfg.to_dict(), "rl": config.to_dict(), "eval_candidates": policy.eval_candidates,
+        "eval_plans": policy.eval_plans,
         "residual_sha256": file_sha256(residual_path), "episode_plan": [entry for task in tasks for entry in plans[task["task_id"]]]})
 
     def summarize():
