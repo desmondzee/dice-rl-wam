@@ -33,27 +33,28 @@ with the value trained by regression onto the TD critic in the manner of DSRL's 
 ## 3. Sampler facts
 
 - A chunk is 4 latent frames = 16 env actions; the chunk latent is (48, 4, h, w).
-- `FlowMatchScheduler(shift=5)` evaluates the model at these noise levels σ (1 = pure noise); after step i the
-  latent sits at entry i + 1, and after the last step at 0:
+- The port builds `FlowMatchScheduler(shift=5, sigma_min=0, extra_one_step=True)`: n steps are n denoising
+  passes at the shifted levels below (σ = 1 is pure noise), the last of which lands on σ = 0, followed by one
+  write-only pass at σ = 0 that puts the clean chunk into the cache. So "5 steps" is 6 transformer passes.
 
-  | steps | σ per pass |
+  | steps | σ of each denoising pass |
   |---|---|
-  | 5 | 1.00, 0.94, 0.83, 0.63, 0.015 |
-  | 6 | 1.00, 0.95, 0.88, 0.77, 0.56, 0.015 |
-  | 7 | 1.00, 0.96, 0.91, 0.83, 0.72, 0.50, 0.015 |
-  | 20 | 1.00, 0.99, … 0.49 (pass 17), 0.38, 0.23, 0.015 |
+  | 4 | 1.00, 0.94, 0.83, 0.63 |
+  | 5 | 1.00, 0.95, 0.88, 0.77, 0.56 |
+  | 6 | 1.00, 0.96, 0.91, 0.83, 0.71, 0.50 |
+  | 20 | 1.00, 0.99, … 0.56 (pass 17), 0.47, 0.36, 0.21 |
 
-- `video_exec_step = E` runs E passes; the cache is written on pass E from its input, so the action stream
-  reads history at the σ of pass E. Full denoising writes it from σ = 0.015. Post-training noises the history
-  to σ ∈ [0, 0.5] with probability 0.5, so cache levels σ ≤ 0.5 are in distribution. Under shift 5 no
-  truncation reaches σ ≤ 0.5 in fewer than 5 passes, so partial denoising saves nothing and is dropped. The
-  paper's "3 Euler steps to s = 0.6" belongs to an unshifted schedule the released checkpoint and configs do
-  not use; every released config runs `video_exec_step = -1`.
-- Re-bench (task 9, 100 held-out episodes, the seeds of every result in `docs/heldout-results.md`): Jarvis
-  5 / 10 full (`sft-step000600-v5e-1a10`); Watson 5 steps / E = 4 / 10 (`sft-step000600-v5e4a10`, cache at
-  σ = 0.63, side result). Reference 42 / 100 at 20 / 50. The 5 / 10 result must land inside 42 ± 10 for the
-  design to proceed at that sampler; otherwise 20 / 50 with M = 4 is the fallback. Task 0 gets the same SFT
-  re-bench (reference 63 / 100).
+- `video_exec_step = E` runs only the first E passes; pass E writes the cache from its input and still
+  advances the latent, so the action stream reads history at the σ of pass E. Post-training noises the
+  history to σ ∈ [0, 0.5] with probability 0.5, so cache levels σ ≤ 0.5 are in distribution. Under shift 5
+  the cheapest in-range truncation is 6 steps / E = 6 (6 passes, cache at 0.50), the same count as 5 full
+  steps, so partial denoising saves nothing and is dropped. The paper's "3 Euler steps to s = 0.6" belongs to
+  an unshifted schedule the released checkpoint and configs do not use; every released config runs
+  `video_exec_step = -1`.
+- Re-bench result (task 9, 100 held-out episodes, the seeds of every result in `docs/heldout-results.md`):
+  5 / 10 full = 60 / 100 (33 gained / 15 lost against 42 / 100 at 20 / 50); 5 steps / E = 4 / 10 (cache at
+  σ = 0.77) = 39 / 100. The 5 / 10 sampler is adopted for training and every evaluation; the old residual
+  results at 20 / 50 are not comparable to what follows. Tasks 0 and 8 get the same SFT re-bench.
 - Episode wall time on a GB10 at 5 / 10, M = 1: about 65 s (520 policy steps) against 1213 s at 20 / 50.
 
 ## 4. Throughput
@@ -73,17 +74,19 @@ Everything else stays: Torch 2.11.0+cu130 (sm_121 kernels, installed by `brev/se
 `DICE_TORCH_INDEX`), `F.scaled_dot_product_attention` in bf16 (`attn_mode: torch`), no FlashAttention
 package, TensorRT, FP8, CUDA graphs or `torch.compile` (sequence length changes every chunk and the cache
 is mutated in Python inside the forward, so compile would recompile or break graphs, and fused bf16 kernels
-would void the bit-for-bit tests), no parallel environments (a recipe change). The P0
-smoke at 5 / 10 asserts `torch.version.cuda` starts with 13, checks that the flash SDPA backend is selected
-for the port's shapes, and logs seconds per env step at M = 4 and at M = 1.
+would void the bit-for-bit tests), no parallel environments (a recipe change). The trainer refuses to start
+on an aarch64 host whose torch is not a CUDA 13 build, records the CUDA version and the SDPA flash flag in
+`settings.json`, and logs `seconds_per_env_step` and the peak GPU memory with every update; the P0 smoke at
+5 / 10 reads them at M = 4 and at M = 1. Working set at M = 4, K = 4: about 25 GB of KV cache (2M-row
+history, its snapshot, and the M × K-row decode cache) on top of 10 GB of weights.
 
 ## 5. Policy at inference
 
 Per chunk, with the history cache holding 2 rows (conditional, unconditional):
 
 1. Snapshot the history. Repeat each cache row M times so the cache has 2M rows ordered [cond × M, uncond × M].
-2. Draw M video noises (M, 48, 4, h, w). Run the 5 video passes at batch 2M; the last pass writes the cache,
-   so the cache now holds 2M rows each ending in its own plan's chunk. Pool each denoised chunk latent
+2. Draw M video noises (M, 48, 4, h, w). Run the 5 denoising passes and the clean write pass at batch 2M;
+   the write pass puts each plan's chunk into its own rows, so the cache now holds 2M rows. Pool each denoised chunk latent
    (M, 48, 4, h, w) through the history-free critic pool (`_pool_from_latent`, one batch-M pass against
    the empty critic cache, the same function that produces s from the current frame) → p_m (M, 3072).
 3. m* = argmax over m of min over heads j of V_plan_j(s, p_m), where s is the current-frame pool
@@ -177,8 +180,10 @@ Row size grows from about 60 KB to about 165 KB in float32; 20k rows at 320k ≈
 ```
 
 The task 0 run is the same file with `task_ids: [0]`. The random-plan warm-up reuses
-`selection_warmup_steps` (64k). All plan and sampler fields enter the recipe fingerprint. The eval config
-gains `eval_plan_candidates` (default: the run's M), so every held-out result records its sampler and M.
+`selection_warmup_steps` (64k). All plan and sampler fields enter the recipe fingerprint, so no resume file
+saved before this change loads; the runs use fresh names. Evaluation takes M from the same RL config
+(`brev/eval.sh --plans M`, policy name suffix `-mM`) and records it as `eval_plans` in the shard settings;
+a mismatched M fails on the critic width. The Modal evaluation path is not extended (GB10 only).
 
 ## 11. Code changes (no comments or docstrings)
 

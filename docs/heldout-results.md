@@ -165,6 +165,6 @@ Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 48
 | 9 | SFT, best-of-1, 5 steps executed at 4 / 10 (GB10) | 39 | 0.39 | 449 | 25 / 28 | 8 · 23 · 19 |
 | 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
 
-Sampler re-bench (2026-10-12, GB10, torch 2.11.0+cu130): the unchanged SFT prior on task 9 at the authors' default 5 video / 10 action steps scores 60 / 100 against 42 / 100 at the released 20 / 50 LIBERO sampler on the same 100 episodes (paired 33 gained / 15 lost; 15 states succeed on both seeds, 30 on one, 5 on neither). Stopping the 5-step schedule after its fourth pass, which leaves the history cache at noise level 0.63, scores 39 / 100. The plan-selection runs and all later evaluations use 5 / 10.
+Sampler re-bench (2026-10-12, GB10, torch 2.11.0+cu130): the unchanged SFT prior on task 9 at the authors' default 5 video / 10 action steps scores 60 / 100 against 42 / 100 at the released 20 / 50 LIBERO sampler on the same 100 episodes (paired 33 gained / 15 lost; 15 states succeed on both seeds, 30 on one, 5 on neither). Stopping the 5-step schedule after its fourth pass, which leaves the history cache at noise level 0.77, scores 39 / 100. The plan-selection runs and all later evaluations use 5 / 10.
 
 Selection by the trained critic contributed on all three tasks (+9, +14, +7); the residual's own contribution ranged from +18 to −5 and ordered the tasks the same way the train-eval ΔV did.
