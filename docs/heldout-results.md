@@ -165,6 +165,7 @@ Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 48
 | 9 | SFT, best-of-1, 5 / 10 sampler (GB10) | 60 | 0.60 | 400 | 33 / 15 | 15 · 30 · 5 |
 | 9 | SFT, best-of-1, 5 steps executed at 4 / 10 (GB10) | 39 | 0.39 | 449 | 25 / 28 | 8 · 23 · 19 |
 | 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
+| 8 | SFT, best-of-1, 5 / 10 sampler (GB10) | 12 | 0.12 | 512 | — (no 20 / 50 held-out run; 2 / 20 on the 20-rollout eval) | 1 · 10 · 39 |
 
 Sampler re-bench (2026-10-12, GB10, torch 2.11.0+cu130): the unchanged SFT prior on task 9 at the authors' default 5 video / 10 action steps scores 60 / 100 against 42 / 100 at the released 20 / 50 LIBERO sampler on the same 100 episodes (paired 33 gained / 15 lost; 15 states succeed on both seeds, 30 on one, 5 on neither). Stopping the 5-step schedule after its fourth pass, which leaves the history cache at noise level 0.77, scores 39 / 100. Task 0 at 5 / 10 scores 75 / 100 against 63 / 100 at 20 / 50 (paired 24 gained / 12 lost). The plan-selection runs and all later evaluations use 5 / 10.
 
