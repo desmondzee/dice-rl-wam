@@ -1,139 +1,162 @@
 # Plan-level selection for LingBot-VA DICE-RL
 
-Status: design under discussion, not implemented. Code base: main at 1bb03c8 (RL scripts
-comment-free, `script/modal_volume_tools.py` for verified volume transfers, DSRL reference at
-`.cache/dsrl`).
+Status: v1 design, approved decisions, not implemented. Code base: main at d6e2a6b (`decode_plans` is the only
+multi-plan primitive; sampler options `video_steps`, `action_steps`, `video_exec_step` in both configs).
 
-## 1. Decisions taken
+## 1. Decisions
 
 | item | decision |
 |---|---|
-| task, residual input, ε | task 9, `residual_input: base`, ε = −0.3 |
-| plan candidates M | 4 |
-| budget | 320k env steps; checkpoints every 80k plus the end; train-evals at 0 / 80k / 240k; rolling resume every 10 episodes and at every checkpoint; W&B as today |
-| plan_random_prob | 0.1, constant, collection only; evaluation always executes the argmax plan |
-| execution schedule | partial video denoising to step E, adopted after probe P1; all baselines re-run on the chosen E |
-| ranking step k | from probe P3 |
-| route for rejected plans | partial decode at step k if P3 shows agreement, else continue to E |
-| compute | GB10 units (DGX Spark); two units run two independent jobs, not one faster run |
-| critics | Q extended with the plan pool; V_plan a distilled 10-head critic; actor unchanged |
+| tasks, residual input, ε | tasks 9 and 0, one run each, `residual_input: base`, ε = −0.3 (action-branch filter only) |
+| sampler | 5 video steps fully denoised, 10 action steps, CFG 5 / 1, shift 5 / 0.05: the authors' default (VA2 §2.4.1, `va_franka_cfg`) |
+| plan candidates M | 4, fully denoised, batched through one transformer pass; no early exit, no partial decode |
+| plan ranking | argmax over m of min-ensemble V_plan(s, p_m); V_plan trained by regression onto Q |
+| action ranking | argmax over k of min-ensemble Q(s, p_m*, a_k) inside the chosen plan, K = 4, decoded as one batch of M × K |
+| actor | residual actor on (s, a_base), zero-init, β = 100, Q-normalised TD3+BC, filter at ε; unchanged |
+| budget | 320k env steps per run; checkpoints every 80k plus the end; train-evals at 0 / 80k / 240k; resume every 10 episodes; W&B as today |
+| plan_random_prob | 0.1, constant, collection only, after `selection_warmup_steps` (64k) during which the plan is always random; evaluation executes the argmax plan |
+| evaluation | the method only (M = 4, K = 4); the SFT re-bench is the sampler check |
+| compute | the two GB10s (DGX Spark), one run each; no Modal |
 
 ## 2. Why
 
-Given one video plan, the four action candidates differ by a standard deviation of 0.033 in
-normalised units against 0.44 across states; the residual is 0.034 RMS; the ΔH bin is 0.04. The
-action decoder is near-deterministic given the plan, so selection among candidates and the residual
-are substitutes (base run 63 → 75, filtered run 73 → 73) and no recipe produced the paper's negative
-ΔV–ΔH trend. The policy's modes live in the plan, sampled once per chunk. Choosing among M plans with
-a learned plan critic is the contraction operator that fits this model: it keeps the policy on its
-own support and acts where the distribution has mass to remove.
+Given one video plan, the four action candidates differ by 0.033 (std, normalised units) against 0.44 across
+states; the residual is 0.034 RMS. The action decoder is near-deterministic given the plan, so candidate
+selection and the residual are substitutes (63 → 75 and 73 → 73 on task 9) and no action-level recipe
+produced the paper's negative ΔV–ΔH trend. The policy's modes live in the plan, sampled once per chunk and
+never resampled. Choosing among M sampled plans with a learned plan value is the contraction operator that
+fits this model: it stays on the policy's own support and removes mass where the distribution has it. This
+is best-of-N re-ranking with a learned value (V-GPS, Nakamoto et al. 2024) lifted from actions to plans,
+with the value trained by regression onto the TD critic in the manner of DSRL's noise-space critic
+(Wagenmaker et al. 2025).
 
-## 3. Facts the design relies on
+## 3. Sampler facts
 
 - A chunk is 4 latent frames = 16 env actions; the chunk latent is (48, 4, h, w).
-- Video denoise: 20 scheduler steps, CFG 5, each step a transformer pass attending to the KV cache
-  of observed history; only the last step writes the chunk into the cache. The released config
-  exposes `video_exec_step`, which truncates the schedule.
-- Action denoise: 50 steps on the 768-wide action stream after the video, reading the plan through
-  the cache; K candidates run against a K-expanded cache.
-- The pinned post-training Trainer noises the video conditioning with probability 0.5 to
-  s ∈ [0.5, 1.0] (`_add_noise(noisy_cond_prob=0.5)`), and the action stream attends to those
-  latents, so our SFT checkpoint was trained to decode actions from plans denoised to s ≥ 0.5. The
-  paper's implementation integrates 3 steps to s ≈ 0.6.
-- The critic state is a history-free pool of the current frame (3072-d). The same hook pools the
-  video stream's tokens at any denoise step; those tokens are history-conditioned because the pass
-  attends to the cache, so a plan pool needs no explicit previous-frame input.
-- Schedule steps are not evenly spaced in s (shifted schedule); every probe logs sigma per step.
+- `FlowMatchScheduler(shift=5)` evaluates the model at these noise levels σ (1 = pure noise); after step i the
+  latent sits at entry i + 1, and after the last step at 0:
 
-## 4. Probes before the run
+  | steps | σ per pass |
+  |---|---|
+  | 5 | 1.00, 0.94, 0.83, 0.63, 0.015 |
+  | 6 | 1.00, 0.95, 0.88, 0.77, 0.56, 0.015 |
+  | 7 | 1.00, 0.96, 0.91, 0.83, 0.72, 0.50, 0.015 |
+  | 20 | 1.00, 0.99, … 0.49 (pass 17), 0.38, 0.23, 0.015 |
 
-- **P0 Stack and throughput.** The 300-step smoke on a GB10 (aarch64 CUDA torch, MuJoCo, robosuite,
-  EGL). Record s/env-step against the L40S's 0.29 at 20 steps.
-- **P1 Execution schedule.** SFT held-out on task 9, 100 episodes, same seeds, at `video_exec_step`
-  20, 12, 10, 6 and 3, with sigma logged per cut. E = the shortest cut whose success stays inside
-  the 20-step interval (42 ± 10). Fallback if every short cut degrades: re-post-train on the
-  30 × 10 demos with the augmentation range set to the target s_E (one bound change in the
-  adapter's `_add_noise` call), 1,000 updates as in the SFT recipe, then repeat the sweep. Either
-  way the SFT, base-run and ε-run residual baselines are re-run at E before the M-plan run.
-- **P2 Plan diversity.** For ~200 train-eval states sample M = 4 plans at E, decode base actions,
-  report across-plan vs within-plan action spread (within is 0.033 today) and the current Q's
-  spread across plans. If plans collapse at video CFG 5, revisit guidance before building.
-- **P3 Partial-decode agreement.** Same states and noises: decode actions from the plan at step k
-  and at E; report chunk distance and Q agreement for k ∈ {3, 6, 10} ∩ [1, E]. Fixes k and decides
-  the rejected-plan route.
-- **P4 Rankability (during the run).** Per chunk, agreement between V_plan's argmax at step k and
-  Q's argmax over fully decoded candidates; logged from the first update.
+- `video_exec_step = E` runs E passes; the cache is written on pass E from its input, so the action stream
+  reads history at the σ of pass E. Full denoising writes it from σ = 0.015. Post-training noises the history
+  to σ ∈ [0, 0.5] with probability 0.5, so cache levels σ ≤ 0.5 are in distribution. Under shift 5 no
+  truncation reaches σ ≤ 0.5 in fewer than 5 passes, so partial denoising saves nothing and is dropped. The
+  paper's "3 Euler steps to s = 0.6" belongs to an unshifted schedule the released checkpoint and configs do
+  not use; every released config runs `video_exec_step = -1`.
+- Re-bench (task 9, 100 held-out episodes, the seeds of every result in `docs/heldout-results.md`): Jarvis
+  5 / 10 full (`sft-step000600-v5e-1a10`); Watson 5 steps / E = 4 / 10 (`sft-step000600-v5e4a10`, cache at
+  σ = 0.63, side result). Reference 42 / 100 at 20 / 50. The 5 / 10 result must land inside 42 ± 10 for the
+  design to proceed at that sampler; otherwise 20 / 50 with M = 4 is the fallback. Task 0 gets the same SFT
+  re-bench (reference 63 / 100).
+- Episode wall time on a GB10 at 5 / 10, M = 1: about 65 s (520 policy steps) against 1213 s at 20 / 50.
+
+## 4. Throughput
+
+The GB10 is memory-bound on this model: a video pass streams the 10 GB of bf16 transformer weights at about
+240 GB/s whatever the batch, so a CFG batch-2 pass takes about 0.35 s at 55 W with no power cap. Two
+changes raise the arithmetic intensity; both are in v1:
+
+1. **M plans in one pass.** The five video passes run at batch 2M = 8 (M conditional rows then M
+   unconditional rows, the port's CFG order), reading the weights once for all plans. Expected cost about
+   1.5× a batch-2 pass, so the four plans cost about 0.4× of four looped passes.
+2. **M × K action decode in one pass.** The ten action steps run at batch M × K = 16 against a cache whose
+   rows are each plan's conditional rows repeated K times (the existing `expand_conditional_kv` pattern,
+   per plan), reading the video cache once for all candidates.
+
+Everything else stays: Torch 2.11.0+cu130 (sm_121 kernels, installed by `brev/setup.sh` through
+`DICE_TORCH_INDEX`), `F.scaled_dot_product_attention` in bf16 (`attn_mode: torch`), no FlashAttention
+package, TensorRT, FP8, CUDA graphs or `torch.compile` (sequence length changes every chunk and the cache
+is mutated in Python inside the forward, so compile would recompile or break graphs, and fused bf16 kernels
+would void the bit-for-bit tests), no parallel environments (a recipe change). The P0
+smoke at 5 / 10 asserts `torch.version.cuda` starts with 13, checks that the flash SDPA backend is selected
+for the port's shapes, and logs seconds per env step at M = 4 and at M = 1.
 
 ## 5. Policy at inference
 
-Per chunk:
+Per chunk, with the history cache holding 2 rows (conditional, unconditional):
 
-1. Draw M video noises; run steps 1..k for each (loop over M, or batch M × 2 for CFG). Nothing is
-   written to the cache before the last step, so rejected plans leave no trace.
-2. At step k, pool each plan's pre-projection tokens → p_m (3072-d).
-3. Choose m* = argmax over m of min-ensemble V_plan(s, p_m).
-4. Continue plan m* to E (nothing to continue if k = E). Decode K candidates, rank with
-   Q(s, p_m*, a), apply the residual, execute. Unchanged from today after this point.
+1. Snapshot the history. Repeat each cache row M times so the cache has 2M rows ordered [cond × M, uncond × M].
+2. Draw M video noises (M, 48, 4, h, w). Run the 5 video passes at batch 2M; the last pass writes the cache,
+   so the cache now holds 2M rows each ending in its own plan's chunk. Capture the last pass's
+   pre-`proj_out` tokens of the M conditional rows and pool each with the text tokens through
+   `pool_critic_state` → p_m (M, 3072). The returned latents are the M fully denoised chunks.
+3. m* = argmax over m of min over heads j of V_plan_j(s, p_m), where s is the current-frame pool
+   (`_pool_from_latent`, 3072-d) as today.
+4. Action decode at evaluation: repeat plan m*'s conditional row K times into a 1 × K cache, draw K action
+   noises, run the 10 action steps at batch K, restore. The K candidates cross-attend to the chosen plan
+   only. At collection the decode instead covers all plans: an M × K cache (row m repeated K times, the same
+   K noises for every plan), batch M × K, giving a_base (M, K, 16, 30); the rejected plans' candidates exist
+   only as V_plan regression targets and for the logged metrics, never for execution.
+5. Keep rows m* and M + m* of the written cache as the new 2-row history; drop the rest. Rank plan m*'s K
+   candidates with Q(s, p_m*, a_k), apply the residual, execute. From here on identical to today.
 
-Video passes per chunk: M·k + (E − k), against E for the single-plan policy at the same schedule.
+Rejected plans leave no trace in the cache. `plan_candidates = 1` reproduces today's policy at the sampler
+bit for bit (batch 2 passes, no row expansion), which is the regression test for the batched path together
+with the looped `decode_plans` output for M = 2.
 
 ## 6. Policy at collection
 
-Same as inference with two differences: with probability 0.1 (after the 64k warm-up, during which
-the plan is always random) the executed plan is uniform over the M; and every plan gets K decoded
-candidates so it can be scored. Rejected plans are decoded from the step-k plan when P3 allows,
-otherwise continued to E. Stored per chunk: s, the M pools, the chosen index, each plan's K base
-actions and noises, the executed action and the usual fields.
+As at inference with two differences: the executed plan is uniform over the M with probability 0.1 (always
+during the first 64k env steps, when `eval_candidates` is also 1 as today); and all M × K candidates are
+decoded and scored every chunk so V_plan has targets for the plans it rejected. Stored per chunk: s, the M
+pools, the chosen index, the M × K base actions and the K action noises, the executed action and today's
+fields.
 
-Logged per chunk: plan_agreement (P4), plan_regret (Q of the best-scored plan minus Q of the
-executed one; on random chunks this measures V_plan's error off its own argmax), plan_value_spread
-(max − min of V_plan over the M), plan_random_rate, plan_critic_loss, v_plan_mean.
+Logged per chunk: plan_agreement (V_plan's argmax equals the argmax over m of max_k Q(s, p_m, a_mk)),
+plan_regret (that maximum minus the executed plan's value), plan_value_spread (max − min of V_plan over
+the M), plan_random_rate; per update bin: plan_critic_loss, v_plan_mean.
 
 ## 7. Critics and actor
 
-**Q(s, p, a)**: current-frame pool ‖ plan pool at step k ‖ action chunk. 10 heads of
-[1024, 1024, 1024], min-ensemble, TD with the multi-sample target as today, plus p′_exec in the
-bootstrap. Input width grows from 3,552 to 6,624; hidden widths unchanged.
+**Q(s, p, a)**, the action critic: input current-frame pool s (3072) ‖ plan pool p (3072) ‖ action chunk
+(480); 10 heads of [1024, 1024, 1024]; min-ensemble; Polyak target ensemble; TD with the multi-sample n-step
+target as today, with the executed next chunk's pool p′ in the bootstrap. Input width grows from 3,552 to
+6,624; hidden widths, optimiser, schedule, update cadence unchanged.
 
-**V_plan(s, p)**: same inputs minus the action, 10 heads of [1024, 1024, 1024]. Trained by
-regression only, on every stored (s, p_m) including rejected plans:
+**V_plan(s, p)**, the video (plan) critic:
 
-- a_mk = a_base_mk + actor(s, a_base_mk) for the K candidates of plan m.
-- q_mk = min over heads j of Q_j(s, p_m, a_mk).
-- y_m = max over k of q_mk.
-- loss = sum over heads of (V_plan_j(s, p_m) − y_m)².
+- Inputs s ‖ p (6,144); 10 heads of [1024, 1024, 1024] → scalar, same init as the critic heads.
+- Target, per stored plan m of a row, computed under `no_grad`: a_mk = a_base_mk + actor(s, a_base_mk) for
+  k = 1..K; q_mk = min over j of Q_j(s, p_m, a_mk); y_m = max over k of q_mk. Expert rows carry one plan
+  (the true future's pool, §8) and one base action (the demo action), so y = min_j Q_j(s, p, a_demo +
+  actor(s, a_demo)).
+- Loss = mean over rows, plans and heads of (V_plan_j(s, p_m) − y_m)². Online rows contribute M plans each,
+  expert rows one; the batch and expert ratio are the critic's.
+- One V_plan step per critic step, on the same batch, after the critic update, using the live Q and the
+  live actor (what collection-time selection uses). Adam 1e-4, wd 1e-5, clip 1.0, the critic's cosine
+  schedule. No target network, no bootstrap through V_plan, no filter, no BC term.
+- Use: collection and evaluation rank plans by min over heads (§5). V_plan weights are saved in every
+  inference checkpoint; parameters, optimiser and schedule state live in `resume/latest.pt`.
+- Nothing flows back: Q, the actor and the stored base actions supply numbers, not gradients; the actor is
+  never trained to make plans look good to V_plan; Q stays the single TD-trained source of truth.
 
-Everything in y_m is computed without gradient: Q, the actor and the stored base actions supply
-numbers, not gradients; only V_plan's parameters move. Q stays the single TD-trained source of
-truth and the actor is never trained to make plans look good to V_plan. Two choices inside the
-target, both logged: live Q (matches what collection-time selection uses; chosen) versus its
-Polyak copy; max over candidates (matches the executed within-plan selection; chosen) versus mean.
-Optimiser settings as the critic (Adam 1e-4, wd 1e-5, clip 1.0, cosine restarts), updated after
-each critic step. No target network, no bootstrap through V_plan.
+Why regression rather than TD: rewards exist only for executed plans, so a TD plan critic would train on its
+own argmax choices and extrapolate to the plans it rejects; it would be a second bootstrapped critic with its
+own drift; its targets arrive only after episode finalisation. The regression target exists for all M plans
+at every update and inherits Q's pessimism.
 
-Why not TD for V_plan: rewards exist only for executed plans, so a TD plan critic trains on its own
-argmax choices and extrapolates to the plans it rejects at ranking time; its bootstrap plan is
-itself an argmax; it is a second bootstrapped critic with its own drift; its targets arrive only
-after episode finalisation. Distillation follows DSRL's noise-aliased critic (`.cache/dsrl`:
-Q^W regressed onto Q^A at fresh Gaussian noises, actor maximising Q^W); here plans play the role of
-noises and V_plan is the ranker rather than an actor's objective.
-
-**Residual actor**: unchanged, inputs (s, a_base), zero-init, β = 100, filter at ε.
+**Residual actor**: unchanged, inputs (s, a_base), zero-init, β = 100, Q-normalised TD3+BC, filter at ε
+anchored on Q(s, a_stored) against the Monte Carlo return, after `bc_filter_warmup_steps`.
 
 ## 8. Expert rows
 
-Demos have no sampled plan but have the true future. For each demo chunk: encode the real next
-4 frames, noise the latent to the step-k level, run one transformer pass against the demo's own
-history cache, pool → p. This is the model's training augmentation, hence in-distribution. One-off
-precompute in the expert featurisation (about 900 passes for 30 demos), stored beside
-`expert_features.pt`. Expert rows keep z = 0 and a_base = demo action; their V_plan target is the
-single candidate's Q.
+Demos have no sampled plan but have the true future. For each demo chunk: encode the real next 4 frames,
+noise the latent to σ = 0.015, run one video pass against the demo's own history cache, pool → p. This is
+the final-pass feature the online rows carry, computed from the true future instead of a sample. One-off
+precompute in the expert featurisation (about 900 passes for 30 demos), stored beside `expert_features.pt`.
+Expert rows keep z = 0 and a_base = demo action.
 
 ## 9. Replay rows
 
-Added per online row: plan_pool (executed), plan_pools_all (M × 3072), plan_index, plan_a_base_all
-(M × K × 480), plan_z_all (M × K × 480), plan_pool_next (filled at finalisation). Expert rows carry
-plan_pool only. Row size grows from about 17 KB to about 22 KB; 20k rows at 320k ≈ 0.45 GB.
+Added per online row: plan_pool (executed, 3072), plan_pools_all (M × 3072), plan_index, plan_a_base_all
+(M × K × 480), plan_z_all (K × 480), plan_pool_next (filled at finalisation). Expert rows carry plan_pool
+only. Row size grows from about 17 KB to about 21 KB; 20k rows at 320k ≈ 0.42 GB.
 
 ## 10. Config
 
@@ -143,82 +166,92 @@ plan_pool only. Row size grows from about 17 KB to about 22 KB; 20k rows at 320k
   "residual_input": "base",
   "epsilon": -0.3,
   "online_env_steps": 320000,
-  "video_exec_step": "E from P1",
+  "video_steps": 5,
+  "action_steps": 10,
+  "video_exec_step": -1,
   "plan_candidates": 4,
-  "plan_rank_step": "k from P3",
-  "plan_random_prob": 0.1,
-  "plan_selection_warmup_steps": 64000,
-  "plan_reject_decode": "partial or full from P3"
+  "plan_random_prob": 0.1
 }
 ```
 
-`plan_candidates = 1` reproduces today's recipe; all plan fields and `video_exec_step` enter the
-recipe fingerprint. The eval config gains `eval_plan_candidates` (default M) and `video_exec_step`
-(default E), so every held-out result records its schedule.
+The task 0 run is the same file with `task_ids: [0]`. The random-plan warm-up reuses
+`selection_warmup_steps` (64k). All plan and sampler fields enter the recipe fingerprint. The eval config
+gains `eval_plan_candidates` (default: the run's M), so every held-out result records its sampler and M.
 
-## 11. Code changes (on the cleaned base; no comments or docstrings)
+## 11. Code changes (no comments or docstrings)
 
-- `script/lingbot_rl_policy.py`: `_infer` takes M and k; loops plans through steps 1..k with the
-  pooling hook active at step k, ranks, continues the winner to E; decodes K candidates for every
-  plan via the K-expanded cache with snapshot/restore per plan (partial or full per config);
-  `decode_candidates` returns pools, chosen index, per-plan candidates; `select_action` uses the
-  early-exit path with the argmax only.
-- `script/lingbot_rl_model.py`: `PlanCritic`; `CriticEnsemble` input 2·STATE_DIM + action;
-  `n_step_target` takes p′; `update_plan_critic`; resume and inference states include the plan
-  critic, its optimiser and LR schedule.
-- `script/lingbot_rl_buffer.py`: new keys; finalisation fills plan_pool_next.
-- `script/lingbot_rl_data.py`: expert plan pools from noised true futures.
-- `script/lingbot_rl_train.py`: M-plan collection, random-plan schedule, the metrics of §6,
-  train-eval and held-out eval with M plans at E.
-- `script/lingbot_rl_config.py` and `script/lingbot_eval_config.py`: fields, validation,
-  fingerprints.
-- `brev/train.sh` (or its GB10 equivalent): `--plan-candidates`, `--plan-rank-step`,
-  `--video-exec-step`; `script/lingbot_eval_modal.py`: the same for evals.
-- Tests: fingerprints, buffer keys and finalisation, plan-critic update on a stub, policy M-loop on
-  a mocked transformer with M = 1 reproducing today's actions exactly, eval option plumbing.
+- `script/lingbot_rl_policy.py`: `expand_kv_rows(transformer, reps)` and `select_kv_rows(transformer, rows)`
+  beside `expand_conditional_kv`; `_video_passes(latents, ...)` at batch 2M with its own CFG payload;
+  `_decode_actions` taking an (M, K) layout; `select_plan(batch, plans, k, rank_fn, random)` implementing
+  §5, returning s, pools, a_base (M, K, 16, 30), z, chosen index, latents; `decode_candidates` and
+  `select_action` call it; `decode_plans` kept as the looped reference for tests.
+- `script/lingbot_rl_model.py`: `PlanCritic`; `CriticEnsemble` input 2·STATE_DIM + action; `n_step_target`
+  takes p′; `update_plan_critic(state, pools, a_base_all, is_expert)`; resume and inference states include
+  the plan critic, its optimiser and schedule.
+- `script/lingbot_rl_buffer.py`: the keys of §9; finalisation fills plan_pool_next.
+- `script/lingbot_rl_data.py`: expert plan pools (§8).
+- `script/lingbot_rl_train.py`: M-plan collection with the random-plan schedule, the metrics of §6, V_plan
+  update after each critic update, train-eval and held-out eval with M plans.
+- `script/lingbot_rl_config.py`, `script/lingbot_eval_config.py`: fields, validation, fingerprints.
+- `brev/train.sh`, `brev/eval.sh`: `--plan-candidates`.
+- Tests: fingerprints; buffer keys and finalisation; plan-critic update on a stub (loss falls, Q and actor
+  untouched); `select_plan` on the mocked transformer (M = 1 bit-for-bit against today's `_infer`; M = 2
+  batched equals the looped `decode_plans` per plan; the history after selection equals the winner's rows
+  and nothing else); eval option plumbing.
 
-## 12. Costs
+## 12. Experiments
 
-Video passes per chunk, M = 4, relative to today's single plan at 20 steps:
+Pre-run (SFT, no training): the re-benches of §3 fix the sampler for both tasks.
 
-| E | k | rejected-plan route | collection | eval |
-|---|---|---|---|---|
-| 20 | 6 | partial | 38 (1.9×) | 38 (1.9×) |
-| 10 | 6 | partial | 28 (1.4×) | 28 (1.4×) |
-| 10 | 10 | partial (k = E) | 40 (2.0×) | 40 (2.0×) |
-| 6 | 3 | partial | 15 (0.75×) | 15 (0.75×) |
-| 10 | 6 | full (continue all 4) | 40 (2.0×) | 28 (1.4×) |
+Training, 5 / 10, M = 4, K = 4, 320k env steps, one per GB10:
 
-Wall-clock = 320k × (P0's s/env-step at E) × the collection factor. On an L40S at E = 10, k = 6,
-partial: about 320k × 0.15 × 1.4 ≈ 19 h. A GB10 is expected to be slower per step; P0 measures it.
+| run | task | box | SFT held-out at 20 / 50 |
+|---|---|---|---|
+| dice-t9-plan-m4 | 9 | Jarvis | 42 / 100 |
+| dice-t0-plan-m4 | 0 | Watson | 63 / 100 |
 
-## 13. Validation and go/no-go
+Task 0 is the second task closest to a 50% prior with an existing 100-episode baseline and full recipe
+results (81 / 90 at 660k).
 
-- Unit tests and the 300-step smoke; the smoke must show plan_agreement computed and the plan-critic
-  loss decreasing.
-- P2 must show across-plan spread well above 0.033 before anything is built.
-- At 160k: plan_agreement ≥ 0.7 and plan_value_spread clearly above V_plan's regression error,
-  else k is raised (a new fingerprint, hence a new run).
-- Held-out at the end, all at E: the M-plan policy (the method), the same residual with M = 1
-  (isolates plan selection), and the ε run's residual at E as the baseline.
-- Contraction for the write-up: outcome variance across the M plans versus the executed plan,
-  and V_plan spread per state; not ΔH on actions.
+Held-out per task, 100 episodes, the held-out seeds of every previous result, all at 5 / 10:
+
+| policy | role |
+|---|---|
+| SFT, M = 1 | the sampler check (re-bench, running) |
+| m4 run, residual, V_plan argmax over 4, Q over 4 inside it | the method |
+
+Whether ranking beats a random plan is read from plan_regret and plan_agreement during training, not from
+an extra evaluation.
+
+Training signals: plan_agreement, plan_regret, plan_value_spread and plan_critic_loss per update bin;
+replay sharpening every 5k env steps as today, extended with V_plan's spread across the M stored plans.
+Contraction for the write-up is read at the plan level: V_plan spread across sampled plans and plan_regret
+on the random-plan chunks, not ΔH on actions.
+
+Go / no-go: unit tests and the 300-step smoke at 5 / 10 (plan_agreement computed, plan_critic_loss falling,
+seconds per env step logged); at 160k, plan_agreement ≥ 0.7 and plan_value_spread clearly above V_plan's
+regression error, else stop and diagnose before spending the second half.
+
+## 13. Costs
+
+Per chunk at M = 4: 5 video passes at batch 8 plus one action decode at batch 16, against 20 passes at
+batch 2 plus one decode at batch 4 over 50 steps today. Collection should run at or below the 20 / 50
+smoke's 0.64 s per env step; the P0 smoke pins it. 320k env steps ≈ 2 to 2.5 days per run. Evaluation at
+M = 4 is a few times the 65 s per episode of M = 1, roughly 3 to 5 h per 100 episodes.
 
 ## 14. Risks
 
-- Step-k features rank poorly at small k; mitigated by P3 before the run and P4 during it.
-- Memory: M × CFG = batch 8 through the 5B stream at step k; today's batch 2 uses 13 GB; the GB10's
-  128 GB unified memory covers it, an L40S (48 GB) likely does with the loop-over-M form.
-- Selection bias in V_plan's training distribution; mitigated by the random plan and by training
-  on rejected plans.
-- Expert plan pools come from real futures, online pools from sampled plans; a gap the critic may
-  key on. Diagnostic: V_plan on expert versus online rows at matched returns.
-- Cache correctness with M plans against one history: covered by the M = 1 bit-for-bit test.
-- Partial-denoise execution changes the prior; every baseline is re-run at E before comparison.
+- The 5 / 10 re-bench falls outside 42 ± 10 on task 9 (or 63 ± 10 on task 0): fall back to 20 / 50 with
+  M = 4 (4× video cost).
+- Plans collapse at video CFG 5 (across-plan spread not above the 0.033 within-plan spread): read from the
+  stored M pools and plan_value_spread in the first 10k env steps; stop and revisit guidance.
+- Selection bias in V_plan's training distribution: mitigated by the random plan and by regressing on rejected
+  plans.
+- Expert plan pools come from true futures, online pools from samples: diagnostic V_plan on expert versus
+  online rows at matched returns.
+- Batched cache rows: covered by the M = 1 bit-for-bit test, the M = 2 batched-equals-looped test and the
+  winner-only history test.
 
 ## 15. Open items
 
-1. E and k (from P1 and P3).
-2. Whether the re-post-train fallback is needed (from P1).
-3. GB10 setup: aarch64 wheels for the LeRobot lock, EGL on the Blackwell driver, Modal client for
-   syncs (verified transfers through `script/modal_volume_tools.py`).
+1. Re-bench outcomes at 5 / 10 on tasks 9 and 0.
