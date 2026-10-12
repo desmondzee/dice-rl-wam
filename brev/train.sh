@@ -34,13 +34,13 @@ OUT="$DICE_DATA/runs/$RUN"
 mkdir -p "$OUT"
 python3 -c 'import json,sys; print(json.dumps({"task_ids": [int(sys.argv[1])], "wandb_entity": sys.argv[2], "residual_input": sys.argv[3], "epsilon": float(sys.argv[4]), "online_env_steps": int(sys.argv[5])}))' "$TASK" "$WANDB_ENTITY" "$RESIDUAL_INPUT" "$EPSILON" "$ENV_STEPS" > "$OUT/config.json"
 ARGS=(--prepared-path "$PREPARED" --output-dir "$OUT" --run-name "$RUN" --dataset-root "$(cat "$DICE_DATA/dataset_root")")
-if [ ! -f "$OUT/resume/latest.pt" ] && env MODAL_PROFILE="$MODAL_PROFILE" "$MODAL" volume ls dice-lingbot-rl-runs "$RUN/resume" >/dev/null 2>&1; then
+if [ "${DICE_NO_SYNC:-0}" != "1" ] && [ ! -f "$OUT/resume/latest.pt" ] && env MODAL_PROFILE="$MODAL_PROFILE" "$MODAL" volume ls dice-lingbot-rl-runs "$RUN/resume" >/dev/null 2>&1; then
   mkdir -p "$OUT/resume"
   env MODAL_PROFILE="$MODAL_PROFILE" "$MODAL" volume get dice-lingbot-rl-runs "$RUN/resume/latest.pt" "$OUT/resume/" --force
 fi
 [ -f "$OUT/resume/latest.pt" ] && ARGS+=(--resume)
 [ -n "$MAX_ENV_STEPS" ] && ARGS+=(--max-env-steps "$MAX_ENV_STEPS")
-ARGS+=(--checkpoint-hook "$DICE_REPO/brev/sync.sh $RUN $OUT")
+[ "${DICE_NO_SYNC:-0}" = "1" ] || ARGS+=(--checkpoint-hook "$DICE_REPO/brev/sync.sh $RUN $OUT")
 {
   echo '#!/usr/bin/env bash'
   echo 'set -euo pipefail'
