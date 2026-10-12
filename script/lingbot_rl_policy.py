@@ -84,14 +84,32 @@ def reraise_action_batch_failure(exc):
     raise RuntimeError("action candidate batching failed") from exc
 
 
-def expand_conditional_kv(transformer, k):
+def expand_conditional_kv(transformer, k, plans=1):
     for block in transformer.blocks:
         cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
-        if cache is None or "k" not in cache or cache["k"].shape[0] < 1:
+        if cache is None or "k" not in cache or cache["k"].shape[0] < plans:
             raise RuntimeError("action candidate batching failed")
         for key in ("k", "v"):
-            cond = cache[key][:1]
-            cache[key] = cond.repeat(k, *([1] * (cond.ndim - 1)))
+            cache[key] = cache[key][:plans].repeat_interleave(k, dim=0)
+
+
+def expand_kv_rows(transformer, reps):
+    for block in transformer.blocks:
+        cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
+        if cache is None or "k" not in cache:
+            raise RuntimeError("plan batching failed")
+        for key in ("k", "v"):
+            cache[key] = cache[key].repeat_interleave(reps, dim=0)
+
+
+def select_kv_rows(transformer, rows):
+    index = list(rows)
+    for block in transformer.blocks:
+        cache = block.attn1.attn_caches.get("pos") if block.attn1.attn_caches else None
+        if cache is None or "k" not in cache:
+            raise RuntimeError("plan batching failed")
+        for key in ("k", "v"):
+            cache[key] = cache[key][index]
 
 
 def _clone_cache(cache):
@@ -110,8 +128,9 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._text_cache = {}
         self.residual_model = None
         self._last_real_latent = None
-        self._critic_cache_ready = False
+        self._critic_cache_batches = {}
         self.eval_candidates = 4
+        self.eval_plans = 1
 
     def _get_t5_prompt_embeds(self, prompt, max_sequence_length):
         key = (tuple([prompt] if isinstance(prompt, str) else prompt), max_sequence_length)
@@ -137,9 +156,10 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._prev_j = self._exec_step % self.config.action_per_frame
         self._exec_step += 1
 
-    def _ensure_critic_cache(self):
-        if self._critic_cache_ready:
-            return
+    def _ensure_critic_cache(self, batch_size=1):
+        name = "critic" if batch_size == 1 else "critic_m"
+        if self._critic_cache_batches.get(name) == batch_size:
+            return name
         cfg = self.config
         latent_h, latent_w = self._latent_hw
         patch = cfg.patch_size
@@ -147,15 +167,16 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         action_token_per_chunk = cfg.frame_chunk_size * cfg.action_per_frame
         with torch.inference_mode(False):
             self.transformer.create_empty_cache(
-                "critic",
+                name,
                 cfg.attn_window,
                 latent_token_per_chunk,
                 action_token_per_chunk,
                 device=self.config.device,
                 dtype=self.dtype,
-                batch_size=1,
+                batch_size=batch_size,
             )
-        self._critic_cache_ready = True
+        self._critic_cache_batches[name] = batch_size
+        return name
 
     @torch.no_grad()
     def extract_critic_state(self, batch):
@@ -176,7 +197,8 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
 
     @torch.no_grad()
     def _pool_from_latent(self, latent):
-        self._ensure_critic_cache()
+        b = latent.shape[0]
+        name = self._ensure_critic_cache(b)
         captured = []
 
         def hook(module, inputs, output):
@@ -185,16 +207,17 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         handle = self.transformer.proj_out.register_forward_hook(hook)
         try:
             payload = self._prepare_latent_input(latent, None, 0, 0, None, None, frame_st_id=0)["latent_res_lst"]
-            payload["grid_id"] = payload["grid_id"][None]
-            payload["timesteps"] = payload["timesteps"][None]
-            self.transformer(payload, update_cache=0, cache_name="critic", action_mode=False)
+            payload["text_emb"] = self._prompt_embeds.to(self.dtype).expand(b, -1, -1).clone()
+            payload["grid_id"] = payload["grid_id"][None].repeat(b, 1, 1)
+            payload["timesteps"] = payload["timesteps"][None].repeat(b, 1)
+            self.transformer(payload, update_cache=0, cache_name=name, action_mode=False)
             if not captured:
                 raise RuntimeError("Failed to capture pre-proj_out video tokens")
             video_tokens = captured[0].float()
             text_tokens = self.transformer.condition_embedder.text_embedder(
                 self._prompt_embeds.to(self.dtype)
             ).float()
-            return pool_critic_state(video_tokens, text_tokens)
+            return pool_critic_state(video_tokens, text_tokens.expand(b, -1, -1))
         finally:
             handle.remove()
 
@@ -357,6 +380,28 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             latents[:, :, 0:1] = latent_cond
         return latents
 
+    def _video_pass_batched(self, latents, t, latent_cond, frame_st_id, write, advance):
+        cfg = self.config
+        latent_h, latent_w = self._latent_hw
+        m = latents.shape[0]
+        cond = None if latent_cond is None else latent_cond.expand(m, -1, -1, -1, -1)
+        payload = self._prepare_latent_input(latents, None, t, t, cond, None, frame_st_id=frame_st_id)
+        payload = payload["latent_res_lst"]
+        payload["noisy_latents"] = payload["noisy_latents"].repeat(2, 1, 1, 1, 1)
+        payload["text_emb"] = torch.cat([
+            self._prompt_embeds.to(self.dtype).expand(m, -1, -1),
+            self._negative_prompt_embeds.to(self.dtype).expand(m, -1, -1)]).clone()
+        payload["grid_id"] = payload["grid_id"][None].repeat(2 * m, 1, 1)
+        payload["timesteps"] = payload["timesteps"][None].repeat(2 * m, 1)
+        pred = self.transformer(payload, update_cache=1 if write else 0, cache_name="pos", action_mode=False)
+        if advance:
+            pred = data_seq_to_patch(cfg.patch_size, pred, cfg.frame_chunk_size, latent_h, latent_w, batch_size=2 * m)
+            pred = pred[m:] + cfg.guidance_scale * (pred[:m] - pred[m:]) if cfg.guidance_scale > 1 else pred[:m]
+            latents = self._scheduler.step(pred, t, latents, return_dict=False)
+        if frame_st_id == 0 and latent_cond is not None:
+            latents[:, :, 0:1] = latent_cond
+        return latents
+
     @torch.no_grad()
     def _infer(self, init_latent, frame_st_id=0, video_noise=None, action_noise=None, k=1):
         cfg = self.config
@@ -392,12 +437,12 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         actions = self._decode_actions(actions, frame_st_id, k)
         return actions, latents, z_used, video_used
 
-    def _decode_actions(self, actions, frame_st_id, k):
+    def _decode_actions(self, actions, frame_st_id, k, plans=1):
         cfg = self.config
         device = self.config.device
         frame_chunk_size = cfg.frame_chunk_size
         action_timesteps = F.pad(self._action_scheduler.timesteps, (0, 1), mode="constant", value=0)
-        if k == 1:
+        if k == 1 and plans == 1:
             for i, t in enumerate(action_timesteps):
                 last_step = i == len(action_timesteps) - 1
                 action_cond = (
@@ -434,14 +479,15 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             actions[:, ~self._action_mask] *= 0
             return actions
 
+        rows = plans * k
         post_video = self._snapshot_kv()
         try:
-            expand_conditional_kv(self.transformer, k)
+            expand_conditional_kv(self.transformer, k, plans)
             for i, t in enumerate(action_timesteps):
                 last_step = i == len(action_timesteps) - 1
                 action_cond = (
                     torch.zeros(
-                        [k, cfg.action_dim, 1, cfg.action_per_frame, 1], device=device, dtype=self.dtype
+                        [rows, cfg.action_dim, 1, cfg.action_per_frame, 1], device=device, dtype=self.dtype
                     )
                     if frame_st_id == 0
                     else None
@@ -450,9 +496,9 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
                     None, actions, t, t, None, action_cond, frame_st_id=frame_st_id
                 )
                 payload = input_dict["action_res_lst"]
-                payload["text_emb"] = self._prompt_embeds.to(self.dtype).expand(k, -1, -1).clone()
-                payload["grid_id"] = payload["grid_id"][None].repeat(k, 1, 1)
-                payload["timesteps"] = payload["timesteps"][None].repeat(k, 1)
+                payload["text_emb"] = self._prompt_embeds.to(self.dtype).expand(rows, -1, -1).clone()
+                payload["grid_id"] = payload["grid_id"][None].repeat(rows, 1, 1)
+                payload["timesteps"] = payload["timesteps"][None].repeat(rows, 1)
                 action_noise_pred = self.transformer(
                     payload, update_cache=1 if last_step else 0, cache_name="pos", action_mode=True
                 )
@@ -512,7 +558,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
                 "s": state.float(),
                 "z": model_to_mlp(action_noise).float(),
                 "a_base": torch.stack(a_base),
-                "plan_pools": torch.cat(pools),
+                "last_pass_pools": torch.cat(pools),
                 "video_noise": video_noise,
                 "latents": torch.cat(latents),
                 "first_chunk": first,
@@ -520,6 +566,61 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             }
         finally:
             self._restore_chunk_state(saved)
+
+    @torch.no_grad()
+    def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False):
+        if plans == 1:
+            decoded = self.decode_candidates(batch, k=k)
+            decoded["plan_pools"] = torch.zeros(1, STATE_DIM, device=decoded["s"].device)
+            decoded["plan_pool"] = decoded["plan_pools"]
+            decoded["plan_index"] = 0
+            if decode_all:
+                decoded["plan_a_base_all"] = decoded["a_base"][None]
+            return decoded
+        self.eval()
+        self._ensure_frozen_modules()
+        self._maybe_init_prompt(batch)
+        cfg = self.config
+        device = cfg.device
+        timesteps, exec_step = self._video_timesteps()
+        self._action_scheduler.set_timesteps(cfg.action_num_inference_steps)
+        first, init_latent, frame_st_id, critic_latent = self._begin_chunk(batch)
+        state = self._pool_from_latent(critic_latent)
+        latent_h, latent_w = self._latent_hw
+        video_noise = torch.randn(plans, 48, cfg.frame_chunk_size, latent_h, latent_w, device=device, dtype=self.dtype)
+        action_noise = torch.randn(
+            k, cfg.action_dim, cfg.frame_chunk_size, cfg.action_per_frame, 1, device=device, dtype=self.dtype)
+        latent_cond = init_latent[:, :, 0:1].to(self.dtype) if frame_st_id == 0 and init_latent is not None else None
+        expand_kv_rows(self.transformer, plans)
+        latents = video_noise.clone()
+        for i, t in enumerate(timesteps):
+            last = i == len(timesteps) - 1
+            latents = self._video_pass_batched(
+                latents, t, latent_cond, frame_st_id, write=last, advance=not last or exec_step != -1)
+        pools = self._pool_from_latent(latents).float()
+        if random_plan:
+            index = int(np.random.randint(plans))
+        else:
+            index = 0 if rank_fn is None else int(rank_fn(state.float(), pools))
+        if not 0 <= index < plans:
+            raise ValueError("rank_fn must return a plan index")
+        out = {"s": state.float(), "z": model_to_mlp(action_noise).float(), "plan_pools": pools,
+               "plan_pool": pools[index:index + 1], "plan_index": index, "video_noise": video_noise,
+               "latents": latents[index:index + 1], "first_chunk": first}
+        if decode_all:
+            decoded = self._decode_actions(action_noise.repeat(plans, 1, 1, 1, 1), frame_st_id, k, plans)
+            decoded = model_to_mlp(decoded).float()
+            out["plan_a_base_all"] = decoded.reshape(plans, k, HORIZON, ACTION_DIM)
+            out["a_base"] = out["plan_a_base_all"][index]
+            select_kv_rows(self.transformer, [index, plans + index])
+        else:
+            select_kv_rows(self.transformer, [index, plans + index])
+            out["a_base"] = model_to_mlp(self._decode_actions(action_noise.clone(), frame_st_id, k)).float()
+        if first:
+            self._first_chunk = False
+        self._exec_step = 0
+        self._started = True
+        return out
 
     def _apply_residual_choice(self, decoded, index):
         a_base = decoded["a_base"][index:index + 1].float()
@@ -540,7 +641,11 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
     @torch.no_grad()
     def predict_action_chunk(self, batch, **kwargs):
         k = self.eval_candidates if self.residual_model is not None else 1
-        decoded = self.decode_candidates(batch, k=k)
+        plans = getattr(self, "eval_plans", 1) if self.residual_model is not None else 1
+        if plans > 1:
+            decoded = self.select_plan(batch, plans, k, rank_fn=self.residual_model.rank_plans)
+        else:
+            decoded = self.decode_candidates(batch, k=k)
         index = 0
         if self.residual_model is not None and decoded["a_base"].shape[0] > 1:
             a_base = decoded["a_base"].float()
@@ -549,6 +654,8 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             if state.shape[0] != a_base.shape[0]:
                 state = state[:1].expand(a_base.shape[0], -1)
             executed = apply_residual(a_base, self.residual_model.actor(state, noise, a_base))
+            if plans > 1:
+                state = self.residual_model.critic_state(state, decoded["plan_pool"].expand(k, -1))
             index = int(self.residual_model.critic(state, executed).reshape(-1).argmax())
         return self._apply_residual_choice(decoded, index)
 
