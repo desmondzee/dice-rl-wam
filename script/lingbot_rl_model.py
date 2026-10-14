@@ -139,6 +139,16 @@ class DiceResidualModel:
             return mlp_float(state)
         return torch.cat([mlp_float(state), mlp_float(pool)], dim=-1)
 
+    def rank_candidates(self, state, pools, a_base_all, z_all):
+        with torch.no_grad():
+            a_base_all, z_all = mlp_float(a_base_all), mlp_float(z_all)
+            plans, k = a_base_all.shape[:2]
+            flat_state = mlp_float(state).expand(plans * k, -1)
+            flat_pool = mlp_float(pools).repeat_interleave(k, dim=0)
+            flat_base = a_base_all.reshape(plans * k, HORIZON, ACTION_DIM)
+            action = apply_residual(flat_base, self.actor(flat_state, z_all.repeat(plans, 1, 1), flat_base))
+            return int(self.critic(self.critic_state(flat_state, flat_pool), action).reshape(-1).argmax()) // k
+
     def rank_plans(self, state, pools):
         with torch.no_grad():
             pools = mlp_float(pools)

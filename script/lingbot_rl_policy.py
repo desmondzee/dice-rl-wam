@@ -131,6 +131,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._critic_cache_batches = {}
         self.eval_candidates = 4
         self.eval_plans = 1
+        self.eval_plan_ranker = "v_plan"
 
     def _get_t5_prompt_embeds(self, prompt, max_sequence_length):
         key = (tuple([prompt] if isinstance(prompt, str) else prompt), max_sequence_length)
@@ -568,7 +569,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             self._restore_chunk_state(saved)
 
     @torch.no_grad()
-    def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False):
+    def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False, rank_candidates=None):
         self.eval()
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
@@ -590,16 +591,22 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             latents = self._video_pass_batched(
                 latents, t, latent_cond, frame_st_id, write=last, advance=not last or exec_step != -1)
         pools = self._pool_from_latent(latents).float()
-        index = int(np.random.randint(plans)) if random_plan else int(rank_fn(state.float(), pools))
-        if not 0 <= index < plans:
-            raise ValueError("rank_fn must return a plan index")
         out = {"s": state.float(), "z": model_to_mlp(action_noise).float(), "plan_pools": pools,
-               "plan_pool": pools[index:index + 1], "plan_index": index, "video_noise": video_noise,
-               "latents": latents[index:index + 1], "first_chunk": first}
+               "video_noise": video_noise, "first_chunk": first}
+        decode_all = decode_all or rank_candidates is not None
         if decode_all:
             decoded = self._decode_actions(action_noise.repeat(plans, 1, 1, 1, 1), frame_st_id, k, plans)
-            decoded = model_to_mlp(decoded).float()
-            out["plan_a_base_all"] = decoded.reshape(plans, k, HORIZON, ACTION_DIM)
+            out["plan_a_base_all"] = model_to_mlp(decoded).float().reshape(plans, k, HORIZON, ACTION_DIM)
+        if random_plan:
+            index = int(np.random.randint(plans))
+        elif rank_candidates is not None:
+            index = int(rank_candidates(state.float(), pools, out["plan_a_base_all"], out["z"]))
+        else:
+            index = int(rank_fn(state.float(), pools))
+        if not 0 <= index < plans:
+            raise ValueError("rank_fn must return a plan index")
+        out.update({"plan_pool": pools[index:index + 1], "plan_index": index, "latents": latents[index:index + 1]})
+        if decode_all:
             out["a_base"] = out["plan_a_base_all"][index]
             select_kv_rows(self.transformer, [index, plans + index])
         else:
@@ -632,7 +639,9 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         k = self.eval_candidates if self.residual_model is not None else 1
         plans = self.eval_plans if self.residual_model is not None else 1
         if plans > 1:
-            decoded = self.select_plan(batch, plans, k, rank_fn=self.residual_model.rank_plans)
+            decoded = self.select_plan(
+                batch, plans, k, rank_fn=self.residual_model.rank_plans,
+                rank_candidates=self.residual_model.rank_candidates if self.eval_plan_ranker == "q" else None)
         else:
             decoded = self.decode_candidates(batch, k=k)
         index = 0

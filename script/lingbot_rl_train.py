@@ -567,7 +567,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
 
 
 def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, residual_path=None,
-             resume=False, commit=None, eval_candidates=None, shard=0, shards=1):
+             resume=False, commit=None, eval_candidates=None, shard=0, shards=1, plan_ranker="v_plan"):
     from script.lingbot_eval import (
         aggregate_results, describe_suite, file_sha256, read_checkpoint_metadata, read_json, run_episode, write_json,
     )
@@ -597,6 +597,9 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     policy.residual_model = model
     policy.eval_candidates = eval_candidates or config.k_candidates
     policy.eval_plans = config.plan_candidates
+    if plan_ranker not in ("v_plan", "q"):
+        raise ValueError("plan_ranker must be v_plan or q")
+    policy.eval_plan_ranker = plan_ranker
     suite, tasks = describe_suite(prepared["assets_path"])
     tasks = [task for task in tasks if task["task_id"] in config.task_ids]
     plans = {task["task_id"]: shard_plan(eval_cfg, episode_plan(eval_cfg, task["task_id"], task["initial_state_count"])) for task in tasks}
@@ -604,7 +607,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     output_dir = Path(output_dir)
     write_json(output_dir / "settings" / f"shard_{shard}.json", {
         "config": eval_cfg.to_dict(), "rl": config.to_dict(), "eval_candidates": policy.eval_candidates,
-        "eval_plans": policy.eval_plans,
+        "eval_plans": policy.eval_plans, "plan_ranker": plan_ranker,
         "residual_sha256": file_sha256(residual_path), "episode_plan": [entry for task in tasks for entry in plans[task["task_id"]]]})
 
     def summarize():
@@ -653,6 +656,7 @@ def main():
     parser.add_argument("--checkpoint-hook")
     parser.add_argument("--max-env-steps", type=int)
     parser.add_argument("--eval-candidates", type=int)
+    parser.add_argument("--plan-ranker", default="v_plan")
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", type=int, default=1)
     args = parser.parse_args()
@@ -672,7 +676,7 @@ def main():
     else:
         summary = evaluate(
             config, args.prepared_path, args.output_dir, args.run_name, args.residual_path, args.resume, commit,
-            eval_candidates=args.eval_candidates, shard=args.shard, shards=args.shards)
+            eval_candidates=args.eval_candidates, shard=args.shard, shards=args.shards, plan_ranker=args.plan_ranker)
     print(json.dumps(summary, indent=2))
 
 
