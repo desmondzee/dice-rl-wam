@@ -1749,7 +1749,7 @@ def test_select_plan_batched_matches_looped_decode_plans_and_keeps_winner_rows()
 def test_predict_action_chunk_ranks_plans_with_the_plan_critic():
     from script.lingbot_rl_policy import ResidualLingBotPolicy
     policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
-    policy.eval_candidates, policy.eval_plans = 2, 3
+    policy.eval_candidates, policy.eval_plans, policy.eval_plan_ranker = 2, 3, "v_plan"
     policy.residual_model = DiceResidualModel(device="cpu", plan_candidates=3)
     captured = {}
 
