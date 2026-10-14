@@ -29,3 +29,4 @@ task,policy,candidates,episodes,successes,success_rate,ci95_halfwidth,mean_steps
 9,"SFT step 600, 5 video steps executed at 4 / 10 action steps",1,100,39,0.39,0.096,449.0,20,19,25,28,8,23,19,result/heldout/sft-step000600-v5e4a10/task_09
 0,"SFT step 600, 5 video / 10 action steps",1,100,75,0.75,0.085,364.0,35,40,24,12,28,19,3,result/heldout/sft-step000600-v5e-1a10/task_00
 8,"SFT step 600, 5 video / 10 action steps",1,100,12,0.12,0.064,512.3,7,5,,,1,10,39,result/heldout/sft-step000600-v5e-1a10/task_08
+9,"RL plan selection M=4 (V_plan ranked) + (s,a_base) residual with the filter at ε = −0.3, 160k, best-of-4, 5 / 10 sampler",4,100,79,0.79,0.080,338.0,,,30,11,30,19,1,result/heldout/dice-t9-plan-m4-step160000-k4-m4-v5e-1a10/task_09
