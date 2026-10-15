@@ -1754,7 +1754,7 @@ def test_predict_action_chunk_ranks_plans_with_the_plan_critic():
     captured = {}
 
     def fake_select(batch, plans, k, rank_fn=None, random_plan=False, decode_all=False, rank_candidates=None):
-        captured.update(plans=plans, k=k, rank=rank_fn, decode_all=decode_all, cands=rank_candidates)
+        captured.update(plans=plans, k=k, rank=rank_fn, random=random_plan, decode_all=decode_all, cands=rank_candidates)
         return {"s": torch.zeros(1, STATE_DIM), "z": torch.zeros(2, HORIZON, ACTION_DIM),
                 "a_base": torch.zeros(2, HORIZON, ACTION_DIM), "first_chunk": False, "latents": torch.zeros(1),
                 "plan_pool": torch.zeros(1, STATE_DIM), "plan_index": 0}
@@ -1762,10 +1762,14 @@ def test_predict_action_chunk_ranks_plans_with_the_plan_critic():
     policy.select_plan = fake_select
     policy._apply_residual_choice = lambda dec, index: torch.zeros(1, 16, USED_DOF)
     policy.predict_action_chunk({"task": ["t"]})
-    assert captured == {"plans": 3, "k": 2, "rank": policy.residual_model.rank_plans, "decode_all": False, "cands": None}
+    assert captured == {"plans": 3, "k": 2, "rank": policy.residual_model.rank_plans, "random": False, "decode_all": False,
+                        "cands": None}
     policy.eval_plan_ranker = "q"
     policy.predict_action_chunk({"task": ["t"]})
     assert captured["cands"] == policy.residual_model.rank_candidates
+    policy.eval_plan_ranker = "random"
+    policy.predict_action_chunk({"task": ["t"]})
+    assert captured["random"] and captured["cands"] is None
 
 
 def test_rank_candidates_returns_the_plan_of_the_best_candidate():

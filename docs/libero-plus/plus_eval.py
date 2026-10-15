@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 
 import imageio.v2 as imageio
-import numpy as np
 import torch
 from lerobot.envs.libero import LiberoEnv, _get_suite
 from PIL import Image
@@ -33,8 +32,6 @@ def load(args, prepared, architecture):
     model = DiceResidualModel(device="cuda", residual_input=args.residual_input, epsilon=args.epsilon,
                               plan_candidates=args.plan_candidates)
     model.load_inference_state_dict(torch.load(args.residual, map_location="cpu", weights_only=True))
-    if args.plan_ranker == "random":
-        model.rank_plans = lambda state, pools: int(np.random.randint(pools.shape[0]))
     policy.residual_model = model
     policy.eval_candidates = args.eval_candidates
     policy.eval_plans = args.plan_candidates

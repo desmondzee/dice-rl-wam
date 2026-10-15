@@ -597,8 +597,8 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     policy.residual_model = model
     policy.eval_candidates = eval_candidates or config.k_candidates
     policy.eval_plans = config.plan_candidates
-    if plan_ranker not in ("v_plan", "q"):
-        raise ValueError("plan_ranker must be v_plan or q")
+    if plan_ranker not in ("v_plan", "q", "random"):
+        raise ValueError("plan_ranker must be v_plan, q or random")
     policy.eval_plan_ranker = plan_ranker
     suite, tasks = describe_suite(prepared["assets_path"])
     tasks = [task for task in tasks if task["task_id"] in config.task_ids]

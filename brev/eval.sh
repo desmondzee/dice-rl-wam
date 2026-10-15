@@ -4,7 +4,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] || { echo "copy brev/env.example to brev/env.sh and fill it in" >&2; exit 1; }
 source "$ENV_FILE"
-USAGE="usage: eval.sh <sft|run-name> <step> <candidates> <shard> <shards> [--video-steps V] [--video-exec-step E] [--action-steps A] [--residual-input z|base|z_base] [--plans M] [--plan-ranker v_plan|q] [--task 9] [--no-tmux]"
+USAGE="usage: eval.sh <sft|run-name> <step> <candidates> <shard> <shards> [--video-steps V] [--video-exec-step E] [--action-steps A] [--residual-input z|base|z_base] [--plans M] [--plan-ranker v_plan|q|random] [--task 9] [--no-tmux]"
 RUN="${1:?$USAGE}"
 STEP="${2:?$USAGE}"
 K="${3:?$USAGE}"

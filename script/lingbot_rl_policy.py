@@ -640,7 +640,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         plans = self.eval_plans if self.residual_model is not None else 1
         if plans > 1:
             decoded = self.select_plan(
-                batch, plans, k, rank_fn=self.residual_model.rank_plans,
+                batch, plans, k, rank_fn=self.residual_model.rank_plans, random_plan=self.eval_plan_ranker == "random",
                 rank_candidates=self.residual_model.rank_candidates if self.eval_plan_ranker == "q" else None)
         else:
             decoded = self.decode_candidates(batch, k=k)
