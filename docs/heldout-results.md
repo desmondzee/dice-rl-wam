@@ -161,6 +161,7 @@ Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 48
 | 0 | SFT, best-of-1, 5 / 10 sampler (GB10) | 75 | 0.75 | 364 | 24 / 12 | 28 · 19 · 3 |
 | 0 | SFT step 400, best-of-1, 5 / 10 sampler, 50 of the standard 100 episodes (GB10) | 33 / 50 | 0.66 | 410 | 5 / 10 vs step 600 on the same 50 (38 / 50) | — |
 | 0 | SFT step 200, best-of-1, 5 / 10 sampler, 50 of the standard 100 episodes (GB10) | 38 / 50 | 0.76 | 364 | 8 / 8 vs step 600 on the same 50 (38 / 50) | — |
+| 0 | RL plan selection (M = 4 plans ranked by V_plan, K = 4 by Q) with the filtered (s, a_base) residual, 240k, 5 / 10 sampler (GB10) | 96 | 0.96 | 309 | 23 / 2 vs SFT at 5 / 10 (75) | 46 · 4 · 0 |
 | 9 | 42 | 49 (+7) | 63 (+14 more) | 400k, (s, z) |
 | 9 | 42 | 63 (+21) | 75 (+12 more) | 660k, (s, a_base) |
 | 9 | 42 | 73 (+31) | 73 (+0 more) | 480k, (s, a_base), ε = −0.3 online |
@@ -236,3 +237,7 @@ How much of the ranker's error is the critic's own: rank the stored plans with Q
 | 320k | 20,581 | 0.63 | 0.90 | 0.55 / 0.81 |
 
 Two five-head halves of the same critic agree on the best plan 63% of the time and each captures about 89% of the value the other sees, so the critic itself fixes a ceiling near 0.63 agreement for any ranker trained on it; the live plan critic sits 8–12 points below that in agreement and 8–16 points in value captured, and improved with more data (73% → 81%). On the random-plan chunks, executed plans that were Q's argmax went on to a mean Monte Carlo return of 0.67–0.70 against 0.37–0.39 otherwise. Regularised (256-wide, dropout, weight decay) and classification (HL-Gauss, on the max or on all 16 candidates) refits on fixed targets captured 43–60%, all below the online ranker; the bagged early-stopped variants crashed on a scoring bug and were not re-run. Conclusion: the distilled ranker is close to what the critic can support; further gains come from the critic (more data, heads on disjoint data) rather than from the ranker's loss or architecture.
+
+### Plan selection, task 0, 240k (2026-10-15)
+
+`dice-t0-plan-m4` (same recipe as the task 9 run; stopped at 240,127 env steps) on the standard 100 held-out episodes: 96 / 100 against the SFT prior's 75 at the same sampler and seeds (23 gained / 2 lost; 48 and 48 on the two seed passes; 46 states succeed on both seeds, 4 on one, none on neither; mean 309 steps against the prior's 364). Collection success during training sat at 0.90–0.95 from 20k onward.
