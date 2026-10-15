@@ -225,3 +225,14 @@ Final checkpoint of `dice-t9-plan-m4` on the standard 100 held-out episodes: 80 
 ### Earlier SFT checkpoints as weaker priors (2026-10-15)
 
 Looking for a prior in the 40–50% band on the same tasks, checkpoints 200 and 400 of the same SFT run (fetched and hash-verified) were evaluated on task 0 at the 5 / 10 sampler over shard 0 of 2 of the standard plan (every other episode, 50 in all; the remaining shard completes the usual 100). Step 400: 33 / 50; step 200: 38 / 50; step 600 on the same 50 episodes: 38 / 50. Task 0 is not monotone in the checkpoint and none of the three lands in the band.
+
+### Plan-critic ceiling (task 9 buffers at 160k and 320k)
+
+How much of the ranker's error is the critic's own: rank the stored plans with Q heads 1–5 and with heads 6–10 separately.
+
+| buffer | states | half-vs-half argmax agreement | value captured by one half under the other | live V_plan held-out agreement / captured |
+|---|---|---|---|---|
+| 160k | 10,278 | 0.63 | 0.88 | 0.51 / 0.73 |
+| 320k | 20,581 | 0.63 | 0.90 | 0.55 / 0.81 |
+
+Two five-head halves of the same critic agree on the best plan 63% of the time and each captures about 89% of the value the other sees, so the critic itself fixes a ceiling near 0.63 agreement for any ranker trained on it; the live plan critic sits 8–12 points below that in agreement and 8–16 points in value captured, and improved with more data (73% → 81%). On the random-plan chunks, executed plans that were Q's argmax went on to a mean Monte Carlo return of 0.67–0.70 against 0.37–0.39 otherwise. Regularised (256-wide, dropout, weight decay) and classification (HL-Gauss, on the max or on all 16 candidates) refits on fixed targets captured 43–60%, all below the online ranker; the bagged early-stopped variants crashed on a scoring bug and were not re-run. Conclusion: the distilled ranker is close to what the critic can support; further gains come from the critic (more data, heads on disjoint data) rather than from the ranker's loss or architecture.
