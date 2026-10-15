@@ -166,6 +166,7 @@ Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 48
 | 9 | SFT, best-of-1, 5 steps executed at 4 / 10 (GB10) | 39 | 0.39 | 449 | 25 / 28 | 8 · 23 · 19 |
 | 9 | RL plan selection (M = 4 plans ranked by V_plan, K = 4 by Q) with the filtered (s, a_base) residual, 160k, 5 / 10 sampler (GB10) | 79 | 0.79 | 338 | 30 / 11 vs SFT at 5 / 10 (60) | 30 · 19 · 1 |
 | 9 | same checkpoint, plans ranked by Q over all 16 residual candidates instead of V_plan (GB10) | 74 | 0.74 | 340 | 30 / 16 vs SFT at 5 / 10; 14 / 19 vs the V_plan-ranked run | 28 · 18 · 4 |
+| 9 | RL plan selection (M = 4 plans ranked by V_plan, K = 4 by Q) with the filtered (s, a_base) residual, 320k, 5 / 10 sampler (GB10) | 80 | 0.80 | 335 | 32 / 12 vs SFT at 5 / 10 (60); 13 / 12 vs its own 160k | 33 · 14 · 3 |
 | 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
 | 8 | SFT, best-of-1, 5 / 10 sampler (GB10) | 12 | 0.12 | 512 | — (no 20 / 50 held-out run; 2 / 20 on the 20-rollout eval) | 1 · 10 · 39 |
 
@@ -214,3 +215,7 @@ Targets: max over K candidates of min-ensemble Q(s, p, a_base + actor) for every
 | fresh, centred / ranking with pool − state features | 0.99 | 0.42 / 0.44 | 0.37 / 0.39 |
 
 Every offline refit overfits; the ranker is limited by generalisation from 10k states on 3,072-d pools, not by the loss. Ranking by Q over all 16 residual candidates at evaluation (74 / 100) underperforms the plan critic (79 / 100), so the distilled ranker's smoothness is doing useful work.
+
+### Plan selection, task 9, 320k (2026-10-15)
+
+Final checkpoint of `dice-t9-plan-m4` on the standard 100 held-out episodes: 80 / 100 (32 gained / 12 lost vs the SFT prior's 60 at the same sampler; 39 and 41 successes on the two seed passes; 33 states succeed on both seeds, 14 on one, 3 on neither; 129 s per episode). Against its own 160k checkpoint (79) it is 13 gained / 12 lost: the second half of training did not move held-out success, consistent with the flat collection success (0.75–0.82) and plan regret (0.03–0.045) after selection switched on at 64k. The lift over the prior is therefore established by 160k.
