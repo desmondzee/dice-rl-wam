@@ -32,3 +32,5 @@ task,policy,candidates,episodes,successes,success_rate,ci95_halfwidth,mean_steps
 9,"RL plan selection M=4 (V_plan ranked) + (s,a_base) residual with the filter at ε = −0.3, 160k, best-of-4, 5 / 10 sampler",4,100,79,0.79,0.080,338.0,,,30,11,30,19,1,result/heldout/dice-t9-plan-m4-step160000-k4-m4-v5e-1a10/task_09
 9,"RL plan selection M=4 ranked by Q over all 16 candidates + (s,a_base) residual with the filter at ε = −0.3, 160k, 5 / 10 sampler",16,100,74,0.74,0.086,340.0,,,30,16,28,18,4,result/heldout/dice-t9-plan-m4-step160000-k4-m4-v5e-1a10-qrank/task_09
 9,"RL plan selection M=4 (V_plan ranked) + (s,a_base) residual with the filter at ε = −0.3, 320k, best-of-4, 5 / 10 sampler",4,100,80,0.80,0.078,335.0,39,41,32,12,33,14,3,result/heldout/dice-t9-plan-m4-step320000-k4-m4-v5e-1a10/task_09
+0,"SFT step 400, 5 video / 10 action steps (shard 0 of 2: every other standard episode)",1,50,33,0.66,,410.0,,,5,10,,,,result/heldout/sft-step000400-v5e-1a10/task_00
+0,"SFT step 200, 5 video / 10 action steps (shard 0 of 2: every other standard episode)",1,50,38,0.76,,364.0,,,8,8,,,,result/heldout/sft-step000200-v5e-1a10/task_00

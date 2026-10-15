@@ -159,6 +159,8 @@ Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 48
 |---|---|---|---|---|
 | 0 | 63 | 81 (+18) | 90 (+9 more) | 660k |
 | 0 | SFT, best-of-1, 5 / 10 sampler (GB10) | 75 | 0.75 | 364 | 24 / 12 | 28 · 19 · 3 |
+| 0 | SFT step 400, best-of-1, 5 / 10 sampler, 50 of the standard 100 episodes (GB10) | 33 / 50 | 0.66 | 410 | 5 / 10 vs step 600 on the same 50 (38 / 50) | — |
+| 0 | SFT step 200, best-of-1, 5 / 10 sampler, 50 of the standard 100 episodes (GB10) | 38 / 50 | 0.76 | 364 | 8 / 8 vs step 600 on the same 50 (38 / 50) | — |
 | 9 | 42 | 49 (+7) | 63 (+14 more) | 400k, (s, z) |
 | 9 | 42 | 63 (+21) | 75 (+12 more) | 660k, (s, a_base) |
 | 9 | 42 | 73 (+31) | 73 (+0 more) | 480k, (s, a_base), ε = −0.3 online |
@@ -219,3 +221,7 @@ Every offline refit overfits; the ranker is limited by generalisation from 10k s
 ### Plan selection, task 9, 320k (2026-10-15)
 
 Final checkpoint of `dice-t9-plan-m4` on the standard 100 held-out episodes: 80 / 100 (32 gained / 12 lost vs the SFT prior's 60 at the same sampler; 39 and 41 successes on the two seed passes; 33 states succeed on both seeds, 14 on one, 3 on neither; 129 s per episode). Against its own 160k checkpoint (79) it is 13 gained / 12 lost: the second half of training did not move held-out success, consistent with the flat collection success (0.75–0.82) and plan regret (0.03–0.045) after selection switched on at 64k. The lift over the prior is therefore established by 160k.
+
+### Earlier SFT checkpoints as weaker priors (2026-10-15)
+
+Looking for a prior in the 40–50% band on the same tasks, checkpoints 200 and 400 of the same SFT run (fetched and hash-verified) were evaluated on task 0 at the 5 / 10 sampler over shard 0 of 2 of the standard plan (every other episode, 50 in all; the remaining shard completes the usual 100). Step 400: 33 / 50; step 200: 38 / 50; step 600 on the same 50 episodes: 38 / 50. Task 0 is not monotone in the checkpoint and none of the three lands in the band.
