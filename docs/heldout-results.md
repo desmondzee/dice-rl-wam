@@ -182,3 +182,35 @@ Code at `e1dab88`. 1,100 env steps (71 chunks, 4 episodes, W&B `nh1yejo9`): plan
 `dice-t9-plan-m4` (W&B `lsy1uiuu`; M = 4 plans fully denoised at 5 / 10, ranked by the regression-trained plan critic, K = 4 candidates from the chosen plan ranked by Q, filtered base-conditioned residual at ε = −0.3), evaluated at the 160k checkpoint on the standard 100 held-out episodes: 79 / 100 against the SFT prior's 60 / 100 at the same sampler and seeds (30 gained / 11 lost; 30 states succeed on both seeds, 19 on one, 1 on neither; 130 s per episode on a GB10). Collection success rose from 0.55 with random plans to 0.78 once selection started at 64k; plan regret halved (0.082 → 0.040). The offline ranker study on the 160k buffer: the live plan critic captures 73% of the value available from plan choice on held-out states; offline refits with the recipe loss, a Polyak target, a state-centred target or a pairwise ranking loss all overfit and capture less (41–62%), so the ranker is generalisation-limited, not loss-limited.
 
 Q-ranked selection on the same 160k checkpoint and episodes (plan chosen as the one containing the best of all 16 residual candidates by min-ensemble Q, `--plan-ranker q`): 74 / 100, paired 14 gained / 19 lost against the V_plan-ranked 79 / 100, at 190 s per episode against 130. Ranking by the action critic over sixteen candidates leans harder on the critic's errors than the distilled plan critic's smoother ordering; the plan critic stays the selection rule.
+
+### Plan-selection run signals (task 9, `dice-t9-plan-m4`, W&B `lsy1uiuu`)
+
+Collection with M = 4 plans; random plan for the first 64k env steps and 10% afterwards; V_plan ranked otherwise. Values are means over the window of the per-update logs.
+
+| env steps | collection success | plan regret (Q of best plan − executed) | V_plan–Q argmax agreement | replay ΔV_plan | Q advantage over base | filter keep rate |
+|---|---|---|---|---|---|---|
+| 0 – 64k (random plans) | 0.55 | 0.082 | 0.48 | 0.000 | 0.011 | 1.00 |
+| 64k – 96k | 0.69 | 0.044 | 0.47 | 0.007 | 0.019 | 1.00 |
+| 96k – 128k | 0.71 | 0.040 | 0.46 | 0.022 | 0.025 | 1.00 |
+| 128k – 160k | 0.79 | 0.040 | 0.47 | 0.023 | 0.031 | 0.965 |
+| 160k – 192k | 0.75 | 0.036 | 0.45 | — | 0.038 | 0.962 |
+| 192k – 224k | 0.78 | 0.040 | 0.43 | — | 0.047 | 0.958 |
+| 224k – 240k | 0.77 | 0.030 | 0.45 | — | 0.048 | 0.961 |
+
+Train-evals (10 episodes): 4/10 at 0, 6/10 at 80k. Throughput 0.56 s per env step at M = 4 (0.23 at M = 1), peak GPU memory 38.6 GB. Action-level replay ΔV is 0.045 against 0.145 for the ε run at the same step (prior 60 vs 42, residual 0.018 vs 0.028 RMS); the plan-level entropy proxy stays at zero because an argmax over M samples removes log M nats by construction, so plan-level contraction is read from regret and ΔV_plan.
+
+### Plan-critic ranker study (task 9 buffer at 160k, 10,278 states, 80 / 20 split)
+
+Targets: max over K candidates of min-ensemble Q(s, p, a_base + actor) for every stored plan. Within-state spread 0.16; random plan leaves 0.075 of value per chunk.
+
+| ranker | train value captured | test value captured | test agreement |
+|---|---|---|---|
+| random | 0.00 | 0.00 | 0.26 |
+| live V_plan from the run | 0.76 | 0.73 | 0.51 |
+| fresh, recipe MSE on live Q, 6k steps | 0.94 | 0.62 | 0.47 |
+| fresh, MSE on Polyak Q | 0.89 | 0.59 | 0.46 |
+| fresh, state-centred MSE | 0.99 | 0.41 | 0.37 |
+| fresh, pairwise ranking loss | 1.00 | 0.46 | 0.40 |
+| fresh, centred / ranking with pool − state features | 0.99 | 0.42 / 0.44 | 0.37 / 0.39 |
+
+Every offline refit overfits; the ranker is limited by generalisation from 10k states on 3,072-d pools, not by the loss. Ranking by Q over all 16 residual candidates at evaluation (74 / 100) underperforms the plan critic (79 / 100), so the distilled ranker's smoothness is doing useful work.
