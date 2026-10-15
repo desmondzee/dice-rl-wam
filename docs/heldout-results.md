@@ -205,7 +205,7 @@ Targets: max over K candidates of min-ensemble Q(s, p, a_base + actor) for every
 | ranker (160k buffer, 80 / 20 state split) | train captured | test captured | test agreement |
 |---|---|---|---|
 | random | 0.00 | 0.00 | 0.26 |
-| live V_plan from the run | 0.76 | 0.73 | 0.51 |
+| live V_plan from the run (trained on all rows; both columns in-sample) | 0.76 | 0.73 | 0.51 |
 | fresh MSE on live Q, 6k steps | 0.94 | 0.62 | 0.47 |
 | fresh MSE on Polyak Q | 0.89 | 0.59 | 0.46 |
 | fresh state-centred MSE | 0.99 | 0.41 | 0.37 |
@@ -214,7 +214,7 @@ Targets: max over K candidates of min-ensemble Q(s, p, a_base + actor) for every
 | fresh HL-Gauss (51 bins) on the max target | 0.83 | 0.48 | 0.41 |
 | fresh HL-Gauss on all 16 candidate targets | 0.82 | 0.48 | 0.42 |
 
-Critic self-consistency: ranking the stored plans with Q heads 1–5 and heads 6–10 separately, the two halves agree on the argmax plan 0.63 of the time and each captures 0.88 (160k) / 0.90 (320k) of the value under the other; the live V_plan on the 320k buffer: agreement 0.55, captured 0.81. On the random-plan chunks, episodes whose executed plan was Q's argmax had mean Monte Carlo return 0.67 (160k) / 0.70 (320k) against 0.37 / 0.39 otherwise.
+Critic self-consistency: ranking the stored plans with Q heads 1–5 and heads 6–10 separately, the two halves agree on the argmax plan 0.63 of the time and each captures 0.88 (160k) / 0.90 (320k) of the value under the other; the live V_plan on the 320k buffer (in-sample): agreement 0.55, captured 0.81. Over all online rows (the buffer does not record which chunks used a random plan), episodes whose executed plan was the final critic's argmax had mean Monte Carlo return 0.67 (160k) / 0.70 (320k) against 0.37 / 0.39 otherwise; this split is confounded by time in training and by Q having been trained on those returns.
 
 ### Implementation checks (Jarvis, 2026-10-13)
 

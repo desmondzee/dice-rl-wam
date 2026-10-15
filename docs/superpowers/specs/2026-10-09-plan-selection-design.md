@@ -117,9 +117,10 @@ decoded and scored every chunk so V_plan has targets for the plans it rejected. 
 pools, the chosen index, the M × K base actions and the K action noises, the executed action and today's
 fields.
 
-Logged per chunk: plan_agreement (V_plan's argmax equals the argmax over m of max_k Q(s, p_m, a_mk)),
-plan_regret (that maximum minus the executed plan's value), plan_value_spread (max − min of V_plan over
-the M), plan_random_rate; per update bin: plan_critic_loss, v_plan_mean.
+Computed every chunk and logged with each update (the last chunk of every four, with the pre-update critic,
+random-plan chunks included): plan_agreement (V_plan's argmax equals the argmax over m of max_k Q(s, p_m,
+a_mk)), plan_regret (that maximum minus the executed plan's value), plan_value_spread (max − min of V_plan
+over the M), plan_random_rate; per update: plan_critic_loss, v_plan_mean.
 
 ## 7. Critics and actor
 
@@ -135,8 +136,9 @@ target as today, with the executed next chunk's pool p′ in the bootstrap. Inpu
   k = 1..K; q_mk = min over j of Q_j(s, p_m, a_mk); y_m = max over k of q_mk. Expert rows carry one plan
   (the true future's pool, §8) and one base action (the demo action), so y = min_j Q_j(s, p, a_demo +
   actor(s, a_demo)).
-- Loss = mean over rows, plans and heads of (V_plan_j(s, p_m) − y_m)². Online rows contribute M plans each,
-  expert rows one; the batch and expert ratio are the critic's.
+- Loss = sum over heads of the mean over rows and plans of (V_plan_j(s, p_m) − y_m)². Online rows contribute M
+  plans each; expert rows carry their single pool repeated M times (§9), so each expert row enters the loss with
+  the same weight as an online row and no ranking information; the batch and expert ratio are the critic's.
 - One V_plan step per critic step, on the same batch, after the critic update, using the live Q and the
   live actor (what collection-time selection uses). Adam 1e-4, wd 1e-5, clip 1.0, the critic's cosine
   schedule. No target network, no bootstrap through V_plan, no filter, no BC term.
