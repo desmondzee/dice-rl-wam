@@ -219,3 +219,15 @@ Critic self-consistency: ranking the stored plans with Q heads 1–5 and heads 6
 ### Implementation checks (Jarvis, 2026-10-13)
 
 1,100-step smoke: plan-critic loss 4.6 → 0.21 and TD loss 1.86 → 0.05 over nine update logs. On real weights, across-plan base-action spread 0.05–0.06 vs within-plan 0.013–0.019 on the first chunk of three starts; plan pools differ across plans by about 10% of their magnitude. Batched sampling equals the single-plan pass bit for bit at M = 1 and differs from the looped reference at M = 2 by 2 bf16 ulps after the first pass, 0.35 in the final latent. One video pass: 175 ms at CFG batch 2 (78 ms GEMM), 606 ms at batch 8 (392 ms GEMM); batching four plans is 10% faster than looping (6.7 vs 7.4 s per chunk; 1.9 s at M = 1).
+
+## LIBERO-Plus perturbations, task 9 (GB10s, 2026-10-15)
+
+Protocol: `docs/libero-plus/task9-plan.json` (LIBERO-Plus at 4976dc3, 5 / 10 sampler, 520-step horizon). 100 episodes: the 42 robot-initial-state variants of KITCHEN_SCENE6 (arm at the variant's pose, object layout sampled by the simulator under the episode's seed, fresh environment per episode) plus the first 10 repeated with a second seed; the 39 layout variants (21 added distractors, 18 displaced targets, each with its single stored start state) plus the first 9 repeated. Identical (variant, seed) list for every policy. Unperturbed reference on the standard 100 episodes: SFT 60, plan selection 320k 80.
+
+| axis | episodes | SFT step 600 | plan selection + residual, 320k | paired gained / lost | mean steps SFT / RL |
+|---|---|---|---|---|---|
+| robot initial state | 52 | 12 (0.23) | 26 (0.50) | 18 / 4 | 476 / 403 |
+| object layout | 48 | 25 (0.52) | 27 (0.56) | 11 / 9 | 414 / 398 |
+| both | 100 | 37 | 53 | 29 / 13 | 446 / 400 |
+
+By LIBERO-Plus difficulty level (SFT / RL successes of n): robot initial state 1: 3 / 4 of 7, 2: 5 / 14 of 20, 3: 2 / 3 of 6, 4: 1 / 3 of 10, 5: 1 / 2 of 9; layout 1: 16 / 14 of 26, 2: 5 / 5 of 12, 3: 4 / 8 of 10. Episode wall time 155 s at M = 4. Raw results under `result/heldout-plus/<policy>/task_09/`.
