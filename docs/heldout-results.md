@@ -153,43 +153,38 @@ Run `dice-t9-base-eps03`: the base-conditioned recipe with ε = −0.3 and a 480
 
 Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 480k best-of-4 at 74; 17 / 19 vs its 660k at 75) and best-of-1 73/100 (40 / 9 vs SFT; 24 / 14 vs the base run's 660k best-of-1 at 63; 18 / 22 vs the offline filtered actor at 77; 22 / 15 vs the offline control at 66). The residual alone gains 10 points over the base run's residual alone, which reproduces the offline probe's direction (77 vs 66) within the interval, and selection adds nothing on top of it (73 vs 73, 18 / 18 paired). With selection the two recipes are indistinguishable (73 vs 74–75). On its own final buffer (30,847 online rows) the filtered actor is distributionally the same as the base run's: mean ΔV 0.16 at every checkpoint (base run 0.16–0.19), mean ΔH +0.007 to +0.010 (a slight expansion; base run +0.008 to +0.013), Δlog-std +0.06 (same), r(ΔV, ΔH) +0.12 to +0.17 (base run +0.09 to +0.12), residual RMS 0.034 (same). In both runs the expansion sits on failed-episode rows (ΔH +0.015) and is absent on succeeded-episode rows (+0.001), while ΔV is larger on succeeded rows (0.19–0.22 vs 0.14–0.16). The held-out gain of the residual alone is not accompanied by any change in the candidates' spread, in the critic-predicted gain, or in the residual's size.
 
-## Decomposition across tasks
+## Decomposition across tasks (20 / 50 sampler)
 
 | task | SFT | residual only (best-of-1) | residual + selection (best-of-4) | checkpoint |
 |---|---|---|---|---|
 | 0 | 63 | 81 (+18) | 90 (+9 more) | 660k |
-| 0 | SFT, best-of-1, 5 / 10 sampler (GB10) | 75 | 0.75 | 364 | 24 / 12 | 28 · 19 · 3 |
-| 0 | SFT step 400, best-of-1, 5 / 10 sampler, 50 of the standard 100 episodes (GB10) | 33 / 50 | 0.66 | 410 | 5 / 10 vs step 600 on the same 50 (38 / 50) | — |
-| 0 | SFT step 200, best-of-1, 5 / 10 sampler, 50 of the standard 100 episodes (GB10) | 38 / 50 | 0.76 | 364 | 8 / 8 vs step 600 on the same 50 (38 / 50) | — |
-| 0 | RL plan selection (M = 4 plans ranked by V_plan, K = 4 by Q) with the filtered (s, a_base) residual, 240k, 5 / 10 sampler (GB10) | 96 | 0.96 | 309 | 23 / 2 vs SFT at 5 / 10 (75) | 46 · 4 · 0 |
 | 9 | 42 | 49 (+7) | 63 (+14 more) | 400k, (s, z) |
 | 9 | 42 | 63 (+21) | 75 (+12 more) | 660k, (s, a_base) |
 | 9 | 42 | 73 (+31) | 73 (+0 more) | 480k, (s, a_base), ε = −0.3 online |
-| 9 | SFT, best-of-1, 5 / 10 sampler (GB10) | 60 | 0.60 | 400 | 33 / 15 | 15 · 30 · 5 |
-| 9 | SFT, best-of-1, 5 steps executed at 4 / 10 (GB10) | 39 | 0.39 | 449 | 25 / 28 | 8 · 23 · 19 |
-| 9 | RL plan selection (M = 4 plans ranked by V_plan, K = 4 by Q) with the filtered (s, a_base) residual, 160k, 5 / 10 sampler (GB10) | 79 | 0.79 | 338 | 30 / 11 vs SFT at 5 / 10 (60) | 30 · 19 · 1 |
-| 9 | same checkpoint, plans ranked by Q over all 16 residual candidates instead of V_plan (GB10) | 74 | 0.74 | 340 | 30 / 16 vs SFT at 5 / 10; 14 / 19 vs the V_plan-ranked run | 28 · 18 · 4 |
-| 9 | RL plan selection (M = 4 plans ranked by V_plan, K = 4 by Q) with the filtered (s, a_base) residual, 320k, 5 / 10 sampler (GB10) | 80 | 0.80 | 335 | 32 / 12 vs SFT at 5 / 10 (60); 13 / 12 vs its own 160k | 33 · 14 · 3 |
 | 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
-| 8 | SFT, best-of-1, 5 / 10 sampler (GB10) | 12 | 0.12 | 512 | — (no 20 / 50 held-out run; 2 / 20 on the 20-rollout eval) | 1 · 10 · 39 |
 
-Sampler re-bench (2026-10-12, GB10, torch 2.11.0+cu130): the unchanged SFT prior on task 9 at the authors' default 5 video / 10 action steps scores 60 / 100 against 42 / 100 at the released 20 / 50 LIBERO sampler on the same 100 episodes (paired 33 gained / 15 lost; 15 states succeed on both seeds, 30 on one, 5 on neither). Stopping the 5-step schedule after its fourth pass, which leaves the history cache at noise level 0.77, scores 39 / 100. Task 0 at 5 / 10 scores 75 / 100 against 63 / 100 at 20 / 50 (paired 24 gained / 12 lost). The plan-selection runs and all later evaluations use 5 / 10.
+## Plan selection at the 5 / 10 sampler (GB10s, 2026-10-12 to 2026-10-15)
 
-Selection by the trained critic contributed on all three tasks (+9, +14, +7); the residual's own contribution ranged from +18 to −5 and ordered the tasks the same way the train-eval ΔV did.
+Sampler: 5 video denoising steps (plus the cache write pass) and 10 action steps, the authors' default (`va_franka_cfg`), in place of the released 20 / 50 LIBERO sampler. Same 100 held-out episodes per task as above. Plan selection: M = 4 video plans per chunk, fully denoised and batched; the plan critic V_plan(s, p), a 10-head ensemble trained by regression onto max over the plan's K = 4 candidates of min-ensemble Q(s, p, a), picks the plan; Q (with the plan pool as an extra input) picks among the chosen plan's K = 4 residual candidates; the residual is the filtered (s, a_base) actor at ε = −0.3; 320k env steps, random plan for the first 64k and 10% afterwards. Code at `e1dab88`.
 
-## Plan-selection smoke (2026-10-13, Jarvis GB10, task 9, M = 4, K = 4, 5 / 10 sampler)
+| task | policy | successes | rate | mean steps | vs SFT at 5 / 10 paired: gained / lost | states 2/2 · 1/2 · 0/2 |
+|---|---|---|---|---|---|---|
+| 0 | SFT step 600, best-of-1 | 75 | 0.75 | 364 | 24 / 12 vs SFT at 20 / 50 (63) | 28 · 19 · 3 |
+| 0 | SFT step 400, best-of-1, shard 0 of 2 (50 episodes) | 33 / 50 | 0.66 | 410 | 5 / 10 vs step 600 on the same 50 (38 / 50) | — |
+| 0 | SFT step 200, best-of-1, shard 0 of 2 (50 episodes) | 38 / 50 | 0.76 | 364 | 8 / 8 vs step 600 on the same 50 (38 / 50) | — |
+| 0 | plan selection + residual, 240k (`dice-t0-plan-m4`) | 96 | 0.96 | 309 | 23 / 2 | 46 · 4 · 0 |
+| 8 | SFT step 600, best-of-1 | 12 | 0.12 | 512 | — (2 / 20 on the 20-rollout eval at 20 / 50) | 1 · 10 · 39 |
+| 9 | SFT step 600, best-of-1 | 60 | 0.60 | 400 | 33 / 15 vs SFT at 20 / 50 (42) | 15 · 30 · 5 |
+| 9 | SFT step 600, 5 steps stopped after pass 4 (cache at σ = 0.77) | 39 | 0.39 | 449 | 25 / 28 vs SFT at 20 / 50 (42) | 8 · 23 · 19 |
+| 9 | plan selection + residual, 160k (`dice-t9-plan-m4`) | 79 | 0.79 | 338 | 30 / 11 | 30 · 19 · 1 |
+| 9 | same 160k checkpoint, plan chosen by Q over all 16 residual candidates (`--plan-ranker q`) | 74 | 0.74 | 340 | 30 / 16; 14 / 19 vs the V_plan-ranked run | 28 · 18 · 4 |
+| 9 | plan selection + residual, 320k (`dice-t9-plan-m4`) | 80 | 0.80 | 335 | 32 / 12; 13 / 12 vs its own 160k | 33 · 14 · 3 |
 
-Code at `e1dab88`. 1,100 env steps (71 chunks, 4 episodes, W&B `nh1yejo9`): plan-critic regression loss 4.6 → 0.21 over the nine update logs, action-critic TD loss 1.86 → 0.05, plan value spread 0.005 to 0.14, plan regret 0.004 to 0.17, random plan throughout (selection warm-up), peak GPU memory 38.6 GB, 0.49 to 0.65 s per env step (M = 1: 0.23). On real weights the across-plan base-action spread is 3 to 4× the within-plan spread (0.05 to 0.06 vs 0.013 to 0.019 on the first chunk of three starts), and the plan pools differ across plans by about 10% of their magnitude. Batched sampling equals the single-plan pass bit for bit at M = 1 and differs from the looped reference at M = 2 only by bf16 rounding amplified through the sampler. A profile of one video pass shows the GB10 compute-bound on bf16 GEMMs (`cutlass_80` kernels, about 70% of peak), so batching four plans saves only the launch overhead (about 10%).
+Episode wall time on a GB10 at 5 / 10: 65 s for the SFT prior, 120–130 s at M = 4 with V_plan ranking, 190 s with Q ranking over 16 candidates.
 
-## Plan selection, task 9, 160k checkpoint (2026-10-14)
+### Training signals
 
-`dice-t9-plan-m4` (W&B `lsy1uiuu`; M = 4 plans fully denoised at 5 / 10, ranked by the regression-trained plan critic, K = 4 candidates from the chosen plan ranked by Q, filtered base-conditioned residual at ε = −0.3), evaluated at the 160k checkpoint on the standard 100 held-out episodes: 79 / 100 against the SFT prior's 60 / 100 at the same sampler and seeds (30 gained / 11 lost; 30 states succeed on both seeds, 19 on one, 1 on neither; 130 s per episode on a GB10). Collection success rose from 0.55 with random plans to 0.78 once selection started at 64k; plan regret halved (0.082 → 0.040). The offline ranker study on the 160k buffer: the live plan critic captures 73% of the value available from plan choice on held-out states; offline refits with the recipe loss, a Polyak target, a state-centred target or a pairwise ranking loss all overfit and capture less (41–62%), so the ranker is generalisation-limited, not loss-limited.
-
-Q-ranked selection on the same 160k checkpoint and episodes (plan chosen as the one containing the best of all 16 residual candidates by min-ensemble Q, `--plan-ranker q`): 74 / 100, paired 14 gained / 19 lost against the V_plan-ranked 79 / 100, at 190 s per episode against 130. Ranking by the action critic over sixteen candidates leans harder on the critic's errors than the distilled plan critic's smoother ordering; the plan critic stays the selection rule.
-
-### Plan-selection run signals (task 9, `dice-t9-plan-m4`, W&B `lsy1uiuu`)
-
-Collection with M = 4 plans; random plan for the first 64k env steps and 10% afterwards; V_plan ranked otherwise. Values are means over the window of the per-update logs.
+`dice-t9-plan-m4` (W&B `lsy1uiuu`), means over windows of the per-update logs:
 
 | env steps | collection success | plan regret (Q of best plan − executed) | V_plan–Q argmax agreement | replay ΔV_plan | Q advantage over base | filter keep rate |
 |---|---|---|---|---|---|---|
@@ -199,45 +194,28 @@ Collection with M = 4 plans; random plan for the first 64k env steps and 10% aft
 | 128k – 160k | 0.79 | 0.040 | 0.47 | 0.023 | 0.031 | 0.965 |
 | 160k – 192k | 0.75 | 0.036 | 0.45 | — | 0.038 | 0.962 |
 | 192k – 224k | 0.78 | 0.040 | 0.43 | — | 0.047 | 0.958 |
-| 224k – 240k | 0.77 | 0.030 | 0.45 | — | 0.048 | 0.961 |
+| 224k – 320k | 0.71 – 0.82 | 0.038 – 0.045 | 0.41 – 0.49 | 0.036 – 0.038 | 0.050 – 0.055 | 0.947 – 0.954 |
 
-Train-evals (10 episodes): 4/10 at 0, 6/10 at 80k. Throughput 0.56 s per env step at M = 4 (0.23 at M = 1), peak GPU memory 38.6 GB. Action-level replay ΔV is 0.045 against 0.145 for the ε run at the same step (prior 60 vs 42, residual 0.018 vs 0.028 RMS); the plan-level entropy proxy stays at zero because an argmax over M samples removes log M nats by construction, so plan-level contraction is read from regret and ΔV_plan.
+Train-evals (10 procedural episodes) 4 / 6 / 7 at 0 / 80k / 240k. Action-level replay ΔV 0.045 at 128k–160k (ε run at the same step: 0.145); residual 0.018 RMS (ε run 0.028); replay_plan_delta_h within ±0.01 throughout. `dice-t0-plan-m4` (W&B `h6angiud`, stopped at 240,127 env steps): collection success 0.90–0.95 from 20k onward, plan regret 0.039 → 0.019 once selection started, agreement 0.44–0.53, train-evals 9 / 9 at 0 / 80k. Throughput 0.56 s per env step at M = 4 (0.23 at M = 1), peak GPU memory 38.6 GB, 5.6k env steps per hour.
 
-### Plan-critic ranker study (task 9 buffer at 160k, 10,278 states, 80 / 20 split)
+### Plan-critic studies (offline, task 9 replay buffers)
 
-Targets: max over K candidates of min-ensemble Q(s, p, a_base + actor) for every stored plan. Within-state spread 0.16; random plan leaves 0.075 of value per chunk.
+Targets: max over K candidates of min-ensemble Q(s, p, a_base + actor) for every stored plan; "value captured" = 1 − (regret of the ranker's choice) / (regret of a random plan). 160k buffer: 10,278 online states, within-state spread of the target 0.16, random-plan regret 0.075.
 
-| ranker | train value captured | test value captured | test agreement |
+| ranker (160k buffer, 80 / 20 state split) | train captured | test captured | test agreement |
 |---|---|---|---|
 | random | 0.00 | 0.00 | 0.26 |
 | live V_plan from the run | 0.76 | 0.73 | 0.51 |
-| fresh, recipe MSE on live Q, 6k steps | 0.94 | 0.62 | 0.47 |
-| fresh, MSE on Polyak Q | 0.89 | 0.59 | 0.46 |
-| fresh, state-centred MSE | 0.99 | 0.41 | 0.37 |
-| fresh, pairwise ranking loss | 1.00 | 0.46 | 0.40 |
-| fresh, centred / ranking with pool − state features | 0.99 | 0.42 / 0.44 | 0.37 / 0.39 |
+| fresh MSE on live Q, 6k steps | 0.94 | 0.62 | 0.47 |
+| fresh MSE on Polyak Q | 0.89 | 0.59 | 0.46 |
+| fresh state-centred MSE | 0.99 | 0.41 | 0.37 |
+| fresh pairwise ranking loss | 1.00 | 0.46 | 0.40 |
+| fresh, 256-wide, dropout 0.2, wd 1e-2 | 0.74 | 0.53 | 0.41 |
+| fresh HL-Gauss (51 bins) on the max target | 0.83 | 0.48 | 0.41 |
+| fresh HL-Gauss on all 16 candidate targets | 0.82 | 0.48 | 0.42 |
 
-Every offline refit overfits; the ranker is limited by generalisation from 10k states on 3,072-d pools, not by the loss. Ranking by Q over all 16 residual candidates at evaluation (74 / 100) underperforms the plan critic (79 / 100), so the distilled ranker's smoothness is doing useful work.
+Critic self-consistency: ranking the stored plans with Q heads 1–5 and heads 6–10 separately, the two halves agree on the argmax plan 0.63 of the time and each captures 0.88 (160k) / 0.90 (320k) of the value under the other; the live V_plan on the 320k buffer: agreement 0.55, captured 0.81. On the random-plan chunks, episodes whose executed plan was Q's argmax had mean Monte Carlo return 0.67 (160k) / 0.70 (320k) against 0.37 / 0.39 otherwise.
 
-### Plan selection, task 9, 320k (2026-10-15)
+### Implementation checks (Jarvis, 2026-10-13)
 
-Final checkpoint of `dice-t9-plan-m4` on the standard 100 held-out episodes: 80 / 100 (32 gained / 12 lost vs the SFT prior's 60 at the same sampler; 39 and 41 successes on the two seed passes; 33 states succeed on both seeds, 14 on one, 3 on neither; 129 s per episode). Against its own 160k checkpoint (79) it is 13 gained / 12 lost: the second half of training did not move held-out success, consistent with the flat collection success (0.75–0.82) and plan regret (0.03–0.045) after selection switched on at 64k. The lift over the prior is therefore established by 160k.
-
-### Earlier SFT checkpoints as weaker priors (2026-10-15)
-
-Looking for a prior in the 40–50% band on the same tasks, checkpoints 200 and 400 of the same SFT run (fetched and hash-verified) were evaluated on task 0 at the 5 / 10 sampler over shard 0 of 2 of the standard plan (every other episode, 50 in all; the remaining shard completes the usual 100). Step 400: 33 / 50; step 200: 38 / 50; step 600 on the same 50 episodes: 38 / 50. Task 0 is not monotone in the checkpoint and none of the three lands in the band.
-
-### Plan-critic ceiling (task 9 buffers at 160k and 320k)
-
-How much of the ranker's error is the critic's own: rank the stored plans with Q heads 1–5 and with heads 6–10 separately.
-
-| buffer | states | half-vs-half argmax agreement | value captured by one half under the other | live V_plan held-out agreement / captured |
-|---|---|---|---|---|
-| 160k | 10,278 | 0.63 | 0.88 | 0.51 / 0.73 |
-| 320k | 20,581 | 0.63 | 0.90 | 0.55 / 0.81 |
-
-Two five-head halves of the same critic agree on the best plan 63% of the time and each captures about 89% of the value the other sees, so the critic itself fixes a ceiling near 0.63 agreement for any ranker trained on it; the live plan critic sits 8–12 points below that in agreement and 8–16 points in value captured, and improved with more data (73% → 81%). On the random-plan chunks, executed plans that were Q's argmax went on to a mean Monte Carlo return of 0.67–0.70 against 0.37–0.39 otherwise. Regularised (256-wide, dropout, weight decay) and classification (HL-Gauss, on the max or on all 16 candidates) refits on fixed targets captured 43–60%, all below the online ranker; the bagged early-stopped variants crashed on a scoring bug and were not re-run. Conclusion: the distilled ranker is close to what the critic can support; further gains come from the critic (more data, heads on disjoint data) rather than from the ranker's loss or architecture.
-
-### Plan selection, task 0, 240k (2026-10-15)
-
-`dice-t0-plan-m4` (same recipe as the task 9 run; stopped at 240,127 env steps) on the standard 100 held-out episodes: 96 / 100 against the SFT prior's 75 at the same sampler and seeds (23 gained / 2 lost; 48 and 48 on the two seed passes; 46 states succeed on both seeds, 4 on one, none on neither; mean 309 steps against the prior's 364). Collection success during training sat at 0.90–0.95 from 20k onward.
+1,100-step smoke: plan-critic loss 4.6 → 0.21 and TD loss 1.86 → 0.05 over nine update logs. On real weights, across-plan base-action spread 0.05–0.06 vs within-plan 0.013–0.019 on the first chunk of three starts; plan pools differ across plans by about 10% of their magnitude. Batched sampling equals the single-plan pass bit for bit at M = 1 and differs from the looped reference at M = 2 by 2 bf16 ulps after the first pass, 0.35 in the final latent. One video pass: 175 ms at CFG batch 2 (78 ms GEMM), 606 ms at batch 8 (392 ms GEMM); batching four plans is 10% faster than looping (6.7 vs 7.4 s per chunk; 1.9 s at M = 1).
