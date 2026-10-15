@@ -43,7 +43,7 @@ esac
 : "${DICE_REPO:=$(cd "$HERE/.." && pwd)}"
 : "${DICE_DATA:=/ephemeral/dice}"
 PY="$DICE_DATA/lerobot/.venv/bin/python"
-PREPARED="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("prepared_path", sys.argv[1]))' "$DICE_DATA/prepared.json")"
+PREPARED="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("prepared_path", sys.argv[1]))' "${DICE_PREPARED:-$DICE_DATA/prepared.json}")"
 STEP6="$(printf '%06d' "$STEP")"
 TT="$(printf '%02d' "$TASK")"
 SUFFIX=""

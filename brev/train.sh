@@ -37,7 +37,7 @@ done
 : "${MODAL_PROFILE:=desmond-zee}"
 PY="$DICE_DATA/lerobot/.venv/bin/python"
 MODAL="$DICE_DATA/lerobot/.venv/bin/modal"
-PREPARED="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("prepared_path", sys.argv[1]))' "$DICE_DATA/prepared.json")"
+PREPARED="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("prepared_path", sys.argv[1]))' "${DICE_PREPARED:-$DICE_DATA/prepared.json}")"
 OUT="$DICE_DATA/runs/$RUN"
 mkdir -p "$OUT"
 python3 -c 'import json,sys; print(json.dumps({"task_ids": [int(sys.argv[1])], "wandb_entity": sys.argv[2], "residual_input": sys.argv[3], "epsilon": float(sys.argv[4]), "online_env_steps": int(sys.argv[5]), "video_exec_step": int(sys.argv[6]), "video_steps": int(sys.argv[7]), "action_steps": int(sys.argv[8]), "plan_candidates": int(sys.argv[9])}))' "$TASK" "$WANDB_ENTITY" "$RESIDUAL_INPUT" "$EPSILON" "$ENV_STEPS" "$VIDEO_EXEC_STEP" "$VIDEO_STEPS" "$ACTION_STEPS" "$PLAN_CANDIDATES" > "$OUT/config.json"
