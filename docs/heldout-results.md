@@ -165,6 +165,7 @@ Held-out at 480k: best-of-4 73/100 (44 / 13 vs SFT; 19 / 20 vs the base run's 48
 | 9 | SFT, best-of-1, 5 / 10 sampler (GB10) | 60 | 0.60 | 400 | 33 / 15 | 15 · 30 · 5 |
 | 9 | SFT, best-of-1, 5 steps executed at 4 / 10 (GB10) | 39 | 0.39 | 449 | 25 / 28 | 8 · 23 · 19 |
 | 9 | RL plan selection (M = 4 plans ranked by V_plan, K = 4 by Q) with the filtered (s, a_base) residual, 160k, 5 / 10 sampler (GB10) | 79 | 0.79 | 338 | 30 / 11 vs SFT at 5 / 10 (60) | 30 · 19 · 1 |
+| 9 | same checkpoint, plans ranked by Q over all 16 residual candidates instead of V_plan (GB10) | 74 | 0.74 | 340 | 30 / 16 vs SFT at 5 / 10; 14 / 19 vs the V_plan-ranked run | 28 · 18 · 4 |
 | 4 | 76 | 75 (−1) / 71 (−5) | 83 / 78 (+7 / +2) | 480k / 660k |
 | 8 | SFT, best-of-1, 5 / 10 sampler (GB10) | 12 | 0.12 | 512 | — (no 20 / 50 held-out run; 2 / 20 on the 20-rollout eval) | 1 · 10 · 39 |
 
@@ -179,3 +180,5 @@ Code at `e1dab88`. 1,100 env steps (71 chunks, 4 episodes, W&B `nh1yejo9`): plan
 ## Plan selection, task 9, 160k checkpoint (2026-10-14)
 
 `dice-t9-plan-m4` (W&B `lsy1uiuu`; M = 4 plans fully denoised at 5 / 10, ranked by the regression-trained plan critic, K = 4 candidates from the chosen plan ranked by Q, filtered base-conditioned residual at ε = −0.3), evaluated at the 160k checkpoint on the standard 100 held-out episodes: 79 / 100 against the SFT prior's 60 / 100 at the same sampler and seeds (30 gained / 11 lost; 30 states succeed on both seeds, 19 on one, 1 on neither; 130 s per episode on a GB10). Collection success rose from 0.55 with random plans to 0.78 once selection started at 64k; plan regret halved (0.082 → 0.040). The offline ranker study on the 160k buffer: the live plan critic captures 73% of the value available from plan choice on held-out states; offline refits with the recipe loss, a Polyak target, a state-centred target or a pairwise ranking loss all overfit and capture less (41–62%), so the ranker is generalisation-limited, not loss-limited.
+
+Q-ranked selection on the same 160k checkpoint and episodes (plan chosen as the one containing the best of all 16 residual candidates by min-ensemble Q, `--plan-ranker q`): 74 / 100, paired 14 gained / 19 lost against the V_plan-ranked 79 / 100, at 190 s per episode against 130. Ranking by the action critic over sixteen candidates leans harder on the critic's errors than the distilled plan critic's smoother ordering; the plan critic stays the selection rule.
