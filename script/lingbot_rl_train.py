@@ -21,10 +21,14 @@ from script.lingbot_rl_model import (
 from script.lingbot_rl_policy import (
     env_action_count, histogram_entropy, load_residual_policy, slice_env_actions,
 )
+from script.lingbot_rl_progress import calibrate, progress
 from script.lingbot_rl_sharpen import bin_entropy, log_std
 
 LiberoEnv = None
 SHARPEN_EVERY_STEPS = 5_000
+FIDELITY_CHUNKS = 20
+FIDELITY_POSITION_M = 1e-3
+FIDELITY_ANGLE_RAD = 0.01745
 RESUME_KEYS = {
     "actor", "critic", "target_critic", "plan_critic", "layout", "actor_opt", "critic_opt", "plan_opt",
     "actor_lr", "critic_lr", "plan_lr", "replay", "rng", "env_steps", "chunks", "recipe", "checkpointed", "wandb_id",
@@ -142,6 +146,83 @@ def object_state(inner, layout):
              for name in layout["bodies"]]
     parts.append(np.asarray([data.qpos[model.get_joint_qpos_addr(name)] for name in layout["joints"]], dtype=np.float64))
     return np.concatenate(parts).astype(np.float32)
+
+
+def make_shadow(task_id, suite, init_states, plus, seed):
+    shadow = make_env(task_id, suite, init_states=init_states, plus=plus)
+    rng = capture_rng()
+    try:
+        shadow.reset(seed=seed)
+    finally:
+        restore_rng(rng)
+    inner = shadow._env.env
+    inner.ignore_done = True
+    for observable in inner._observables.values():
+        if observable.modality == "image":
+            observable.set_enabled(False)
+    return shadow
+
+
+def capture_live(live):
+    return {"state": live.sim.get_state(), "warmstart": np.array(live.sim.data.qacc_warmstart),
+            "robots": [(np.array(robot.controller.goal_pos), np.array(robot.controller.goal_ori),
+                        np.array(robot.controller.initial_joint), np.array(robot.gripper.current_action)) for robot in live.robots]}
+
+
+def sync_shadow(snapshot, twin):
+    twin.sim.set_state(snapshot["state"])
+    twin.sim.data.qacc_warmstart[:] = snapshot["warmstart"]
+    twin.sim.forward()
+    for robot, (goal_pos, goal_ori, initial_joint, gripper_action) in zip(twin.robots, snapshot["robots"]):
+        robot.controller.update(force=True)
+        robot.controller.goal_pos = np.array(goal_pos)
+        robot.controller.goal_ori = np.array(goal_ori)
+        robot.controller.initial_joint = np.array(initial_joint)
+        robot.gripper.current_action = np.array(gripper_action)
+
+
+def label_plans(shadow, snapshot, before, candidates, first_chunk, norm, layout, calibration):
+    from script.lingbot_eval import decode_action
+    twin = shadow._env.env
+    plans, k = candidates.shape[:2]
+    env_actions = slice_env_actions(candidates.detach().float().cpu().reshape(plans * k, HORIZON, ACTION_DIM), first_chunk)
+    labels = np.zeros(plans * k, np.float32)
+    for index in range(plans * k):
+        sync_shadow(snapshot, twin)
+        if index == 0 and not np.allclose(before, object_state(twin, layout), atol=1e-6):
+            raise RuntimeError("shadow state mismatch")
+        success = False
+        for step in range(env_actions.shape[1]):
+            _, _, done, _ = twin.step(decode_action(env_actions[index, step].reshape(1, 7), norm))
+            success = bool(twin._check_success())
+            if success or done:
+                break
+        labels[index] = progress(calibration, layout, before, object_state(twin, layout), success)
+    return labels.reshape(plans, k)
+
+
+def shadow_fidelity(env, shadow, layout, act, observation, chunks=FIDELITY_CHUNKS):
+    live, twin = env._env.env, shadow._env.env
+    bodies = 7 * len(layout["bodies"])
+    worst = np.zeros(2)
+    for chunk in range(chunks):
+        sync_shadow(capture_live(live), twin)
+        for _ in range(env_action_count(chunk == 0)):
+            action = act(observation)
+            observation, _, terminated, truncated, info = env.step(action)
+            twin.step(action)
+        live_state, twin_state = object_state(live, layout), object_state(twin, layout)
+        poses = np.stack([live_state[:bodies].reshape(-1, 7), twin_state[:bodies].reshape(-1, 7)]).astype(np.float64)
+        position = np.abs(poses[0, :, :3] - poses[1, :, :3]).max()
+        angle = (2.0 * np.arccos(np.minimum(1.0, np.abs((poses[0, :, 3:] * poses[1, :, 3:]).sum(axis=1))))).max()
+        joint = np.abs(live_state[bodies:] - twin_state[bodies:]).max(initial=0.0)
+        worst = np.maximum(worst, [position, max(angle, joint)])
+        if env_success(info) or terminated or truncated:
+            break
+    result = {"position_m": float(worst[0]), "angle_rad": float(worst[1]), "chunks": chunk + 1}
+    if worst[0] >= FIDELITY_POSITION_M or worst[1] >= FIDELITY_ANGLE_RAD:
+        raise RuntimeError(f"shadow fidelity check failed: {result}")
+    return result
 
 
 def sharpening_metrics(model, state, a_base, action):

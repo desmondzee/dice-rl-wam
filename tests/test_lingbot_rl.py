@@ -1320,6 +1320,114 @@ def test_load_resume_accepts_legacy_torch_numpy_rng(tmp_path):
     assert wandb_id is None
 
 
+class _Observable:
+    def __init__(self, modality):
+        self.modality, self.enabled = modality, True
+
+    def set_enabled(self, enabled):
+        self.enabled = enabled
+
+
+class _TwinSim:
+    def __init__(self):
+        self.data = SimpleNamespace(time=0.0, qpos=np.array([0.3, 0.0, 0.0, -2.0]), qvel=np.zeros(4), qacc_warmstart=np.zeros(4),
+                                    body_xpos=np.zeros((2, 3)), body_xquat=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)))
+        self.model = SimpleNamespace(get_joint_qpos_addr=lambda name: 3)
+        self.forward()
+
+    def get_state(self):
+        return SimpleNamespace(time=self.data.time, qpos=self.data.qpos.copy(), qvel=self.data.qvel.copy())
+
+    def set_state(self, state):
+        self.data.qpos[:] = state.qpos
+        self.data.qvel[:] = state.qvel
+
+    def forward(self):
+        self.data.body_xpos[1] = self.data.qpos[:3]
+
+
+class _TwinInner:
+    def __init__(self, drift):
+        self.sim = _TwinSim()
+        self.obj_body_id = {"micro": 0, "mug": 1}
+        self.ignore_done = False
+        self._observables = {"agentview_image": _Observable("image"), "robot0_eef_pos": _Observable("proprio")}
+        self.robots = [SimpleNamespace(
+            controller=SimpleNamespace(goal_pos=np.zeros(3), goal_ori=np.eye(3), initial_joint=np.zeros(7), update=lambda force=False: None),
+            gripper=SimpleNamespace(current_action=np.zeros(2)))]
+        self.drift, self.steps = drift, 0
+
+    def step(self, action):
+        self.sim.data.qpos[:3] += 0.01 * action[:3] + self.drift
+        self.sim.data.qpos[3] += 0.5 * max(float(action[6]), 0.0)
+        self.sim.forward()
+        self.steps += 1
+        return {}, 0.0, False, {}
+
+    def _check_success(self):
+        return bool(self.sim.data.qpos[3] >= 0.0)
+
+
+class _TwinEnv:
+    def __init__(self, drift=0.0):
+        self._env = SimpleNamespace(env=_TwinInner(drift))
+
+    def reset(self, seed=None):
+        return {}, {}
+
+    def step(self, action):
+        inner = self._env.env
+        obs, reward, done, info = inner.step(action)
+        success = inner._check_success()
+        return obs, reward, done or success, False, {**info, "is_success": success}
+
+    def close(self):
+        return None
+
+
+_TWIN_LAYOUT = {"bodies": ["micro", "mug"], "joints": ["door"], "body_quaternion": "wxyz"}
+_TWIN_CALIBRATION = {"task_id": 9, "mug": "mug", "microwave": "micro", "door": "door", "door_closed": 0.0, "door_open": -2.0}
+
+
+def test_label_plans_scores_every_candidate_from_the_live_snapshot_with_the_chunk_length():
+    from script.lingbot_rl_train import capture_live, label_plans, object_state
+    live, shadow = _TwinEnv(), _TwinEnv()
+    shadow._env.env.sim.data.qpos[:] = [9.0, 9.0, 9.0, 9.0]
+    live._env.env.robots[0].controller.initial_joint[:] = 0.5
+    candidates = torch.zeros(2, 2, HORIZON, ACTION_DIM)
+    candidates[0, :, :, 0] = 1.0
+    candidates[1, :, :, 0] = -1.0
+    candidates[1, 1, 4:, 6] = 1.0
+    norm = _eval_normalization()
+    snapshot, before = capture_live(live._env.env), object_state(live._env.env, _TWIN_LAYOUT)
+    labels = label_plans(shadow, snapshot, before, candidates, True, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
+    assert labels.shape == (2, 2) and labels.dtype == np.float32
+    assert labels[0, 0] == pytest.approx(-0.12, abs=1e-4) and labels[0, 1] == labels[0, 0]
+    assert labels[1, 0] == pytest.approx(0.12, abs=1e-4) and labels[1, 1] == pytest.approx(2.04, abs=1e-4)
+    assert shadow._env.env.steps == 12 + 12 + 12 + 4 and live._env.env.steps == 0 and live._env.env.sim.data.qpos[0] == 0.3
+    assert float(shadow._env.env.robots[0].controller.initial_joint[0]) == 0.5
+    later = label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
+    assert later[0, 0] == pytest.approx(-0.16, abs=1e-4) and later[1, 0] == pytest.approx(0.16, abs=1e-4)
+    with pytest.raises(RuntimeError, match="shadow state mismatch"):
+        label_plans(shadow, snapshot, before + 1.0, candidates, True, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
+
+
+def test_shadow_fidelity_measures_object_pose_gaps_per_chunk_and_gates_on_them(monkeypatch):
+    import script.lingbot_rl_train as train
+    from script.lingbot_rl_train import make_shadow, shadow_fidelity
+    monkeypatch.setattr(train, "LiberoEnv", lambda **kwargs: _TwinEnv())
+    calls = []
+    act = lambda observation: calls.append(observation) or np.array([0.5, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], np.float32)
+    live, shadow = _TwinEnv(), make_shadow(9, None, False, False, 0)
+    observables = shadow._env.env._observables
+    assert shadow._env.env.ignore_done is True and observables["agentview_image"].enabled is False and observables["robot0_eef_pos"].enabled is True
+    result = shadow_fidelity(live, shadow, _TWIN_LAYOUT, act, {"step": 0}, chunks=3)
+    assert result == {"position_m": 0.0, "angle_rad": 0.0, "chunks": 3} and len(calls) == 12 + 16 + 16
+    assert shadow._env.env.steps == live._env.env.steps == 44 and calls[0] == {"step": 0}
+    with pytest.raises(RuntimeError, match="fidelity"):
+        shadow_fidelity(_TwinEnv(), _TwinEnv(drift=2e-4), _TWIN_LAYOUT, act, {}, chunks=3)
+
+
 class _StubPolicy:
     plan_calls = []
 
