@@ -29,3 +29,26 @@ Files: `make_plan.py` regenerates the plan on a box with the plus package active
 `init_states=False` reset is deterministic. Per-episode JSON matches `script/lingbot_eval.py` output plus the plan keys
 and a `reset` record (robot model, `init_qpos`, joints after reset, object body positions); `summary.json` reports
 successes per axis and overall.
+
+## Variant split for training under perturbations
+
+Within each axis the variants are ordered by suite index and every third one from the third is held out
+(`script/lingbot_rl_config.py`: `plus_split`, `plus_train_variants`). The held-out sets cover every difficulty level
+present on their axis.
+
+- robot initial state, train (28): 640, 641, 643, 644, 646, 647, 649, 650, 652, 653, 655, 656, 658, 659, 661, 662, 664,
+  665, 667, 668, 670, 671, 673, 674, 676, 677, 679, 680; test (14): 642, 645, 648, 651, 654, 657, 660, 663, 666, 669,
+  672, 675, 678, 681.
+- objects layout, train (26): 1982, 1983, 1985, 1986, 1988, 1989, 1991, 1992, 1994, 1995, 1997, 1998, 2000, 2001, 2003,
+  2004, 2006, 2007, 2009, 2010, 2012, 2013, 2015, 2016, 2018, 2019; test (13): 1984, 1987, 1990, 1993, 1996, 1999, 2002,
+  2005, 2008, 2011, 2014, 2017, 2020.
+
+Collection (`brev/train.sh --plus`) draws per episode, with equal probability from `np.random.default_rng([seed, episode])`,
+a standard reset (`task_id 9`, `init_states=False`, seed `config.seed + env_steps`), a robot-init training variant
+(`init_states=False, is_libero_plus=True`, same seed rule as the plan above) or a layout training variant
+(`init_states=True`, uniform over its stored states). The draw schedule pairs the two runs per distribution, not per
+episode: episode `i` draws the same kind, variant and stored state in both runs, but the simulator's object sampling
+is seeded by `config.seed + env_steps`, which diverges with the runs' episode lengths. The buffer's `object_state`
+stores MuJoCo `body_xquat` in w-x-y-z order while `proprio` carries robosuite's x-y-z-w end-effector quaternion
+converted to axis-angle (`settings.json` records `object_layout.body_quaternion`). The held-out plan over the test
+variants (`task9-heldout-plan.json`) is built after the runs are launched.
