@@ -269,7 +269,13 @@ class DiceResidualModel:
             "q_overestimation_online": float((overestimation * online).sum() / online.sum().clamp(min=1.0)),
         }
 
-    def update_plan_critic(self, state, pools_all, z_all, plan_a_base_all, plan_labels=None):
+    def update_plan_critic(self, state, pools_all, z_all, plan_a_base_all, plan_labels=None, is_expert=None):
+        if self.plan_target == "rollout":
+            if plan_labels is None:
+                raise ValueError("rollout plan target needs plan_labels")
+            online = slice(None) if is_expert is None else mlp_float(is_expert).reshape(-1) == 0
+            state, pools_all, z_all, plan_a_base_all, plan_labels = (
+                mlp_float(part)[online] for part in (state, pools_all, z_all, plan_a_base_all, plan_labels))
         state, pools_all = mlp_float(state), mlp_float(pools_all)
         z_all, plan_a_base_all = mlp_float(z_all), mlp_float(plan_a_base_all)
         batch, plans, k = plan_a_base_all.shape[:3]
@@ -283,9 +289,7 @@ class DiceResidualModel:
             target = self.critic(self.critic_state(flat_state, flat_pool), action).reshape(batch, plans, k).max(dim=2).values
         extra = {}
         if self.plan_target == "rollout":
-            if plan_labels is None:
-                raise ValueError("rollout plan target needs plan_labels")
-            labels = mlp_float(plan_labels).mean(dim=-1)
+            labels = plan_labels.mean(dim=-1)
             extra = {"plan_target_q_mean": float(target.mean()),
                      "plan_label_vs_q_agreement": float((labels.argmax(dim=1) == target.argmax(dim=1)).float().mean())}
             target = labels

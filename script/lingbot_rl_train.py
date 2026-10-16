@@ -4,6 +4,7 @@ import os
 import platform
 import random
 import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import replace
 from pathlib import Path
 
@@ -410,6 +411,11 @@ def _host_array(tensor):
     return tensor.detach().float().contiguous().cpu().numpy()
 
 
+def _timed(fn, *args):
+    started = time.perf_counter()
+    return fn(*args), time.perf_counter() - started
+
+
 def env_success(info):
     if "is_success" not in info or not isinstance(info["is_success"], (bool, np.bool_)):
         raise ValueError("Environment must report a boolean is_success explicitly")
@@ -449,7 +455,8 @@ def _update_from_buffer(model, buffer, expert_ratio, device, filter_active):
         info.update(model.update_critic(critic_state, sample["a"], target))
         if model.plan_critic is not None:
             info.update(model.update_plan_critic(
-                state, model.plan_input(sample["plan_pools_all"], sample["plan_struct_all"]), sample["z_all"], sample["plan_a_base_all"]))
+                state, model.plan_input(sample["plan_pools_all"], sample["plan_struct_all"]), sample["z_all"], sample["plan_a_base_all"],
+                sample["plan_labels"], sample["is_expert"]))
         if (step + 1) % ACTOR_EVERY == 0:
             model.polyak_update()
     return info
@@ -558,15 +565,38 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     tasks = [{**task, "env_task": task["task_id"]} for task in tasks if task["task_id"] in config.task_ids]
     if config.plus_train:
         suite, tasks[0]["env_task"] = _plus_suite(tasks[0])
-    layout = None
+    layout = calibration = fidelity = None
     if config.proprio:
         rng = capture_rng()
         env = make_env(tasks[0]["env_task"], suite, init_states=False, proprio=True)
         try:
-            env.reset(seed=config.seed)
+            observation, _ = env.reset(seed=config.seed)
             layout = object_layout(env._env.env)
+            if config.plan_target == "rollout":
+                calibration = calibrate(tasks[0]["task_id"], env._env.env, layout, object_state(env._env.env, layout))
+                act = lambda current: decode_action(
+                    policy.select_action(rl_observation_batch(current, tasks[0]["instruction"], device, True)), norm)
+                shadow = make_shadow(tasks[0]["env_task"], suite, False, False, config.seed)
+                try:
+                    policy.reset()
+                    fidelity = {"base": shadow_fidelity(env, shadow, layout, act, observation), "plus": None}
+                finally:
+                    shadow.close()
+                    policy.reset()
         finally:
             env.close()
+        if calibration is not None and config.plus_train:
+            variant = int(config.plus_train["layout"][0])
+            env, shadow = make_env(variant, suite, init_states=True, plus=True, proprio=True), make_shadow(variant, suite, True, True, config.seed)
+            try:
+                env.init_state_id = 0
+                observation, _ = env.reset(seed=config.seed)
+                policy.reset()
+                fidelity["plus"] = {"variant_index": variant, **shadow_fidelity(env, shadow, layout, act, observation, chunks=3)}
+            finally:
+                env.close()
+                shadow.close()
+                policy.reset()
         restore_rng(rng)
     env_steps = 0
     chunks = 0
@@ -579,7 +609,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     if max_env_steps is None and env_steps == 0:
         if not any(float(row["is_expert"]) == 1.0 for row in buffer.rows()):
             raise RuntimeError("Expert features missing; RLPD requires the SFT demos")
-    _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe, "runtime": runtime, "object_layout": layout})
+    _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe, "runtime": runtime, "object_layout": layout,
+                                               "progress_calibration": calibration, "shadow_fidelity": fidelity})
     wandb_kwargs = {
         "project": config.wandb_project,
         "entity": config.wandb_entity,
@@ -631,18 +662,21 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
 
     maybe_checkpoint()
     features = config.proprio or bool(config.plus_train) or config.state_features == "struct"
+    labeller = ThreadPoolExecutor(max_workers=1) if calibration is not None else None
     while env_steps < budget:
         task = tasks[int(np.random.randint(len(tasks)))]
         task_id = task["task_id"]
         kind, variant, draw = draw_reset(config, episodes)
         env_task = task_id if variant is None else variant
         stored = bool(config.plus_train) and kind != 1
-        env = make_env(task["env_task"] if variant is None else variant, suite, init_states=stored,
-                       plus=bool(config.plus_train), proprio=config.proprio)
+        sim_task = task["env_task"] if variant is None else variant
+        env = make_env(sim_task, suite, init_states=stored, plus=bool(config.plus_train), proprio=config.proprio)
         if stored:
             env.init_state_id = int(draw * len(env._init_states))
         policy.reset()
         observation, _ = env.reset(seed=config.seed + env_steps)
+        shadow = make_shadow(sim_task, suite, stored, bool(config.plus_train), config.seed + env_steps) if calibration is not None else None
+        future = None
         episode_return = 0.0
         episode_success = 0.0
         episode_length = 0
@@ -659,6 +693,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                                                  random_plan=random_plan, decode_all=True)
                 else:
                     decoded = policy.decode_candidates(batch, k=config.k_candidates)
+                if shadow is not None:
+                    future = labeller.submit(_timed, label_plans, shadow, capture_live(env._env.env), sim_state,
+                                             decoded["plan_a_base_all"].detach().float().cpu(), decoded["first_chunk"], norm, layout, calibration)
                 state = model.state_input(decoded["s"].to(device), decoded.get("state_struct"), batch.get("proprio"))
                 noise = decoded["z"].to(device=device, dtype=torch.float32)
                 a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
@@ -679,13 +716,16 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         all_base = decoded["plan_a_base_all"].to(device=device, dtype=torch.float32)
                         flat_state = state.expand(plans * k, -1)
                         flat_base = all_base.reshape(plans * k, HORIZON, ACTION_DIM)
-                        q_all = model.critic(model.critic_state(flat_state, plans_in.repeat_interleave(k, dim=0)),
-                                             apply_residual(flat_base, model.actor(flat_state, noise.repeat(plans, 1, 1), flat_base))).reshape(plans, k).max(dim=1).values
+                        critic_all = model.critic_state(flat_state, plans_in.repeat_interleave(k, dim=0))
+                        action_all = apply_residual(flat_base, model.actor(flat_state, noise.repeat(plans, 1, 1), flat_base))
+                        q_all = model.critic(critic_all, action_all).reshape(plans, k).max(dim=1).values
                         v_all = model.plan_critic(state.expand(plans, -1), plans_in).reshape(-1)
                         plan_info = {"plan_agreement": float(int(v_all.argmax()) == int(q_all.argmax())),
                                      "plan_regret": float(q_all.max() - q_all[decoded["plan_index"]]),
                                      "plan_value_spread": float(v_all.max() - v_all.min()),
                                      "plan_random_rate": float(random_plan)}
+                        if future is not None:
+                            q_mean = torch.stack(model.critic(critic_all, action_all, return_all=True)).mean(dim=0).reshape(plans, k).max(dim=1).values
                 chosen = executed[star:star + 1]
                 policy.commit_executed(chosen.cpu(), first_chunk=decoded["first_chunk"])
                 env_actions = slice_env_actions(chosen.cpu(), decoded["first_chunk"])
@@ -709,6 +749,18 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         break
                     if env_steps >= budget:
                         break
+                plan_labels = None
+                if future is not None:
+                    wait_started = time.perf_counter()
+                    plan_labels, label_seconds = future.result()
+                    label_wait_seconds, future = time.perf_counter() - wait_started, None
+                    plan_mean = plan_labels.mean(axis=1)
+                    plan_info.update({
+                        "label_agreement_with_q": float(int(plan_mean.argmax()) == int(q_mean.argmax())),
+                        "label_spread_within_plan": float(plan_labels.std(axis=1).mean()),
+                        "label_spread_across_plans": float(plan_mean.std()),
+                        "label_executed_minus_mean": float(plan_mean[decoded["plan_index"]] - plan_mean.mean()),
+                        "label_seconds": label_seconds, "label_wait_seconds": label_wait_seconds})
                 chunk_seconds += time.perf_counter() - started
                 chunk_actions += executed_n
                 episode_return += chunk_reward
@@ -728,6 +780,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     "is_expert": np.float32(0.0),
                     "reset_kind": kind,
                     "variant_index": env_task,
+                    **({"plan_labels": plan_labels} if plan_labels is not None else {}),
                     **({"proprio": _host_array(batch["proprio"])[0], "object_state": sim_state} if config.proprio else {}),
                     **({key: host_bf16(decoded[key][0]) for key in ("state_struct", "state_tokens", "state_latent") if key in decoded} if features else {}),
                     **({"plan_pool": _host_array(decoded["plan_pool"].to(device))[0], "plan_pools_all": _host_array(decoded["plan_pools"].to(device)),
@@ -756,7 +809,11 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     break
             buffer.finalize_episode()
         finally:
+            if future is not None:
+                wait([future])
             env.close()
+            if shadow is not None:
+                shadow.close()
         name = RESET_KINDS[kind]
         run.log({
             "env_steps": env_steps, "episode_return": episode_return,
@@ -768,6 +825,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         maybe_checkpoint()
         if episodes % 10 == 0:
             save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id, episodes)
+    if labeller is not None:
+        labeller.shutdown()
     save_inference(output_dir / "residual.pt", model)
     save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id, episodes)
     _write_json(output_dir / "summary.json", {"env_steps": env_steps, "chunks": chunks})

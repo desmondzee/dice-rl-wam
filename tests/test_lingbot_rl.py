@@ -476,6 +476,9 @@ def test_plan_critic_trains_on_rollout_labels_and_ranks_by_the_mean_readout():
     assert losses[-1] < losses[0] and info["plan_target_mean"] == pytest.approx(float(labels.mean()), abs=1e-5)
     assert info["plan_target_q_mean"] == pytest.approx(float(q_target.mean()), abs=1e-5)
     assert info["plan_label_vs_q_agreement"] == pytest.approx(float((labels.mean(-1).argmax(1) == q_target.argmax(1)).float().mean()))
+    online = model.update_plan_critic(state, pools, z_all, a_base, labels, torch.tensor([[0.0], [1.0], [0.0], [1.0], [0.0]]))
+    assert online["plan_target_mean"] == pytest.approx(float(labels[::2].mean()), abs=1e-5) and online["plan_label_vs_q_agreement"] == \
+        pytest.approx(float((labels[::2].mean(-1).argmax(1) == q_target[::2].argmax(1)).float().mean()))
     heads = torch.stack(model.plan_critic(state[:1].expand(2, -1), pools[0], return_all=True))
     assert model.rank_plans(state[:1], pools[0]) == int(heads.mean(dim=0).reshape(-1).argmax())
     payload = model.inference_state_dict()
@@ -1488,7 +1491,7 @@ def _smoke_train(tmp_path, monkeypatch, budget, prepared=None, model_factory=Non
             self.steps = 0
             self.proprio = env_kwargs.get("obs_type") == "pixels_agent_pos"
             self._init_states = [0]
-            self._env = SimpleNamespace(env=None)
+            self._env = SimpleNamespace(env=SimpleNamespace(_observables={}))
 
         def _obs(self):
             zeros = np.zeros((128, 128, 3), np.uint8)
@@ -1706,6 +1709,49 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
     assert out["resume"]["episodes"] == 5 and out["resume"]["layout"] == {"state_features": "struct", "proprio": True, "plan_candidates": 2}
     assert out["wandb"][0]["config"]["proprio"] is True and out["wandb"][0]["config"]["state_features"] == "struct"
     assert not any("episode_success_standard" in entry for entry in _smoke_train(tmp_path / "plain", monkeypatch, 24)["logs"])
+
+
+def test_train_with_rollout_labels_overlaps_the_live_chunk_stores_them_and_records_both_fidelity_gates(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import script.lingbot_rl_model as model_module
+    import script.lingbot_rl_train as train
+    from script.lingbot_rl_config import plus_train_variants
+    monkeypatch.setattr(model_module, "HIDDEN", (32, 32, 32))
+    labelled, pools = [], []
+    monkeypatch.setattr(train, "ThreadPoolExecutor", lambda **kwargs: pools.append(kwargs) or ThreadPoolExecutor(**kwargs))
+    monkeypatch.setattr(train, "calibrate", lambda task_id, inner, layout, initial: {"task_id": task_id, "door_closed": 0.0, "door_open": -2.094})
+    monkeypatch.setattr(train, "capture_live", lambda live: {"stub": True})
+    monkeypatch.setattr(train, "shadow_fidelity", lambda env, shadow, layout, act, observation, chunks=20: {
+        "position_m": 2e-4, "angle_rad": 1e-3, "chunks": chunks})
+    monkeypatch.setattr(train, "label_plans", lambda shadow, snapshot, before, candidates, first_chunk, norm, layout, calibration: labelled.append(
+        (snapshot, before.tolist(), tuple(candidates.shape), first_chunk, calibration["task_id"]))
+        or np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], np.float32))
+    config = RLConfig(task_ids=(9,), plan_candidates=2, plan_random_prob=0.0, selection_warmup_steps=0, residual_input="base",
+                      proprio=True, plus_train=plus_train_variants(), plan_target="rollout")
+    out = _smoke_train(tmp_path, monkeypatch, 60, model_factory=lambda **kw: DiceResidualModel(**kw), config=config)
+    envs = out["envs"]
+    strip = lambda env: {key: value for key, value in env.items() if key != "obs_type"}
+    assert len(envs) == 4 + 2 * 5 and all(envs[i]["obs_type"] == "pixels" and strip(envs[i]) == strip(envs[i - 1]) for i in range(1, 14, 2))
+    assert (envs[2]["task_id"], envs[2]["init_states"], envs[2]["is_libero_plus"], envs[2]["obs_type"]) == (1982, True, True, "pixels_agent_pos")
+    assert pools == [{"max_workers": 1}]
+    assert labelled and labelled[0] == ({"stub": True}, [7.0, 8.0], (2, K_CANDIDATES, HORIZON, ACTION_DIM), True, 9) and len(labelled) == 5
+    rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
+    assert rows[0]["plan_labels"].dtype == np.float32 and rows[0]["plan_labels"].tolist() == [[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]]
+    updates = [entry for entry in out["logs"] if "plan_critic_loss" in entry]
+    assert updates and {"label_agreement_with_q", "label_spread_within_plan", "label_spread_across_plans", "label_executed_minus_mean",
+                        "label_seconds", "label_wait_seconds", "plan_target_q_mean", "plan_label_vs_q_agreement"} <= set(updates[0])
+    assert any(key.startswith("label_seconds/") for key in updates[0]) and updates[0]["label_wait_seconds"] >= 0.0
+    assert updates[0]["label_spread_within_plan"] == pytest.approx(float(np.std([0.0, 1.0, 2.0, 3.0])))
+    assert updates[0]["label_spread_across_plans"] == pytest.approx(2.0) and abs(updates[0]["label_executed_minus_mean"]) == pytest.approx(2.0)
+    assert updates[0]["label_agreement_with_q"] in (0.0, 1.0)
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    assert settings["shadow_fidelity"] == {"base": {"position_m": 2e-4, "angle_rad": 1e-3, "chunks": 20},
+                                           "plus": {"variant_index": 1982, "position_m": 2e-4, "angle_rad": 1e-3, "chunks": 3}}
+    assert settings["progress_calibration"]["door_open"] == -2.094
+    assert out["resume"]["recipe"]["plan_target"] == "rollout" and out["resume"]["layout"]["plan_target"] == "rollout"
+    plain = _smoke_train(tmp_path / "plain", monkeypatch, 24)
+    assert pools == [{"max_workers": 1}] and not any("label_seconds" in entry for entry in plain["logs"])
+    assert json.loads((tmp_path / "plain" / "settings.json").read_text())["shadow_fidelity"] is None
 
 
 _GB10 = bool(os.environ.get("DICE_DATA")) and importlib.util.find_spec("libero") is not None
