@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace run A (`dice-t9-plus-m4-pool`) by `dice-t9-plus-m4-pool-cf`, the same recipe with `plan_target = "rollout"`: every one of the M × K candidate chunks is executed in a shadow simulator before the live chunk, the per-candidate progress of the task 9 object poses is stored as `plan_labels` (M, K), and V_plan regresses onto the mean label per plan instead of the Q-derived target, ranking by the mean over its heads.
+**Goal:** Replace run A (`dice-t9-plus-m4-pool`) by `dice-t9-plus-m4-pool-cf`, the same recipe with `plan_target = "rollout"`: every one of the M × K candidate chunks is executed in a shadow simulator while the live chunk runs, the per-candidate progress of the task 9 object poses is stored as `plan_labels` (M, K), and V_plan regresses onto the mean label per plan instead of the Q-derived target, ranking by the mean over its heads.
 
-**Architecture:** The progress function and its startup calibration live in a new stdlib-plus-numpy module `script/lingbot_rl_progress.py`. The trainer gains four environment helpers (`make_shadow`, `sync_shadow`, `label_plans`, `shadow_fidelity`): a second `LiberoEnv` with the live environment's kwargs is reset once per episode and then driven only by `sim.set_state` plus a copy of the OSC goal and the gripper ramp; candidates are stepped through the LeRobot wrapper's `step` with `decode_action`, so the controller and control frequency match the live environment. The model carries `plan_target`; under `"rollout"` `update_plan_critic` regresses onto `plan_labels.mean(-1)` and still computes the Q target for logging, and `rank_plans` reads the mean over heads. The buffer stores `plan_labels` with a legacy default of zeros. A startup fidelity check gates the run and its maxima go to `settings.json`.
+**Architecture:** The progress function and its startup calibration live in a new numpy-only module `script/lingbot_rl_progress.py`. The trainer gains environment helpers (`make_shadow`, `capture_live`, `sync_shadow`, `label_plans`, `shadow_fidelity`): a second `LiberoEnv` with the live environment's kwargs is reset once per episode with its image observables disabled, then driven only by `sim.set_state` plus a copy of the OSC goal, nullspace reference and gripper ramp taken from a snapshot of the live environment; candidates are stepped on the shadow's robosuite environment directly (physics only, no rendering) on a one-worker thread that overlaps the live chunk, and every row waits for its labels before it is stored. The model carries `plan_target`; under `"rollout"` `update_plan_critic` regresses onto `plan_labels.mean(-1)` and still computes the Q target for logging, and `rank_plans` reads the mean over heads. The buffer stores `plan_labels` with a legacy default of zeros. A startup fidelity check (live env through the LeRobot wrapper, shadow through the direct path) gates the run and its maxima go to `settings.json`.
 
-**Tech Stack:** Torch 2.11 (cu130 on the GB10s), the pinned LeRobot LingBot-VA port and its `LiberoEnv`, robosuite's MuJoCo binding (`sim.get_state` / `set_state` / `forward`, OSC `goal_pos` / `goal_ori`, Panda gripper `current_action`), numpy replay rows, pytest with the `_StubPolicy` / `_smoke_train` fixtures in `tests/test_lingbot_rl.py`, LIBERO-Plus at `4976dc3` on the GB10s.
+**Tech Stack:** Torch 2.11 (cu130 on the GB10s), the pinned LeRobot LingBot-VA port and its `LiberoEnv`, robosuite's MuJoCo binding (`sim.get_state` / `set_state` / `forward`, OSC `goal_pos` / `goal_ori` / `initial_joint`, Panda gripper `current_action`, `Observable.set_enabled`), `concurrent.futures.ThreadPoolExecutor`, numpy replay rows, pytest with the `_StubPolicy` / `_smoke_train` fixtures in `tests/test_lingbot_rl.py`, LIBERO-Plus at `4976dc3` on the GB10s.
 
 **Spec:** docs/superpowers/specs/2026-10-16-counterfactual-plan-critic-design.md
 
@@ -14,7 +14,7 @@
 
 - Zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests.
 - No secrets in logs, argv, metadata or artifacts.
-- The default recipe (`plan_target` `"q"`) must reproduce bit-for-bit: no new RNG draws on the default path, no behaviour change in `rank_plans` / `update_plan_critic` when `"q"`, no change to the default `protocol()` (78 keys), no change to the default checkpoint `layout` dict.
+- The default recipe (`plan_target` `"q"`) must reproduce bit-for-bit: no new RNG draws on the default path, no behaviour change in `rank_plans` / `update_plan_critic` when `"q"`, no change to the default `protocol()` (78 keys), no change to the default checkpoint `layout` dict, no thread pool creation and no shadow construction on the default path.
 - The resume fingerprint changes with `plan_target` (`test_load_resume_rejects_recipe_mismatch` is the refusal mechanism).
 - The run name is `dice-t9-plus-m4-pool-cf`; run B (`dice-t9-plus-m4-struct`, Watson) is untouched.
 - What stays fixed (spec section 2): the residual actor, the Q ensemble and its targets, the sampler, M = 4, K = 4, the reset schedule, the buffer's other keys, both evaluation protocols.
@@ -24,26 +24,26 @@
 
 ## Review Focus
 
-1. A shadow stepped more than LIBERO's `horizon` (1000) raises `ValueError("executing action in terminated episode")` from robosuite unless `ignore_done` is set: Task 5 tests that `make_shadow` sets `ignore_done = True` on the inner env (a shadow executes about 8,000 steps per episode).
+1. A shadow stepped more than LIBERO's `horizon` (1000) raises `ValueError("executing action in terminated episode")` from robosuite unless `ignore_done` is set, and a shadow with image observables enabled renders two cameras on every substep: Task 5 tests that `make_shadow` sets `ignore_done = True` and disables exactly the image-modality observables (a shadow executes about 8,000 steps per episode).
 2. A candidate that reaches success mid-chunk must stop there and carry +2, like the live loop stops at success: Task 5 tests the step count and label of a succeeding candidate.
 3. The door term must not reward closing the door while the mug is outside (progress myopia, spec section 7): Task 2 tests that a door change with the mug outside has zero progress.
 4. A rollout checkpoint evaluated by a model built for the Q readout would rank with the min over heads: Task 4 tests that `layout` carries `plan_target` and that loading it into a `"q"` model raises `layout mismatch`.
-5. A rollout recipe without object poses or with a single plan has nothing to label: Task 1 tests that `validate()` refuses `plan_target == "rollout"` without `proprio` or with `plan_candidates == 1`.
+5. A shadow whose qpos layout or object identities differ from the live environment (a LIBERO-Plus variant) would mislabel silently: Task 5 tests that `label_plans` raises `shadow state mismatch` when the synced shadow's object state differs from the live one, and Task 6 runs the fidelity check on a layout variant with `plus=True` as well as on the base task.
 
 ## Decisions the spec left open (binding for every task)
 
 - **Door calibration.** The spec says the door range is measured at startup; the brief proposed "closed = the limit nearer the initial value of stored state 0". Task 9's bddl initialises `(Open microwave_1)` (`libero_10/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.bddl` line 76) and `microwave.xml` gives `microjoint` the range `-2.094 0` with LIBERO's `default_close_ranges = [-0.005, 0.0]`, so the nearer-to-initial rule would label the open limit as closed. Decision: `closed` = the `jnt_range` limit nearer zero (the articulated object's rest pose), `open` = the other; the initial door value and `phi_initial` are recorded in `settings.json` under `progress_calibration`, and Task 7 checks on the box that `door_initial` lies nearer `door_open`.
-- **Interior target.** As the brief decided: `micro` = `microwave_1` body position, `inside` = ‖mug − micro‖ < 0.12 m (`INSIDE_RADIUS`). The heating-region site sits at (0, 0.01, 0.096) from the body origin with half-extents (0.12, 0.0835, 0.08), so the ball covers the cavity centre and the +2 success term carries the goal; a site-based target is a later refinement, not part of this plan.
+- **Interior target.** As the brief decided: `micro` = `microwave_1` body position, `inside` = ‖mug − micro‖ < 0.12 m (`INSIDE_RADIUS`). Geometry caveat (recorded again in Task 7): relative to the microwave body origin the cavity spans x ∈ [−0.1435, 0.0635], y ∈ [−0.088, 0.0805] with the floor at z = 0.024, so the 0.12 m ball from the mug origin misses about 2.5 cm of the far floor and includes about 3 cm beyond the door opening; the +2 success term carries the goal. A site-based target is a later refinement, not part of this plan.
 - **Progress signature.** `calibrate(task_id, inner, layout, initial) -> dict` (task-specific names, door limits, `door_initial`, `phi_initial`), `phi(calibration, layout, state, success) -> float`, `progress(calibration, layout, before, after, success) -> float` where `before` has `success=False`. The task is selected in `calibrate` through `TASKS`; unknown tasks raise `ValueError` at startup.
-- **Shadow state transfer.** `sync_shadow(live, twin)` copies `sim.get_state()` (time, qpos, qvel), `data.qacc_warmstart`, calls `sim.forward()`, then per robot `controller.update(force=True)`, copies `controller.goal_pos` / `goal_ori` from the live controller (the OSC keeps `goal_ori` across steps when the rotation delta is zero, so a `reset_goal` would differ from the live controller) and copies `gripper.current_action` (the Panda gripper ramps its command by 0.01 per substep, so it is real controller state). `use_delta` is already True on both after `reset`.
-- **Shadow stepping.** Candidates go through `shadow.step(decode_action(...))` (the LeRobot wrapper), so rendering happens on every shadow step; its cost is measured in the smoke (`label_seconds`). The `use_camera_obs = False` shortcut is not taken: `LiberoEnv._format_raw_obs` reads the camera keys, so that shortcut would require stepping `shadow._env` directly; Task 7 names it as the fallback if `label_seconds` exceeds 2 s.
-- **Shadow construction.** `make_shadow(task_id, suite, init_states, plus, seed)` builds `make_env(task_id, suite, init_states=init_states, plus=plus)` (obs_type `"pixels"`), resets it inside `capture_rng()` / `restore_rng()` (LIBERO's reset seeding must not touch the collection stream), then sets `shadow._env.env.ignore_done = True`. One shadow per episode, reset with the live seed `config.seed + env_steps`; the startup probe's shadow uses `plus=False` and `init_states=False` like the probe env.
-- **Label timing.** `label_plans` runs after decoding and before `commit_executed`, inside the region timed for `seconds_per_env_step`, so that metric reports the true cost; `label_seconds` is logged separately.
-- **Q reference for the agreement diagnostics.** In the loop, `label_agreement_with_q` compares the label argmax with the argmax over plans of the max over K of the mean over the ten Q heads (a second `critic(..., return_all=True)` call on the same inputs, only under rollout; the existing `q_all` min-readout path is untouched). In `update_plan_critic`, `plan_label_vs_q_agreement` compares the label argmax with the argmax of the Q-derived target (max over K of the min over heads), the quantity the critic used to train on.
-- **Checkpoint layout.** `inference_state_dict()["layout"]` gains `"plan_target"` only when it is not `"q"`; `layout_of` returns it only when present; `load_inference_state_dict` compares `layout.get("plan_target", "q")` with the model's. `evaluate()` and `docs/libero-plus/plus_eval.py` already apply `**layout` to the config / model, so a rollout checkpoint evaluates with the mean readout without further edits.
+- **Live snapshot and shadow sync.** The worker thread must never read the live environment while the main thread steps it, so the main thread captures `capture_live(live) -> {"state", "warmstart", "robots"}`: `sim.get_state()` (time, qpos, qvel), a copy of `data.qacc_warmstart`, and per robot copies of the OSC `goal_pos`, `goal_ori`, `initial_joint` (the nullspace reference, drawn with noise at reset) and the gripper's `current_action` (the Panda gripper ramps its command by 0.01 per substep, so it is real controller state). `sync_shadow(snapshot, twin)` writes them into the shadow (`set_state`, `qacc_warmstart`, `forward`, `controller.update(force=True)`, then the controller and gripper fields). The live goal is copied rather than `reset_goal` because OSC `set_goal` keeps `goal_ori` across steps when the rotation delta is zero. `use_delta` is already True on both after `reset`.
+- **Shadow stepping (physics only).** `label_plans` steps the shadow's robosuite environment directly, `inner.step(action)` on `shadow._env.env`, and reads success from `inner._check_success()`. This mirrors the LeRobot wrapper exactly: `LiberoEnv.step` (`.cache/lerobot/src/lerobot/envs/libero.py:366-391`) asserts `action.ndim == 1`, forwards the (7,) float32 action unchanged to `OffScreenRenderEnv.step`, which is `self.env.step(action)` on the robosuite env, then reports `terminated = done or self._env.check_success()` where `check_success` is `self.env._check_success()`; there is no scaling, clipping or gripper sign handling, and relative control is the `robot.controller.use_delta = True` set by `LiberoEnv.reset` (persisting until the next reset). Rendering is avoided by disabling the image-modality observables once in `make_shadow`: robosuite renders cameras inside `Observable.update` (called from `_update_observables` on every substep of `MujocoEnv.step`), and `use_camera_obs` is only read when observables are created, so setting it after reset would not stop rendering; `observable.set_enabled(False)` does (`utils/observables.py:214-224`), and the shadow is not reset again afterwards.
+- **Labelling thread.** One `ThreadPoolExecutor(max_workers=1)` per run, created only under rollout. After `select_plan` returns, the main thread captures the snapshot and submits `_timed(label_plans, ...)`; the live chunk executes as today; `future.result()` is called before `buffer.add_online`, so no row is stored without its labels and the training order is unchanged. `label_seconds` is the future's own wall time, `label_wait_seconds` the time blocked in `result()`; both enter `plan_info`. The wait sits inside the region timed for `seconds_per_env_step`. MuJoCo's bindings release the GIL in `mj_step` and the shadow owns its MjModel / MjData, so the overlap is real. On the way out of an episode a pending future is waited for (`concurrent.futures.wait`) before the shadow is closed.
+- **Q reference for the agreement diagnostics.** In the loop, `label_agreement_with_q` compares the label argmax with the argmax over plans of the max over K of the mean over the ten Q heads (a second `critic(..., return_all=True)` call on the same inputs, only under rollout, computed before the live chunk; the existing `q_all` min-readout path is untouched). In `update_plan_critic`, `plan_label_vs_q_agreement` compares the label argmax with the argmax of the Q-derived target (max over K of the min over heads), the quantity the critic used to train on.
+- **Fidelity check.** `shadow_fidelity(env, shadow, layout, act, observation, chunks=20)` drives the live probe env through the LeRobot wrapper with `act(observation) -> (7,) env action`, chunk lengths from `env_action_count(first)` (12 then 16), syncs the shadow from a fresh snapshot at every chunk start, steps the shadow through the direct path with the same action, and compares `object_state` after each chunk: per body the position gap and the angle `2·arccos(min(1, |q_live·q_shadow|))` on the quaternion slice, and the joint gap; it raises `RuntimeError` when the maximum position gap is ≥ `FIDELITY_POSITION_M = 1e-3` or the maximum of the angles and joint gaps is ≥ `FIDELITY_ANGLE_RAD = 0.01745` (1°). A correct sync lands near 1e-12, so the tight gate catches missed state. The trainer's `act` is the prior through `policy.select_action` on `rl_observation_batch`, as `run_rl_episode` does. It runs twice at startup: 20 chunks on the base task and, when `plus_train` is set, 3 chunks on the first layout training variant with `init_states=True, plus=True`.
+- **Shadow construction.** `make_shadow(task_id, suite, init_states, plus, seed)` builds `make_env(task_id, suite, init_states=init_states, plus=plus)` (obs_type `"pixels"`), resets it inside `capture_rng()` / `restore_rng()` (LIBERO's reset seeding must not touch the collection stream), sets `shadow._env.env.ignore_done = True` and disables the image observables. One shadow per episode, reset with the live seed `config.seed + env_steps`; the startup probe's shadow uses `plus=False` and `init_states=False` like the probe env.
+- **Checkpoint layout.** `inference_state_dict()["layout"]` gains `"plan_target"` only when it is not `"q"`; `layout_of` returns it only when present; `load_inference_state_dict` compares `layout.get("plan_target", "q")` with the model's. `evaluate()` and `docs/libero-plus/plus_eval.py` already apply `**layout` to the config / model, so a rollout checkpoint evaluates with the mean readout without further edits. `script/lingbot_eval_modal.py` builds its eval config without `plan_candidates`, so a rollout checkpoint fails validation there; that is pre-existing for every M = 4 checkpoint and out of scope.
 - **Protocol.** Under rollout `protocol()` adds `"plan_target": "rollout"` and overrides `"plan_critic"` with `"regression_mean_k_rollout_progress"`; the default protocol is byte-identical.
 - **Validation.** `plan_target == "rollout"` requires `plan_candidates > 1` and `proprio` (object poses are read only when `proprio`).
-- **Fidelity rollout.** `shadow_fidelity(env, shadow, layout, act, observation, chunks=20)` drives the live probe env with `act(observation) -> (7,) env action`, chunk lengths from `env_action_count(first)` (12 then 16), syncs the shadow at every chunk start, steps both with the same action, and compares `object_state` after each chunk; it raises `RuntimeError` when the maximum position gap is ≥ 1e-3 m or the maximum joint gap ≥ 0.02 rad. The trainer's `act` is the prior through `policy.select_action` on `rl_observation_batch`, as `run_rl_episode` does. Thresholds: `FIDELITY_POSITION_M = 1e-3`, `FIDELITY_DOOR_RAD = 0.02`, `FIDELITY_CHUNKS = 20`.
 - **Sharpening blocks.** `replay_sharpening` and `_maybe_sharpen` keep calling `plan_critic` with the min readout; they are diagnostics, not ranking.
 
 ## File map
@@ -54,12 +54,14 @@
 | `script/lingbot_rl_progress.py` | `TASKS`, `INSIDE_RADIUS`, `body_position`, `joint_value`, `calibrate`, `phi`, `progress` |
 | `script/lingbot_rl_buffer.py` | `plan_labels` (M, K) float32 with a zeros default |
 | `script/lingbot_rl_model.py` | `plan_target` on the model; rollout target and diagnostics; mean readout in `rank_plans`; `plan_target` in `layout` |
-| `script/lingbot_rl_train.py` | `make_shadow`, `sync_shadow`, `label_plans`, `shadow_fidelity`; the probe calibration and fidelity gate; per-episode shadow; labels stored and logged |
+| `script/lingbot_rl_train.py` | `make_shadow`, `capture_live`, `sync_shadow`, `label_plans`, `shadow_fidelity`, `_timed`; the probe calibration and fidelity gates; per-episode shadow and the labelling thread; labels stored and logged |
 | `brev/train.sh` | `--plan-target q|rollout` |
 
 ---
 
 ### Task 1: `plan_target` in the config and the fingerprint
+
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`) reproduces bit-for-bit, with no thread pool creation and no shadow construction.
 
 **Files:**
 - Modify: `script/lingbot_rl_config.py` (field after line 49, `validate()` before line 89, `protocol()` after line 194)
@@ -126,6 +128,8 @@ git commit -m "Add plan_target to the RL recipe: rollout labels enter the finger
 ---
 
 ### Task 2: Progress function and door calibration
+
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`) reproduces bit-for-bit, with no thread pool creation and no shadow construction.
 
 **Files:**
 - Create: `script/lingbot_rl_progress.py`
@@ -214,7 +218,7 @@ def progress(calibration, layout, before, after, success):
     return phi(calibration, layout, after, success) - phi(calibration, layout, before, False)
 ```
 
-`phi_initial` validates every name in `TASKS[task_id]` against the layout at startup (a missing body raises `ValueError` from `list.index`). `inner.sim.model.jnt_range` is the (njnt, 2) MuJoCo array exposed by robosuite's `MjModel` delegate; `joint_name2id` is the robosuite binding method already used next to `get_joint_qpos_addr`.
+`phi_initial` validates every name in `TASKS[task_id]` against the layout at startup (a missing body raises `ValueError` from `list.index`). `inner.sim.model.jnt_range` is the (njnt, 2) MuJoCo array exposed by robosuite's `MjModel` delegate; `joint_name2id` is the robosuite binding method (`utils/binding_utils.py:378`) next to `get_joint_qpos_addr`.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -228,6 +232,8 @@ git commit -m "Task 9 progress: mug-to-microwave distance, inside and door-close
 ---
 
 ### Task 3: `plan_labels` in the replay buffer
+
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`) reproduces bit-for-bit, with no thread pool creation and no shadow construction.
 
 **Files:**
 - Modify: `script/lingbot_rl_buffer.py` (`PLAN_FLOAT_KEYS` line 6, `_plan_defaults` lines 60–70)
@@ -299,6 +305,8 @@ git commit -m "Store per-candidate plan labels (M, K) in replay rows with a zero
 ---
 
 ### Task 4: Model: rollout target, mean readout, diagnostics, layout
+
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`) reproduces bit-for-bit, with no thread pool creation and no shadow construction.
 
 **Files:**
 - Modify: `script/lingbot_rl_model.py` (`__init__` 119–140, `layout_of` 162–165, `rank_plans` 182–185, `update_plan_critic` 264–285, `inference_state_dict` 292–301, `load_inference_state_dict` 303–314), `script/lingbot_rl_train.py` (model construction at lines 455 and 725 only)
@@ -433,23 +441,33 @@ git commit -m "Plan critic rollout target: train on the mean stored label per pl
 
 ---
 
-### Task 5: Shadow environment helpers: `make_shadow`, `sync_shadow`, `label_plans`, `shadow_fidelity`
+### Task 5: Shadow environment helpers: `make_shadow`, `capture_live`, `sync_shadow`, `label_plans`, `shadow_fidelity`
+
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`) reproduces bit-for-bit, with no thread pool creation and no shadow construction.
 
 **Files:**
-- Modify: `script/lingbot_rl_train.py` (imports lines 13–24; new functions after `object_state`, line 145)
-- Test: `tests/test_lingbot_rl.py` (two fixtures, two tests)
+- Modify: `script/lingbot_rl_train.py` (imports lines 13–24; constants after line 27; new functions after `object_state`, line 145)
+- Test: `tests/test_lingbot_rl.py` (fixtures, two tests)
 
 **Interfaces:**
 - Consumes: `calibrate` / `progress` (Task 2); `object_state(inner, layout)`, `env_success(info)`, `capture_rng` / `restore_rng`, `make_env`; `slice_env_actions`, `env_action_count` (already imported from `script.lingbot_rl_policy`); `decode_action` from `script.lingbot_eval`.
-- Produces: `FIDELITY_CHUNKS = 20`, `FIDELITY_POSITION_M = 1e-3`, `FIDELITY_DOOR_RAD = 0.02`; `make_shadow(task_id, suite, init_states, plus, seed) -> LiberoEnv` (reset once inside an RNG capture, `ignore_done = True` on `shadow._env.env`); `sync_shadow(live, twin)` (inner robosuite envs); `label_plans(shadow, live, candidates (M, K, 16, 30) tensor, first_chunk, norm, layout, calibration) -> np.float32 (M, K)`; `shadow_fidelity(env, shadow, layout, act, observation, chunks=FIDELITY_CHUNKS) -> {"position_m", "door_rad", "chunks"}` raising `RuntimeError` above the thresholds.
+- Produces: `FIDELITY_CHUNKS = 20`, `FIDELITY_POSITION_M = 1e-3`, `FIDELITY_ANGLE_RAD = 0.01745`; `make_shadow(task_id, suite, init_states, plus, seed) -> LiberoEnv` (reset once inside an RNG capture, `ignore_done = True` and image observables disabled on `shadow._env.env`); `capture_live(live) -> {"state", "warmstart", "robots": [(goal_pos, goal_ori, initial_joint, gripper_action), ...]}`; `sync_shadow(snapshot, twin)`; `label_plans(shadow, snapshot, before (object_state of the live env), candidates (M, K, 16, 30) tensor, first_chunk, norm, layout, calibration) -> np.float32 (M, K)` raising `RuntimeError("shadow state mismatch")` when the synced shadow's object state differs from `before`; `shadow_fidelity(env, shadow, layout, act, observation, chunks=FIDELITY_CHUNKS) -> {"position_m", "angle_rad", "chunks"}` raising `RuntimeError` above the thresholds.
 
 - [ ] **Step 1: Fixtures** in `tests/test_lingbot_rl.py` (before `_StubPolicy`)
 
 ```python
+class _Observable:
+    def __init__(self, modality):
+        self.modality, self.enabled = modality, True
+
+    def set_enabled(self, enabled):
+        self.enabled = enabled
+
+
 class _TwinSim:
     def __init__(self):
         self.data = SimpleNamespace(time=0.0, qpos=np.array([0.3, 0.0, 0.0, -2.0]), qvel=np.zeros(4), qacc_warmstart=np.zeros(4),
-                                    body_xpos=np.zeros((2, 3)), body_xquat=np.zeros((2, 4)))
+                                    body_xpos=np.zeros((2, 3)), body_xquat=np.tile([1.0, 0.0, 0.0, 0.0], (2, 1)))
         self.model = SimpleNamespace(get_joint_qpos_addr=lambda name: 3)
         self.forward()
 
@@ -464,25 +482,40 @@ class _TwinSim:
         self.data.body_xpos[1] = self.data.qpos[:3]
 
 
+class _TwinInner:
+    def __init__(self, drift):
+        self.sim = _TwinSim()
+        self.obj_body_id = {"micro": 0, "mug": 1}
+        self.ignore_done = False
+        self._observables = {"agentview_image": _Observable("image"), "robot0_eef_pos": _Observable("proprio")}
+        self.robots = [SimpleNamespace(
+            controller=SimpleNamespace(goal_pos=np.zeros(3), goal_ori=np.eye(3), initial_joint=np.zeros(7), update=lambda force=False: None),
+            gripper=SimpleNamespace(current_action=np.zeros(2)))]
+        self.drift, self.steps = drift, 0
+
+    def step(self, action):
+        self.sim.data.qpos[:3] += 0.01 * action[:3] + self.drift
+        self.sim.data.qpos[3] += 0.5 * max(float(action[6]), 0.0)
+        self.sim.forward()
+        self.steps += 1
+        return {}, 0.0, False, {}
+
+    def _check_success(self):
+        return bool(self.sim.data.qpos[3] >= 0.0)
+
+
 class _TwinEnv:
     def __init__(self, drift=0.0):
-        controller = SimpleNamespace(goal_pos=np.zeros(3), goal_ori=np.eye(3), update=lambda force=False: None)
-        self._env = SimpleNamespace(env=SimpleNamespace(
-            sim=_TwinSim(), obj_body_id={"micro": 0, "mug": 1}, ignore_done=False,
-            robots=[SimpleNamespace(controller=controller, gripper=SimpleNamespace(current_action=np.zeros(2)))]))
-        self.drift, self.steps = drift, 0
+        self._env = SimpleNamespace(env=_TwinInner(drift))
 
     def reset(self, seed=None):
         return {}, {}
 
     def step(self, action):
         inner = self._env.env
-        inner.sim.data.qpos[:3] += 0.01 * action[:3] + self.drift
-        inner.sim.data.qpos[3] += 0.5 * max(float(action[6]), 0.0)
-        inner.sim.forward()
-        self.steps += 1
-        success = bool(inner.sim.data.qpos[3] >= 0.0)
-        return {}, 0.0, success, False, {"is_success": success}
+        obs, reward, done, info = inner.step(action)
+        success = inner._check_success()
+        return obs, reward, done or success, False, {**info, "is_success": success}
 
     def close(self):
         return None
@@ -492,27 +525,32 @@ _TWIN_LAYOUT = {"bodies": ["micro", "mug"], "joints": ["door"], "body_quaternion
 _TWIN_CALIBRATION = {"task_id": 9, "mug": "mug", "microwave": "micro", "door": "door", "door_closed": 0.0, "door_open": -2.0}
 ```
 
-The stub's `object_state` (the real function) reads body 0 (microwave at the origin), body 1 (the mug at `qpos[:3]`) and `qpos[3]` (the door, open at −2.0; a positive gripper command closes it by 0.5 per step and success fires at 0.0).
+`_TwinInner` plays the robosuite env (direct `step` returning the 4-tuple, `_check_success`, `_observables`, `robots`); `_TwinEnv` plays the LeRobot wrapper (`step` mirrors `LiberoEnv.step`: forward the action, `terminated = done or success`, `info["is_success"]`). The real `object_state` reads body 0 (the microwave at the origin), body 1 (the mug at `qpos[:3]`) and `qpos[3]` (the door, open at −2.0; a positive gripper command closes it by 0.5 per step and success fires at 0.0). Quaternions are identity so the orientation gap is exactly zero.
 
 - [ ] **Step 2: Write the failing tests** (after the fixtures)
 
 ```python
-def test_label_plans_scores_every_candidate_from_the_live_state_with_the_chunk_length():
-    from script.lingbot_rl_train import label_plans
+def test_label_plans_scores_every_candidate_from_the_live_snapshot_with_the_chunk_length():
+    from script.lingbot_rl_train import capture_live, label_plans, object_state
     live, shadow = _TwinEnv(), _TwinEnv()
     shadow._env.env.sim.data.qpos[:] = [9.0, 9.0, 9.0, 9.0]
+    live._env.env.robots[0].controller.initial_joint[:] = 0.5
     candidates = torch.zeros(2, 2, HORIZON, ACTION_DIM)
     candidates[0, :, :, 0] = 1.0
     candidates[1, :, :, 0] = -1.0
     candidates[1, 1, 4:, 6] = 1.0
     norm = _eval_normalization()
-    labels = label_plans(shadow, live._env.env, candidates, True, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
+    snapshot, before = capture_live(live._env.env), object_state(live._env.env, _TWIN_LAYOUT)
+    labels = label_plans(shadow, snapshot, before, candidates, True, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
     assert labels.shape == (2, 2) and labels.dtype == np.float32
     assert labels[0, 0] == pytest.approx(-0.12, abs=1e-4) and labels[0, 1] == labels[0, 0]
     assert labels[1, 0] == pytest.approx(0.12, abs=1e-4) and labels[1, 1] == pytest.approx(2.04, abs=1e-4)
-    assert shadow.steps == 12 + 12 + 12 + 4 and live._env.env.sim.data.qpos[0] == 0.3 and live.steps == 0
-    later = label_plans(shadow, live._env.env, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
+    assert shadow._env.env.steps == 12 + 12 + 12 + 4 and live._env.env.steps == 0 and live._env.env.sim.data.qpos[0] == 0.3
+    assert float(shadow._env.env.robots[0].controller.initial_joint[0]) == 0.5
+    later = label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
     assert later[0, 0] == pytest.approx(-0.16, abs=1e-4) and later[1, 0] == pytest.approx(0.16, abs=1e-4)
+    with pytest.raises(RuntimeError, match="shadow state mismatch"):
+        label_plans(shadow, snapshot, before + 1.0, candidates, True, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
 
 
 def test_shadow_fidelity_measures_object_pose_gaps_per_chunk_and_gates_on_them(monkeypatch):
@@ -522,20 +560,21 @@ def test_shadow_fidelity_measures_object_pose_gaps_per_chunk_and_gates_on_them(m
     calls = []
     act = lambda observation: calls.append(observation) or np.array([0.5, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], np.float32)
     live, shadow = _TwinEnv(), make_shadow(9, None, False, False, 0)
-    assert shadow._env.env.ignore_done is True
+    observables = shadow._env.env._observables
+    assert shadow._env.env.ignore_done is True and observables["agentview_image"].enabled is False and observables["robot0_eef_pos"].enabled is True
     result = shadow_fidelity(live, shadow, _TWIN_LAYOUT, act, {"step": 0}, chunks=3)
-    assert result == {"position_m": 0.0, "door_rad": 0.0, "chunks": 3} and len(calls) == 12 + 16 + 16
-    assert shadow.steps == live.steps == 44 and calls[0] == {"step": 0}
+    assert result == {"position_m": 0.0, "angle_rad": 0.0, "chunks": 3} and len(calls) == 12 + 16 + 16
+    assert shadow._env.env.steps == live._env.env.steps == 44 and calls[0] == {"step": 0}
     with pytest.raises(RuntimeError, match="fidelity"):
         shadow_fidelity(_TwinEnv(), _TwinEnv(drift=2e-4), _TWIN_LAYOUT, act, {}, chunks=3)
 ```
 
-Expected values: a first chunk executes 12 steps of 0.01 m, so the mug moves from 0.3 to 0.42 (label −0.12) or 0.18 (+0.12); `decode_action` with the unit normalisation scales by `1 + 5e-7`, hence `abs=1e-4`. Candidate (1, 1) closes the door at 0.5 rad per step and succeeds after four steps: Δ(−distance) = +0.04, plus 2.0. The second call uses `first_chunk=False` (16 steps). With a drift of 2e-4 m per step the shadow is 2.4e-3 m off after the first chunk, above `FIDELITY_POSITION_M`.
+Expected values: a first chunk executes 12 steps of 0.01 m, so the mug moves from 0.3 to 0.42 (label −0.12) or 0.18 (+0.12); `decode_action` with the unit normalisation scales by `1 + 5e-7`, hence `abs=1e-4`. Candidate (1, 1) closes the door at 0.5 rad per step and succeeds after four steps: Δ(−distance) = +0.04, plus 2.0. The second call uses `first_chunk=False` (16 steps). The mismatch case offsets `before` by 1.0. With a drift of 2e-4 m per step the shadow is 2.4e-3 m off after the first chunk, above `FIDELITY_POSITION_M`.
 
 - [ ] **Step 3: Run them**
 
 Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py -k "label_plans_scores or shadow_fidelity_measures"`
-Expected: FAIL with `ImportError: cannot import name 'label_plans'`.
+Expected: FAIL with `ImportError: cannot import name 'capture_live'`.
 
 - [ ] **Step 4: Implement** in `script/lingbot_rl_train.py`
 
@@ -544,7 +583,7 @@ Imports: add `from script.lingbot_rl_progress import calibrate, progress` after 
 ```python
 FIDELITY_CHUNKS = 20
 FIDELITY_POSITION_M = 1e-3
-FIDELITY_DOOR_RAD = 0.02
+FIDELITY_ANGLE_RAD = 0.01745
 ```
 
 After `object_state` (line 145):
@@ -557,35 +596,47 @@ def make_shadow(task_id, suite, init_states, plus, seed):
         shadow.reset(seed=seed)
     finally:
         restore_rng(rng)
-    shadow._env.env.ignore_done = True
+    inner = shadow._env.env
+    inner.ignore_done = True
+    for observable in inner._observables.values():
+        if observable.modality == "image":
+            observable.set_enabled(False)
     return shadow
 
 
-def sync_shadow(live, twin):
-    twin.sim.set_state(live.sim.get_state())
-    twin.sim.data.qacc_warmstart[:] = live.sim.data.qacc_warmstart
+def capture_live(live):
+    return {"state": live.sim.get_state(), "warmstart": np.array(live.sim.data.qacc_warmstart),
+            "robots": [(np.array(robot.controller.goal_pos), np.array(robot.controller.goal_ori),
+                        np.array(robot.controller.initial_joint), np.array(robot.gripper.current_action)) for robot in live.robots]}
+
+
+def sync_shadow(snapshot, twin):
+    twin.sim.set_state(snapshot["state"])
+    twin.sim.data.qacc_warmstart[:] = snapshot["warmstart"]
     twin.sim.forward()
-    for source, target in zip(live.robots, twin.robots):
-        target.controller.update(force=True)
-        target.controller.goal_pos = np.array(source.controller.goal_pos)
-        target.controller.goal_ori = np.array(source.controller.goal_ori)
-        target.gripper.current_action = np.array(source.gripper.current_action)
+    for robot, (goal_pos, goal_ori, initial_joint, gripper_action) in zip(twin.robots, snapshot["robots"]):
+        robot.controller.update(force=True)
+        robot.controller.goal_pos = np.array(goal_pos)
+        robot.controller.goal_ori = np.array(goal_ori)
+        robot.controller.initial_joint = np.array(initial_joint)
+        robot.gripper.current_action = np.array(gripper_action)
 
 
-def label_plans(shadow, live, candidates, first_chunk, norm, layout, calibration):
+def label_plans(shadow, snapshot, before, candidates, first_chunk, norm, layout, calibration):
     from script.lingbot_eval import decode_action
     twin = shadow._env.env
     plans, k = candidates.shape[:2]
     env_actions = slice_env_actions(candidates.detach().float().cpu().reshape(plans * k, HORIZON, ACTION_DIM), first_chunk)
     labels = np.zeros(plans * k, np.float32)
     for index in range(plans * k):
-        sync_shadow(live, twin)
-        before = object_state(twin, layout)
+        sync_shadow(snapshot, twin)
+        if index == 0 and not np.allclose(before, object_state(twin, layout), atol=1e-6):
+            raise RuntimeError("shadow state mismatch")
         success = False
         for step in range(env_actions.shape[1]):
-            _, _, terminated, truncated, info = shadow.step(decode_action(env_actions[index, step].reshape(1, 7), norm))
-            success = env_success(info)
-            if success or terminated or truncated:
+            _, _, done, _ = twin.step(decode_action(env_actions[index, step].reshape(1, 7), norm))
+            success = bool(twin._check_success())
+            if success or done:
                 break
         labels[index] = progress(calibration, layout, before, object_state(twin, layout), success)
     return labels.reshape(plans, k)
@@ -596,22 +647,26 @@ def shadow_fidelity(env, shadow, layout, act, observation, chunks=FIDELITY_CHUNK
     bodies = 7 * len(layout["bodies"])
     worst = np.zeros(2)
     for chunk in range(chunks):
-        sync_shadow(live, twin)
+        sync_shadow(capture_live(live), twin)
         for _ in range(env_action_count(chunk == 0)):
             action = act(observation)
             observation, _, terminated, truncated, info = env.step(action)
-            shadow.step(action)
-        diff = np.abs(object_state(live, layout) - object_state(twin, layout))
-        worst = np.maximum(worst, [diff[:bodies].reshape(-1, 7)[:, :3].max(), diff[bodies:].max(initial=0.0)])
+            twin.step(action)
+        live_state, twin_state = object_state(live, layout), object_state(twin, layout)
+        poses = np.stack([live_state[:bodies].reshape(-1, 7), twin_state[:bodies].reshape(-1, 7)]).astype(np.float64)
+        position = np.abs(poses[0, :, :3] - poses[1, :, :3]).max()
+        angle = (2.0 * np.arccos(np.minimum(1.0, np.abs((poses[0, :, 3:] * poses[1, :, 3:]).sum(axis=1))))).max()
+        joint = np.abs(live_state[bodies:] - twin_state[bodies:]).max(initial=0.0)
+        worst = np.maximum(worst, [position, max(angle, joint)])
         if env_success(info) or terminated or truncated:
             break
-    result = {"position_m": float(worst[0]), "door_rad": float(worst[1]), "chunks": chunk + 1}
-    if worst[0] >= FIDELITY_POSITION_M or worst[1] >= FIDELITY_DOOR_RAD:
+    result = {"position_m": float(worst[0]), "angle_rad": float(worst[1]), "chunks": chunk + 1}
+    if worst[0] >= FIDELITY_POSITION_M or worst[1] >= FIDELITY_ANGLE_RAD:
         raise RuntimeError(f"shadow fidelity check failed: {result}")
     return result
 ```
 
-Source facts behind `sync_shadow` (robosuite at `~/.cache/uv/git-v0/checkouts/79abe6cb204f004b/c848ca8`): `MjSim.get_state()` returns `MjSimState(time, qpos copy, qvel copy)` and `set_state` copies them back (`utils/binding_utils.py:1140-1155`, `na == 0` asserted), `forward()` is `mj_forward`; `Controller.update(force=True)` recomputes `ee_pos` / `ee_ori_mat` from the sim (`controllers/base_controller.py:125-161`); OSC `set_goal` only rewrites `goal_ori` when the rotation delta is non-zero (`controllers/osc.py:271-278`), which is why the live goal is copied; `PandaGripper.format_action` ramps `current_action` by `speed = 0.01` per substep (`models/grippers/panda_gripper.py:43-62`). Robosuite's `MujocoEnv.step` raises once `done` is set, and `done = timestep >= horizon and not ignore_done` (`environments/base.py:378, 432`); LIBERO's `ControlEnv` defaults to `horizon=1000, ignore_done=False`, hence `ignore_done = True` on the shadow.
+Source facts (robosuite at `~/.cache/uv/git-v0/checkouts/79abe6cb204f004b/c848ca8`): `MjSim.get_state()` returns `MjSimState(time, qpos copy, qvel copy)` and `set_state` copies them back (`utils/binding_utils.py:1140-1155`); the `na == 0` assertion lives in `MjSimState.from_flattened` (`binding_utils.py:236`), the path LIBERO's `set_init_state` uses, so the model has no actuator activations to carry; `forward()` is `mj_forward`; `MjData` delegates `qacc_warmstart` to `mujoco.MjData` (`binding_utils.py:555-574`); `Controller.update(force=True)` recomputes `ee_pos` / `ee_ori_mat` from the sim (`controllers/base_controller.py:125-161`); OSC `set_goal` only rewrites `goal_ori` when the rotation delta is non-zero (`controllers/osc.py:271-278`), which is why the live goal is copied; `initial_joint` feeds the OSC nullspace torques (`controllers/osc.py:351`) and is set from the joint positions at reset (`base_controller.py:91, 185`); `PandaGripper.format_action` ramps `current_action` by `speed = 0.01` per substep (`models/grippers/panda_gripper.py:43-62`). Robosuite's `MujocoEnv.step` raises once `done` is set, `done = timestep >= horizon and not ignore_done` (`environments/base.py:378, 432`); LIBERO's `ControlEnv` defaults to `horizon=1000, ignore_done=False`, hence `ignore_done = True` on the shadow. Cameras render in `Observable.update` (`utils/observables.py:214-224`, run from `_update_observables` on every substep), and `Observable.modality` / `set_enabled` are the public accessors (`observables.py:289, 396`), so disabling the image observables is what stops rendering; `use_camera_obs` is only consulted when observables are created (`environments/robot_env.py:335, 524`). The direct path `twin.step(action)` is exactly what `LiberoEnv.step` forwards (`.cache/lerobot/src/lerobot/envs/libero.py:366-391`: `ndim == 1` assert, no scaling, `terminated = done or check_success()`).
 
 - [ ] **Step 5: Verify and commit**
 
@@ -619,70 +674,88 @@ Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py && .cach
 
 ```bash
 git add script/lingbot_rl_train.py tests/test_lingbot_rl.py
-git commit -m "Shadow environment helpers: state and controller sync, per-candidate progress labels, startup fidelity check."
+git commit -m "Shadow environment helpers: live snapshot and controller sync, physics-only candidate labels, startup fidelity check with pose and orientation gates."
 ```
 
 ---
 
-### Task 6: Trainer integration, storage, logging and `train.sh`
+### Task 6: Trainer integration: labelling thread, storage, logging, `train.sh`
+
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`) reproduces bit-for-bit, with no thread pool creation and no shadow construction.
 
 **Files:**
-- Modify: `script/lingbot_rl_train.py` (`_update_from_buffer` lines 370–371; `train()` probe block 479–488, settings line 500, episode head 552–563, chunk loop 572–606, row 634–655, `finally` 677), `brev/train.sh`, `tests/test_lingbot_rl.py` (`_smoke_train` fixture, one test)
+- Modify: `script/lingbot_rl_train.py` (imports; `_update_from_buffer` lines 370–371; `train()` probe block 479–488, settings line 500, executor before the `while`, episode head 552–563, chunk loop 572–606, after the env step loop (before line 629 `chunk_seconds += ...`), row 634–655, `finally` 677, after the loop), `brev/train.sh`, `tests/test_lingbot_rl.py` (`_smoke_train` fixture, one test)
 
 **Interfaces:**
 - Consumes: Tasks 1–5.
-- Produces: `settings.json` gains `"progress_calibration"` and `"shadow_fidelity"` (None unless rollout); a shadow env per episode under rollout; rows carry `plan_labels` under rollout; `plan_info` gains `label_agreement_with_q`, `label_spread_within_plan`, `label_spread_across_plans`, `label_executed_minus_mean`, `label_seconds` (and their `/<kind>` copies under `plus_train`); `_update_from_buffer` passes `sample["plan_labels"]` to `update_plan_critic`; `brev/train.sh --plan-target q|rollout` writes `"plan_target"` into `config.json`.
+- Produces: `_timed(fn, *args) -> (result, seconds)`; `settings.json` gains `"progress_calibration"` and `"shadow_fidelity"` (None unless rollout; under rollout `{"base": {...}, "plus": {"variant_index", ...} | None}`); a shadow env per episode and one `ThreadPoolExecutor(max_workers=1)` per run under rollout; rows carry `plan_labels` under rollout; `plan_info` gains `label_agreement_with_q`, `label_spread_within_plan`, `label_spread_across_plans`, `label_executed_minus_mean`, `label_seconds`, `label_wait_seconds` (and their `/<kind>` copies under `plus_train`); `_update_from_buffer` passes `sample["plan_labels"]` to `update_plan_critic`; `brev/train.sh --plan-target q|rollout` writes `"plan_target"` into `config.json`.
 
 - [ ] **Step 1: Fixture** in `_smoke_train`
 
-In `StubEnv.__init__` change `self._env = SimpleNamespace(env=None)` to `self._env = SimpleNamespace(env=SimpleNamespace())` (the shadow sets `ignore_done` on it; `object_layout` / `object_state` are monkeypatched already).
+In `StubEnv.__init__` change `self._env = SimpleNamespace(env=None)` to `self._env = SimpleNamespace(env=SimpleNamespace(_observables={}))` (the shadow sets `ignore_done` and walks `_observables` on it; `object_layout` / `object_state` are monkeypatched already).
 
 - [ ] **Step 2: Write the failing test** (after `test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind`)
 
 ```python
-def test_train_with_rollout_labels_stores_them_logs_the_diagnostics_and_records_the_fidelity_gate(tmp_path, monkeypatch):
+def test_train_with_rollout_labels_overlaps_the_live_chunk_stores_them_and_records_both_fidelity_gates(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
     import script.lingbot_rl_model as model_module
     import script.lingbot_rl_train as train
     from script.lingbot_rl_config import plus_train_variants
     monkeypatch.setattr(model_module, "HIDDEN", (32, 32, 32))
-    labelled = []
+    labelled, pools = [], []
+    monkeypatch.setattr(train, "ThreadPoolExecutor", lambda **kwargs: pools.append(kwargs) or ThreadPoolExecutor(**kwargs))
     monkeypatch.setattr(train, "calibrate", lambda task_id, inner, layout, initial: {"task_id": task_id, "door_closed": 0.0, "door_open": -2.094})
-    monkeypatch.setattr(train, "shadow_fidelity",
-                        lambda env, shadow, layout, act, observation: {"position_m": 2e-4, "door_rad": 1e-3, "chunks": 20})
-    monkeypatch.setattr(train, "label_plans", lambda shadow, live, candidates, first_chunk, norm, layout, calibration: labelled.append(
-        (tuple(candidates.shape), first_chunk, calibration["task_id"])) or np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], np.float32))
+    monkeypatch.setattr(train, "capture_live", lambda live: {"stub": True})
+    monkeypatch.setattr(train, "shadow_fidelity", lambda env, shadow, layout, act, observation, chunks=20: {
+        "position_m": 2e-4, "angle_rad": 1e-3, "chunks": chunks})
+    monkeypatch.setattr(train, "label_plans", lambda shadow, snapshot, before, candidates, first_chunk, norm, layout, calibration: labelled.append(
+        (snapshot, before.tolist(), tuple(candidates.shape), first_chunk, calibration["task_id"]))
+        or np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], np.float32))
     config = RLConfig(task_ids=(9,), plan_candidates=2, plan_random_prob=0.0, selection_warmup_steps=0, residual_input="base",
                       proprio=True, plus_train=plus_train_variants(), plan_target="rollout")
     out = _smoke_train(tmp_path, monkeypatch, 60, model_factory=lambda **kw: DiceResidualModel(**kw), config=config)
     envs = out["envs"]
     strip = lambda env: {key: value for key, value in env.items() if key != "obs_type"}
-    assert len(envs) == 2 + 2 * 5 and all(envs[i]["obs_type"] == "pixels" and strip(envs[i]) == strip(envs[i - 1]) for i in range(1, 12, 2))
-    assert labelled and labelled[0] == ((2, K_CANDIDATES, HORIZON, ACTION_DIM), True, 9) and len(labelled) == 5
+    assert len(envs) == 4 + 2 * 5 and all(envs[i]["obs_type"] == "pixels" and strip(envs[i]) == strip(envs[i - 1]) for i in range(1, 14, 2))
+    assert (envs[2]["task_id"], envs[2]["init_states"], envs[2]["is_libero_plus"], envs[2]["obs_type"]) == (1982, True, True, "pixels_agent_pos")
+    assert pools == [{"max_workers": 1}]
+    assert labelled and labelled[0] == ({"stub": True}, [7.0, 8.0], (2, K_CANDIDATES, HORIZON, ACTION_DIM), True, 9) and len(labelled) == 5
     rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
     assert rows[0]["plan_labels"].dtype == np.float32 and rows[0]["plan_labels"].tolist() == [[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]]
     updates = [entry for entry in out["logs"] if "plan_critic_loss" in entry]
     assert updates and {"label_agreement_with_q", "label_spread_within_plan", "label_spread_across_plans", "label_executed_minus_mean",
-                        "label_seconds", "plan_target_q_mean", "plan_label_vs_q_agreement"} <= set(updates[0])
-    assert any(key.startswith("label_seconds/") for key in updates[0]) and updates[0]["label_seconds"] >= 0.0
+                        "label_seconds", "label_wait_seconds", "plan_target_q_mean", "plan_label_vs_q_agreement"} <= set(updates[0])
+    assert any(key.startswith("label_seconds/") for key in updates[0]) and updates[0]["label_wait_seconds"] >= 0.0
     assert updates[0]["label_spread_within_plan"] == pytest.approx(float(np.std([0.0, 1.0, 2.0, 3.0])))
     assert updates[0]["label_spread_across_plans"] == pytest.approx(2.0) and abs(updates[0]["label_executed_minus_mean"]) == pytest.approx(2.0)
     assert updates[0]["label_agreement_with_q"] in (0.0, 1.0)
     settings = json.loads((tmp_path / "settings.json").read_text())
-    assert settings["shadow_fidelity"]["chunks"] == 20 and settings["progress_calibration"]["door_open"] == -2.094
+    assert settings["shadow_fidelity"] == {"base": {"position_m": 2e-4, "angle_rad": 1e-3, "chunks": 20},
+                                           "plus": {"variant_index": 1982, "position_m": 2e-4, "angle_rad": 1e-3, "chunks": 3}}
+    assert settings["progress_calibration"]["door_open"] == -2.094
     assert out["resume"]["recipe"]["plan_target"] == "rollout" and out["resume"]["layout"]["plan_target"] == "rollout"
     plain = _smoke_train(tmp_path / "plain", monkeypatch, 24)
-    assert not any("label_seconds" in entry for entry in plain["logs"])
+    assert pools == [{"max_workers": 1}] and not any("label_seconds" in entry for entry in plain["logs"])
     assert json.loads((tmp_path / "plain" / "settings.json").read_text())["shadow_fidelity"] is None
 ```
 
-The stub env ends every episode after 12 steps, so a budget of 60 gives five episodes (reset kinds 0, 1, 0, 2, 1 for seed 42) and one update at chunk 4; `envs` alternate live / shadow after the probe pair, and the shadow's kwargs equal the live ones except `obs_type`. `label_executed_minus_mean` is ±2.0 depending on which plan the untrained critic picks.
+The stub env ends every episode after 12 steps, so a budget of 60 gives five episodes (reset kinds 0, 1, 0, 2, 1 for seed 42) and one update at chunk 4. `envs` are the probe pair, the layout-variant pair (variant 1982 with stored states on the plus package), then live / shadow per episode; each shadow's kwargs equal its live env's except `obs_type`. The stub `label_plans` is synchronous but still runs on the executor's thread; `future.result()` joins it before the row is stored, so every assertion sees completed work. `label_executed_minus_mean` is ±2.0 depending on which plan the untrained critic picks. The `plain` run must not add a second executor.
 
 - [ ] **Step 3: Run it**
 
-Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py -k rollout_labels_stores`
-Expected: FAIL with `KeyError: 'plan_labels'` (or `assert len(envs) == 12` failing with 6).
+Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py -k rollout_labels_overlaps`
+Expected: FAIL with `AttributeError: module 'script.lingbot_rl_train' has no attribute 'ThreadPoolExecutor'`.
 
 - [ ] **Step 4: Implement** in `script/lingbot_rl_train.py`
+
+Imports: add `from concurrent.futures import ThreadPoolExecutor, wait` after `import argparse`'s group (before `from dataclasses import replace`). After `_host_array` (line 330):
+
+```python
+def _timed(fn, *args):
+    started = time.perf_counter()
+    return fn(*args), time.perf_counter() - started
+```
 
 `_update_from_buffer` (lines 370–371):
 
@@ -704,24 +777,43 @@ Probe block (replace lines 479–488):
             layout = object_layout(env._env.env)
             if config.plan_target == "rollout":
                 calibration = calibrate(tasks[0]["task_id"], env._env.env, layout, object_state(env._env.env, layout))
+                act = lambda current: decode_action(
+                    policy.select_action(rl_observation_batch(current, tasks[0]["instruction"], device, True)), norm)
                 shadow = make_shadow(tasks[0]["env_task"], suite, False, False, config.seed)
                 try:
                     policy.reset()
-                    fidelity = shadow_fidelity(env, shadow, layout, lambda current: decode_action(
-                        policy.select_action(rl_observation_batch(current, tasks[0]["instruction"], device, True)), norm), observation)
+                    fidelity = {"base": shadow_fidelity(env, shadow, layout, act, observation), "plus": None}
                 finally:
                     shadow.close()
                     policy.reset()
         finally:
             env.close()
+        if calibration is not None and config.plus_train:
+            variant = int(config.plus_train["layout"][0])
+            env, shadow = make_env(variant, suite, init_states=True, plus=True, proprio=True), make_shadow(variant, suite, True, True, config.seed)
+            try:
+                env.init_state_id = 0
+                observation, _ = env.reset(seed=config.seed)
+                policy.reset()
+                fidelity["plus"] = {"variant_index": variant, **shadow_fidelity(env, shadow, layout, act, observation, chunks=3)}
+            finally:
+                env.close()
+                shadow.close()
+                policy.reset()
         restore_rng(rng)
 ```
 
-(`decode_action` is already imported at the top of `train()`; `policy.eval_candidates` / `eval_plans` are set before this block and `eval_plan_ranker` defaults to `"v_plan"`, so the probe rollout is the prior with the zero-initialised residual, exactly the `run_rl_episode` action path.) Settings (line 500):
+(`decode_action` is already imported at the top of `train()`; `policy.eval_candidates` / `eval_plans` are set before this block and `eval_plan_ranker` defaults to `"v_plan"`, so the probe rollouts use the prior with the zero-initialised residual, exactly the `run_rl_episode` action path; the whole block sits inside the existing RNG capture.) Settings (line 500):
 
 ```python
     _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe, "runtime": runtime, "object_layout": layout,
                                                "progress_calibration": calibration, "shadow_fidelity": fidelity})
+```
+
+Before `while env_steps < budget:` (line 552):
+
+```python
+    labeller = ThreadPoolExecutor(max_workers=1) if calibration is not None else None
 ```
 
 Episode head (lines 557–563) becomes:
@@ -734,16 +826,15 @@ Episode head (lines 557–563) becomes:
         policy.reset()
         observation, _ = env.reset(seed=config.seed + env_steps)
         shadow = make_shadow(sim_task, suite, stored, bool(config.plus_train), config.seed + env_steps) if calibration is not None else None
+        future = None
 ```
 
 After the decode branches (line 579, `decoded = policy.decode_candidates(batch, k=config.k_candidates)`), still inside the chunk loop:
 
 ```python
-                plan_labels = None
                 if shadow is not None:
-                    label_started = time.perf_counter()
-                    plan_labels = label_plans(shadow, env._env.env, decoded["plan_a_base_all"], decoded["first_chunk"], norm, layout, calibration)
-                    label_seconds = time.perf_counter() - label_started
+                    future = labeller.submit(_timed, label_plans, shadow, capture_live(env._env.env), sim_state,
+                                             decoded["plan_a_base_all"].detach().float().cpu(), decoded["first_chunk"], norm, layout, calibration)
 ```
 
 Replace the `q_all` expression and the `plan_info` dict (lines 600–606) with:
@@ -757,18 +848,28 @@ Replace the `q_all` expression and the `plan_info` dict (lines 600–606) with:
                                      "plan_regret": float(q_all.max() - q_all[decoded["plan_index"]]),
                                      "plan_value_spread": float(v_all.max() - v_all.min()),
                                      "plan_random_rate": float(random_plan)}
-                        if plan_labels is not None:
-                            plan_mean = plan_labels.mean(axis=1)
+                        if future is not None:
                             q_mean = torch.stack(model.critic(critic_all, action_all, return_all=True)).mean(dim=0).reshape(plans, k).max(dim=1).values
-                            plan_info.update({
-                                "label_agreement_with_q": float(int(plan_mean.argmax()) == int(q_mean.argmax())),
-                                "label_spread_within_plan": float(plan_labels.std(axis=1).mean()),
-                                "label_spread_across_plans": float(plan_mean.std()),
-                                "label_executed_minus_mean": float(plan_mean[decoded["plan_index"]] - plan_mean.mean()),
-                                "label_seconds": label_seconds})
 ```
 
-(`critic_all` / `action_all` are the same two expressions the old `q_all` line nested, so `q_all` is bit-identical; `v_all` keeps the min readout for the agreement diagnostic, as before.) In the row (lines 634–655) add, after the `"variant_index": env_task,` line:
+(`critic_all` / `action_all` are the two expressions the old `q_all` line nested, so `q_all` is bit-identical; `v_all` keeps the min readout for the existing agreement diagnostic.) After the env step `for` loop and before `chunk_seconds += time.perf_counter() - started` (line 629):
+
+```python
+                plan_labels = None
+                if future is not None:
+                    wait_started = time.perf_counter()
+                    plan_labels, label_seconds = future.result()
+                    label_wait_seconds, future = time.perf_counter() - wait_started, None
+                    plan_mean = plan_labels.mean(axis=1)
+                    plan_info.update({
+                        "label_agreement_with_q": float(int(plan_mean.argmax()) == int(q_mean.argmax())),
+                        "label_spread_within_plan": float(plan_labels.std(axis=1).mean()),
+                        "label_spread_across_plans": float(plan_mean.std()),
+                        "label_executed_minus_mean": float(plan_mean[decoded["plan_index"]] - plan_mean.mean()),
+                        "label_seconds": label_seconds, "label_wait_seconds": label_wait_seconds})
+```
+
+In the row (lines 634–655) add, after the `"variant_index": env_task,` line:
 
 ```python
                     **({"plan_labels": plan_labels} if plan_labels is not None else {}),
@@ -778,10 +879,21 @@ The `finally` (line 677):
 
 ```python
         finally:
+            if future is not None:
+                wait([future])
             env.close()
             if shadow is not None:
                 shadow.close()
 ```
+
+After the `while` loop, before `save_inference(output_dir / "residual.pt", model)`:
+
+```python
+    if labeller is not None:
+        labeller.shutdown()
+```
+
+On the default path `calibration` is None, so no executor, no shadow, `future` stays None, `plan_labels` is None and the row is unchanged; `sim_task` is the same value the old inline expression produced.
 
 - [ ] **Step 5: `brev/train.sh`**
 
@@ -793,26 +905,28 @@ Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py tests/te
 
 ```bash
 git add script/lingbot_rl_train.py brev/train.sh tests/test_lingbot_rl.py
-git commit -m "Label every candidate plan in a shadow simulator under plan_target rollout, store and log the labels, gate the run on shadow fidelity; add --plan-target to train.sh."
+git commit -m "Label every candidate plan in a physics-only shadow on a worker thread under plan_target rollout; store and log the labels; gate the run on base and variant shadow fidelity; add --plan-target to train.sh."
 ```
 
 ---
 
 ### Task 7: GB10 checks, smoke, stop run A, launch (controller)
 
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`) reproduces bit-for-bit, with no thread pool creation and no shadow construction. Nothing in this task changes code; a failure here is reported, not patched on the box.
+
 Run on Jarvis from `~/Documents/dice-rl-wam` after `git pull`; `DICE_DATA=~/Documents/dice`; the plus install is activated by `brev/train.sh --plus` (`~/Documents/dice/libero-plus-config/activate.sh`). Nothing here is run by implementers. Run A keeps running until Step 4.
 
-- [ ] **Step 1: Smoke with the fidelity gate** (`DICE_NO_SYNC=1` in env.sh as for the previous runs):
+- [ ] **Step 1: Smoke with the fidelity gates** (`DICE_NO_SYNC=1` in env.sh as for the previous runs):
 
 ```bash
 bash brev/train.sh smoke-pool-cf 9 --residual-input base --epsilon -0.3 --video-steps 5 --action-steps 10 --plan-candidates 4 --env-steps 320000 --plus --proprio --state-features pool --plan-target rollout --max-env-steps 2100 --no-tmux
 ```
 
-Copy `$DICE_DATA/runs/dice-t9-plus-m4-pool/expert_features.pt` into `$DICE_DATA/runs/smoke-pool-cf/` first to skip the v3 rebuild (same recipe fingerprint). The run starts with the probe: layout, calibration, then the 20-chunk fidelity rollout of the prior (about 3 minutes). If it raises `shadow fidelity check failed: {...}`, stop and report the printed maxima; do not loosen `FIDELITY_POSITION_M` / `FIDELITY_DOOR_RAD`. Read:
+Copy `$DICE_DATA/runs/dice-t9-plus-m4-pool/expert_features.pt` into `$DICE_DATA/runs/smoke-pool-cf/` first to skip the v3 rebuild (same recipe fingerprint). The run starts with the probe: layout, calibration, the 20-chunk fidelity rollout of the prior on the base task (about 3 minutes), then 3 chunks on layout variant 1982. If either raises `shadow fidelity check failed: {...}`, stop and report the printed maxima; do not loosen `FIDELITY_POSITION_M` / `FIDELITY_ANGLE_RAD`. A `shadow state mismatch` from `label_plans` during collection means the variant's qpos layout or object identities differ between the two environments; report the episode's `variant_index`. Read:
 
-- `$DICE_DATA/runs/smoke-pool-cf/settings.json`: `recipe.plan_target` `rollout`, `recipe.plan_critic` `regression_mean_k_rollout_progress`; `progress_calibration` with `door_closed` 0.0, `door_open` −2.094, `door_initial` nearer `door_open` (task 9 starts with the microwave open; if `door_initial` is instead nearer 0.0, stop and report), `phi_initial` about −‖mug − micro‖ at reset; `shadow_fidelity.position_m` < 1e-3, `door_rad` < 0.02, `chunks` 20 (fewer only if the prior succeeded within 20 chunks).
-- Also confirm from the log that the shadow is unconstrained by LIBERO's horizon: with `ignore_done` set the smoke's episodes run their full 520 steps without a `ValueError("executing action in terminated episode")`.
-- W&B run `smoke-pool-cf` (or `$DICE_REPO/wandb/latest-run/files/wandb-summary.json`): `label_seconds` (expect about 1 s per chunk; the spec's budget is about 10% on 0.54 s per env step), `seconds_per_env_step` against the run A smoke, `label_agreement_with_q`, `label_spread_within_plan`, `label_spread_across_plans`, `label_executed_minus_mean`, `plan_target_q_mean`, `plan_label_vs_q_agreement`, `peak_gpu_memory_gb`. If `label_seconds` exceeds 2 s, the fallback is to step `shadow._env` directly with `use_camera_obs = False` on the inner env and read success through `shadow._env.check_success()` (the LeRobot `step` needs the camera keys); that is a follow-up change, not something to patch on the box.
+- `$DICE_DATA/runs/smoke-pool-cf/settings.json`: `recipe.plan_target` `rollout`, `recipe.plan_critic` `regression_mean_k_rollout_progress`; `progress_calibration` with `door_closed` 0.0, `door_open` −2.094, `door_initial` nearer `door_open` (task 9 starts with the microwave open; if `door_initial` is instead nearer 0.0, stop and report), `phi_initial` about −‖mug − micro‖ at reset; `shadow_fidelity.base.position_m` and `.plus.position_m` well under 1e-3 (a correct sync lands near 1e-12), `angle_rad` well under 0.01745, `base.chunks` 20 (fewer only if the prior succeeded within 20 chunks), `plus.chunks` 3, `plus.variant_index` 1982.
+- Confirm from the log that the shadow is unconstrained by LIBERO's horizon: the smoke's episodes run their full 520 steps without a `ValueError("executing action in terminated episode")`.
+- W&B run `smoke-pool-cf` (or `$DICE_REPO/wandb/latest-run/files/wandb-summary.json`): `label_seconds` (physics only; expect well under the roughly 1 s the spec budgeted with rendering), `label_wait_seconds` (expect near zero: the shadow's 16 × ≤16 steps overlap a live chunk of about 16 × 0.54 s), `seconds_per_env_step` against the run A smoke, `label_agreement_with_q`, `label_spread_within_plan`, `label_spread_across_plans` (logged as two values; the spec's within-over-across ratio is taken offline), `label_executed_minus_mean`, `plan_target_q_mean`, `plan_label_vs_q_agreement`, `peak_gpu_memory_gb`. If `label_wait_seconds` is a sizeable fraction of `label_seconds`, the overlap is not happening (the GIL is not released where expected); report it rather than tune.
 - Buffer rows from the resume file:
 
 ```bash
@@ -829,7 +943,7 @@ EOF
 
 Expected: `(n_chunks, 4, 4) float32`, non-zero labels with magnitudes around the per-chunk distance change (centimetres) and occasional +2 jumps near success; expert rows `(4, 4)` zeros.
 
-- [ ] **Step 2: Record** the fidelity maxima, calibration, `label_seconds`, `seconds_per_env_step`, memory and the label statistics in `docs/heldout-results.md` next to the run A entry.
+- [ ] **Step 2: Record** in `docs/heldout-results.md` next to the run A entry: the two fidelity results, the calibration, `label_seconds`, `label_wait_seconds`, `seconds_per_env_step`, memory, the label statistics, and the interior-ball geometry caveat: relative to the microwave body origin the cavity spans x ∈ [−0.1435, 0.0635], y ∈ [−0.088, 0.0805] with the floor at z = 0.024, so the 0.12 m ball from the mug origin misses about 2.5 cm of the far floor and includes about 3 cm beyond the door opening; the +2 success term carries the goal.
 
 - [ ] **Step 3: Stop run A** (keep its run directory and W&B run; it is the reference for the Q-target recipe):
 
@@ -847,11 +961,12 @@ Copy `expert_features.pt` into `$DICE_DATA/runs/dice-t9-plus-m4-pool-cf/` first.
 
 ## Self-review notes
 
-- Spec coverage: section 2 run / recipe → Task 7 launch command and Task 1 validation; label per chunk (shadow, 16 candidates, base actions, physics only, φ difference, mean over K, (M, K) float32 stored) → Tasks 5 (`label_plans`), 3 (buffer), 6 (storage) and 4 (mean over K as the target); φ for task 9 with startup calibration → Task 2 (door limits from the model, interior = microwave body position per the brief); critic unchanged architecture, label target, mean readout, Q target still logged → Task 4; what stays fixed → no task touches the actor, Q updates, sampler, reset draw or evaluation protocols; shadow per episode with the live kwargs, reset once, state-driven, live never restored → Tasks 5 and 6 (`make_shadow`, `sync_shadow`, per-episode construction); logged diagnostics → Task 6 (`label_agreement_with_q`, within / across spreads, executed minus mean, `label_seconds`, per-episode logs unchanged); cost measured in the smoke → Task 7; section 4 fidelity check (20 chunks, 1 mm, door within 0.02 rad as the brief's substitute for 1°) → Tasks 5 and 6 with the controller goal copied along with the state as section 4 anticipates; section 6 code list → Tasks 1–6 and `train.sh --plan-target`; section 6 tests (progress on hand-built poses, `label_plans` on a stub environment, the plan-critic update on stored labels, fingerprint, default recipe unchanged) → Tasks 2, 5, 4, 1 and the `plain` smoke assertions in Task 6. Not in this plan: the offline measurements and held-out evaluations of section 5, which the spec schedules after 80k / 320k.
-- Placeholder scan: every code step carries the code; the only deferred item is the `use_camera_obs` fallback, named as a follow-up in Task 7 with the reason it is not patched on the box.
-- Type consistency: `label_plans(shadow, live, candidates, first_chunk, norm, layout, calibration)` has the same signature in Task 5, the Task 6 call site and the Task 6 monkeypatch; `shadow_fidelity(env, shadow, layout, act, observation, chunks)` in Task 5 and the Task 6 call and monkeypatch (the call omits `chunks`, so the monkeypatch's five-argument lambda matches); `calibrate(task_id, inner, layout, initial)` in Tasks 2, 6; `progress(calibration, layout, before, after, success)` in Tasks 2, 5; `update_plan_critic(..., plan_labels=None)` in Tasks 4, 6; `make_shadow(task_id, suite, init_states, plus, seed)` in Tasks 5, 6; `plan_labels` is numpy (M, K) float32 from `label_plans`, in the row, and torch (B, M, K) from `sample`.
-- Bit-for-bit with `plan_target "q"`: the protocol and checkpoint `layout` are unchanged; `rank_plans` executes the same `plan_critic(state.expand, pools)` min readout; `update_plan_critic` computes the same target and returns the same keys; the loop's `q_all` is the same expression split over two names; `plan_labels` enters the row only under rollout and the buffer default is zeros that the `"q"` update ignores; the shadow, calibration and fidelity code runs only when `calibration is not None`, which requires `plan_target == "rollout"`; the probe block only binds the reset's return value.
-- RNG: `make_shadow` resets inside `capture_rng()` / `restore_rng()`; the startup fidelity rollout runs inside the probe's existing RNG capture; `label_plans` draws nothing.
+- Spec coverage: section 2 run / recipe → Task 7 launch command and Task 1 validation; label per chunk (shadow, 16 candidates, base actions, physics only, φ difference, mean over K, (M, K) float32 stored) → Tasks 5 (`label_plans` on the direct robosuite path with image observables disabled), 3 (buffer), 6 (storage, labelling thread) and 4 (mean over K as the target); φ for task 9 with startup calibration → Task 2 (door limits from the model, interior = microwave body position per the brief); critic unchanged architecture, label target, mean readout, Q target still logged → Task 4; what stays fixed → no task touches the actor, Q updates, sampler, reset draw or evaluation protocols; shadow per episode with the live kwargs, reset once, state-driven from a snapshot, live never restored → Tasks 5 and 6; logged diagnostics → Task 6 (`label_agreement_with_q`, the within and across spreads logged as two values rather than the spec's ratio, executed minus mean, `label_seconds`, `label_wait_seconds`; per-episode logs unchanged); cost measured in the smoke → Task 7; section 4 fidelity check (20 chunks, 1 mm, 1° on the body orientations and the door) → Tasks 5 and 6, plus the 3-chunk check on a layout variant, with the controller goal copied along with the state as section 4 anticipates; section 6 code list → Tasks 1–6 and `train.sh --plan-target`; section 6 tests (progress on hand-built poses, `label_plans` on a stub environment, the plan-critic update on stored labels, fingerprint, default recipe unchanged) → Tasks 2, 5, 4, 1 and the `plain` smoke assertions in Task 6. Not in this plan: the offline measurements and held-out evaluations of section 5, which the spec schedules after 80k / 320k; `script/lingbot_eval_modal.py` building its eval config without `plan_candidates` (pre-existing for M = 4 checkpoints).
+- Placeholder scan: every code step carries the code; nothing is deferred to the box except reading measurements.
+- Type consistency: `label_plans(shadow, snapshot, before, candidates, first_chunk, norm, layout, calibration)` has the same signature in Task 5, the Task 6 `submit` (through `_timed`) and the Task 6 monkeypatch; `shadow_fidelity(env, shadow, layout, act, observation, chunks)` in Task 5, both Task 6 calls and the monkeypatch (which accepts `chunks`); `capture_live(live)` in Tasks 5, 6; `calibrate(task_id, inner, layout, initial)` in Tasks 2, 6; `progress(calibration, layout, before, after, success)` in Tasks 2, 5; `update_plan_critic(..., plan_labels=None)` in Tasks 4, 6; `make_shadow(task_id, suite, init_states, plus, seed)` in Tasks 5, 6; `plan_labels` is numpy (M, K) float32 from `label_plans`, in the row, and torch (B, M, K) from `sample`; the fidelity result keys are `position_m`, `angle_rad`, `chunks` in Tasks 5, 6, 7.
+- Bit-for-bit with `plan_target "q"`: the protocol and checkpoint `layout` are unchanged; `rank_plans` executes the same `plan_critic(state.expand, pools)` min readout; `update_plan_critic` computes the same target and returns the same keys; the loop's `q_all` is the same expression split over two names; `plan_labels` enters the row only under rollout and the buffer default is zeros that the `"q"` update ignores; the executor, shadow, snapshot, calibration and fidelity code run only when `calibration is not None`, which requires `plan_target == "rollout"` (pinned by the `pools == [{"max_workers": 1}]` assertion after the `plain` run); the probe block only binds the reset's return value.
+- Threading: the worker reads only the snapshot, the shadow and cpu tensors; the main thread never touches the shadow while a future is pending; `future.result()` precedes `buffer.add_online`, so rows and training order are unchanged; a pending future is waited for before the shadow is closed; the test's stub labeller is synchronous and joined before any assertion.
+- RNG: `make_shadow` resets inside `capture_rng()` / `restore_rng()`; both startup fidelity rollouts run inside the probe's RNG capture; `label_plans` draws nothing.
 - Fingerprint: `plan_target` enters `protocol()` whenever it is `"rollout"`, so `test_load_resume_rejects_recipe_mismatch` refuses a resume across the change; `test_config_plan_target_enters_the_fingerprint_only_for_rollout` pins the default protocol at 78 keys.
-- Verified from source: robosuite `MjSim.get_state` / `set_state` / `forward`, `Controller.update(force=True)`, OSC `set_goal` goal_ori behaviour and `reset_goal`, `PandaGripper.format_action` ramp (`~/.cache/uv/git-v0/checkouts/79abe6cb204f004b/c848ca8`); robosuite `MujocoEnv.step` done check; LIBERO `ControlEnv(horizon=1000, ignore_done=False)`, `regenerate_obs_from_state` pattern, task 9 bddl `(Open microwave_1)` init and `(In white_yellow_mug_1 microwave_1_heating_region) (Close microwave_1)` goal, `microwave.xml` joint range `-2.094 0` and heating-region site (LIBERO copy at `/Users/desmondzee/Hardware/ICL-so101/third_party/LIBERO`, not the pinned GB10 install); LeRobot `LiberoEnv.step` / `reset` / `_format_raw_obs` (`.cache/lerobot`).
-- Box-only checks (Task 7): the shadow's determinism against the live env (the fidelity maxima), the recorded door calibration direction, the LIBERO-Plus install's `horizon` / `ignore_done` values, and the label cost.
+- Verified from source: robosuite `MjSim.get_state` / `set_state` / `forward`, `MjSimState.from_flattened` (`na == 0`), `MjData` attribute delegation, `Controller.update(force=True)`, `initial_joint`, OSC `set_goal` goal_ori behaviour and `reset_goal`, `PandaGripper.format_action` ramp, `MujocoEnv.step` done check, `Observable.update` rendering and `modality` / `set_enabled`, `use_camera_obs` consulted only at observable creation (`~/.cache/uv/git-v0/checkouts/79abe6cb204f004b/c848ca8`); LIBERO `ControlEnv(horizon=1000, ignore_done=False)`, `OffScreenRenderEnv.step` forwarding, `check_success`, `regenerate_obs_from_state` pattern, task 9 bddl `(Open microwave_1)` init and `(In white_yellow_mug_1 microwave_1_heating_region) (Close microwave_1)` goal, `microwave.xml` joint range `-2.094 0` and heating-region site (LIBERO copy at `/Users/desmondzee/Hardware/ICL-so101/third_party/LIBERO`, not the pinned GB10 install); LeRobot `LiberoEnv.step` / `reset` / `_format_raw_obs` (`.cache/lerobot`).
+- Box-only checks (Task 7): the shadow's determinism against the live env (the fidelity maxima on the base task and the layout variant), the recorded door calibration direction, the LIBERO-Plus install's `horizon` / `ignore_done` values, the physics-only label cost and the overlap (`label_wait_seconds`).
