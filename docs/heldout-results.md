@@ -216,6 +216,15 @@ Targets: max over K candidates of min-ensemble Q(s, p, a_base + actor) for every
 
 Critic self-consistency: ranking the stored plans with Q heads 1–5 and heads 6–10 separately, the two halves agree on the argmax plan 0.63 of the time and each captures 0.88 (160k) / 0.90 (320k) of the value under the other; the live V_plan on the 320k buffer (in-sample): agreement 0.55, captured 0.81. Over all online rows (the buffer does not record which chunks used a random plan), episodes whose executed plan was the final critic's argmax had mean Monte Carlo return 0.67 (160k) / 0.70 (320k) against 0.37 / 0.39 otherwise; this split is confounded by time in training and by Q having been trained on those returns.
 
+Q ensembles on disjoint data (320k buffer, 20,581 online rows, last 20% held out by time; Jarvis CPU, 2026-10-16). Ten heads of the recipe's width regressed onto the stored Monte Carlo return of the executed (s, p, a) for 2,000 steps, two replicas per variant; plans on the held-out rows ranked by max over K of the min over heads with the live actor, as in training. Held-out correlation with the return: 0.74 for all three variants (the live TD critic: 0.96). Correlation of the across-head spread with the absolute error on held-out rows: 0.43–0.47 shared rows, 0.49–0.53 bootstrap resamples, 0.53 disjoint tenths (live: 0.48).
+
+| ensemble | replica agreement on the best plan | value captured under the other replica | agreement with the live critic |
+|---|---|---|---|
+| live TD critic, heads 1–5 vs 6–10 | 0.63 | 0.89 | 0.80 (half vs full) |
+| MC regression, all heads on all rows | 0.60 | 0.83 | 0.36 |
+| MC regression, bootstrap resample per head | 0.46 | 0.65 | 0.35 |
+| MC regression, disjoint tenth per head | 0.42 | 0.45 | 0.33 |
+
 ### Implementation checks (Jarvis, 2026-10-13)
 
 1,100-step smoke: plan-critic loss 4.6 → 0.21 and TD loss 1.86 → 0.05 over nine update logs. On real weights, across-plan base-action spread 0.05–0.06 vs within-plan 0.013–0.019 on the first chunk of three starts; plan pools differ across plans by about 10% of their magnitude. Batched sampling equals the single-plan pass bit for bit at M = 1 and differs from the looped reference at M = 2 by 2 bf16 ulps after the first pass, 0.35 in the final latent. One video pass: 175 ms at CFG batch 2 (78 ms GEMM), 606 ms at batch 8 (392 ms GEMM); batching four plans is 10% faster than looping (6.7 vs 7.4 s per chunk; 1.9 s at M = 1).
