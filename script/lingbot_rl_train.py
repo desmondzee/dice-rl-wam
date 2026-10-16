@@ -187,11 +187,11 @@ def label_plans(shadow, snapshot, before, candidates, first_chunk, norm, layout,
     from script.lingbot_eval import decode_action
     twin = shadow._env.env
     plans, k = candidates.shape[:2]
-    env_actions = slice_env_actions(candidates.detach().float().cpu().reshape(plans * k, HORIZON, ACTION_DIM), first_chunk)
+    env_actions = slice_env_actions(candidates.reshape(plans * k, HORIZON, ACTION_DIM), first_chunk)
     labels = np.zeros(plans * k, np.float32)
     for index in range(plans * k):
         sync_shadow(snapshot, twin)
-        if index == 0 and not np.allclose(before, object_state(twin, layout), atol=1e-6):
+        if index == 0 and not np.allclose(before, object_state(twin, layout), rtol=0.0, atol=FIDELITY_POSITION_M):
             raise RuntimeError("shadow state mismatch")
         success = False
         for step in range(env_actions.shape[1]):

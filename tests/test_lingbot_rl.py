@@ -1386,9 +1386,9 @@ class _TwinInner:
         self.drift, self.steps = drift, 0
 
     def step(self, action):
+        self.sim.forward()
         self.sim.data.qpos[:3] += 0.01 * action[:3] + self.drift
         self.sim.data.qpos[3] += 0.5 * max(float(action[6]), 0.0)
-        self.sim.forward()
         self.steps += 1
         return {}, 0.0, False, {}
 
@@ -1430,14 +1430,22 @@ def test_label_plans_scores_every_candidate_from_the_live_snapshot_with_the_chun
     snapshot, before = capture_live(live._env.env), object_state(live._env.env, _TWIN_LAYOUT)
     labels = label_plans(shadow, snapshot, before, candidates, True, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
     assert labels.shape == (2, 2) and labels.dtype == np.float32
-    assert labels[0, 0] == pytest.approx(-0.12, abs=1e-4) and labels[0, 1] == labels[0, 0]
-    assert labels[1, 0] == pytest.approx(0.12, abs=1e-4) and labels[1, 1] == pytest.approx(2.04, abs=1e-4)
+    assert labels[0, 0] == pytest.approx(-0.11, abs=1e-4) and labels[0, 1] == labels[0, 0]
+    assert labels[1, 0] == pytest.approx(0.11, abs=1e-4) and labels[1, 1] == pytest.approx(2.03, abs=1e-4)
     assert shadow._env.env.steps == 12 + 12 + 12 + 4 and live._env.env.steps == 0 and live._env.env.sim.data.qpos[0] == 0.3
     assert float(shadow._env.env.robots[0].controller.initial_joint[0]) == 0.5
     later = label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
-    assert later[0, 0] == pytest.approx(-0.16, abs=1e-4) and later[1, 0] == pytest.approx(0.16, abs=1e-4)
+    assert later[0, 0] == pytest.approx(-0.15, abs=1e-4) and later[1, 0] == pytest.approx(0.15, abs=1e-4)
     with pytest.raises(RuntimeError, match="shadow state mismatch"):
         label_plans(shadow, snapshot, before + 1.0, candidates, True, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
+    live._env.env.step(np.array([0.05, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], np.float32))
+    snapshot, before = capture_live(live._env.env), object_state(live._env.env, _TWIN_LAYOUT)
+    assert float(snapshot["state"].qpos[0] - before[7]) == pytest.approx(5e-4, abs=1e-7)
+    assert label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION).shape == (2, 1)
+    live._env.env.step(np.array([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], np.float32))
+    snapshot, before = capture_live(live._env.env), object_state(live._env.env, _TWIN_LAYOUT)
+    with pytest.raises(RuntimeError, match="shadow state mismatch"):
+        label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
 
 
 def test_shadow_fidelity_measures_object_pose_gaps_per_chunk_and_gates_on_them(monkeypatch):
