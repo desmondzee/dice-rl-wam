@@ -35,3 +35,4 @@ task,policy,candidates,episodes,successes,success_rate,ci95_halfwidth,mean_steps
 0,"SFT step 400, 5 video / 10 action steps (shard 0 of 2: every other standard episode)",1,50,33,0.66,,410.0,,,5,10,,,,result/heldout/sft-step000400-v5e-1a10/task_00
 0,"SFT step 200, 5 video / 10 action steps (shard 0 of 2: every other standard episode)",1,50,38,0.76,,364.0,,,8,8,,,,result/heldout/sft-step000200-v5e-1a10/task_00
 0,"RL plan selection M=4 (V_plan ranked) + (s,a_base) residual with the filter at ε = −0.3, 240k, best-of-4, 5 / 10 sampler",4,100,96,0.96,0.038,309.0,48,48,23,2,46,4,0,result/heldout/dice-t0-plan-m4-step240000-k4-m4-v5e-1a10/task_00
+9,"RL plan selection M=4 (random plan) + (s,a_base) residual with the filter at ε = −0.3, 320k, best-of-4, 5 / 10 sampler",4,100,75,0.75,0.085,356.7,36,39,32,17,28,19,3,result/heldout/dice-t9-plan-m4-step320000-k4-m4-v5e-1a10-randomrank/task_09

@@ -179,8 +179,9 @@ Sampler: 5 video denoising steps (plus the cache write pass) and 10 action steps
 | 9 | plan selection + residual, 160k (`dice-t9-plan-m4`) | 79 | 0.79 | 338 | 30 / 11 | 30 · 19 · 1 |
 | 9 | same 160k checkpoint, plan chosen by Q over all 16 residual candidates (`--plan-ranker q`) | 74 | 0.74 | 340 | 30 / 16; 14 / 19 vs the V_plan-ranked run | 28 · 18 · 4 |
 | 9 | plan selection + residual, 320k (`dice-t9-plan-m4`) | 80 | 0.80 | 335 | 32 / 12; 13 / 12 vs its own 160k | 33 · 14 · 3 |
+| 9 | same 320k checkpoint, plan chosen at random, Q over the plan's 4 residual candidates (`--plan-ranker random`) | 75 | 0.75 | 357 | 32 / 17; 12 / 17 vs the V_plan-ranked 320k run; 18 / 17 vs the Q-ranked 160k run | 28 · 19 · 3 |
 
-Episode wall time on a GB10 at 5 / 10: 65 s for the SFT prior, 120–130 s at M = 4 with V_plan ranking, 190 s with Q ranking over 16 candidates.
+Episode wall time on a GB10 at 5 / 10: 65 s for the SFT prior, 120–130 s at M = 4 with V_plan ranking, 190 s with Q ranking over 16 candidates. The random-plan run (143 s per episode) isolates V_plan's ranking from the residual and the candidate choice: 12 / 17 paired against V_plan on the same 100 episodes.
 
 ### Training signals
 
