@@ -251,6 +251,16 @@ The same for V_plan's own ten heads (its target unchanged: max over candidates o
 
 V_plan's head spread is half of Q's (0.024 vs 0.046 on task 9; 0.032 vs 0.052 on task 0).
 
+Fresh V_plan refits on each target (same buffers, 80 / 20 split by time, ten heads of the recipe's width, 3,000 steps, two replicas; mean readout; CPU, 2026-10-16). Out-of-sample agreement is with the Q mean-max ranker on the held-out rows; outcome link as above.
+
+| refit target | task 9: replica agreement / agreement with Q-mean / outcome link | task 0: replica agreement / agreement with Q-mean / captured / outcome link |
+|---|---|---|
+| min over heads, max over candidates (recipe) | 0.79 / 0.40 / +0.08 | 0.77 / 0.45 / 0.64 / −0.06 |
+| mean over heads, max over candidates | 0.73 / 0.39 / +0.05 | 0.79 / 0.45 / 0.60 / −0.17 |
+| mean over heads, mean over candidates | (task 9 pending) | 0.79 / 0.45 / 0.61 / −0.16 |
+
+The live V_plan on the same rows: agreement with Q-mean 0.55 (task 9) / 0.48 (task 0). Chance is 0.25.
+
 ΔV against ΔH for the two V_plan runs (2026-10-16; figures `result/analysis/dvdh/dvdh_offline.png`, `dvdh_online.png`). Definitions as in the trainer's replay metrics: plan ΔV = V_plan(executed plan) − mean over the 4 plans; plan ΔH = mean over pool dimensions of log-std over all 4 plans' pools minus log-std over the executed pools; action ΔV = Q(a_base + residual) − Q(a_base) over the 4 candidates; action ΔH = binned-entropy(base candidates) − binned-entropy(residual actions). Online (live critic, logged every 5k env steps) and recomputed per window of 1,000 chunks with the final critic.
 
 | run | plan ΔV online, first → last | plan ΔV with the Q-mean ranker as judge (offline, last windows) | plan ΔH, online and offline | action ΔV online | action ΔH online | action Δlog-std online |
