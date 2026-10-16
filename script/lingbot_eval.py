@@ -322,7 +322,7 @@ def aggregate_results(rows, task_ids=TASK_IDS, episodes_per_task=20, expected=No
         "per_task": per_task}
 
 
-def load_policy(checkpoint, model_path, architecture, video_exec_step=-1, video_steps=20, action_steps=50):
+def load_policy(checkpoint, model_path, architecture, video_exec_step=-1, video_steps=20, action_steps=50, video_guidance=5.0):
     import torch
     from safetensors.torch import load_file
     from lerobot.configs.types import FeatureType, PolicyFeature
@@ -348,7 +348,7 @@ def load_policy(checkpoint, model_path, architecture, video_exec_step=-1, video_
         attn_mode="torch", image_hflip=False, camera_layout="width_concat", obs_cam_keys=list(CAMERAS),
         height=128, width=128, action_per_frame=4, frame_chunk_size=4, attn_window=30,
         num_inference_steps=video_steps, video_exec_step=video_exec_step, action_num_inference_steps=action_steps,
-        guidance_scale=5.0, action_guidance_scale=1.0, snr_shift=5.0, action_snr_shift=0.05,
+        guidance_scale=video_guidance, action_guidance_scale=1.0, snr_shift=5.0, action_snr_shift=0.05,
         used_action_channel_ids=list(range(7)), save_predicted_video=False,
     )
     policy = CachedTextPolicy(config)
@@ -430,7 +430,7 @@ def evaluate(config, prepared_path, output_dir, run_name, resume=False, commit=N
             return summary
         torch.cuda.reset_peak_memory_stats()
         policy = load_policy(checkpoint, prepared["model_path"], metadata["architecture"], config.video_exec_step,
-                             config.video_steps, config.action_steps)
+                             config.video_steps, config.action_steps, config.video_guidance)
         for task in tasks:
             task_id = task["task_id"]
             pending = [entry for entry in plans[task_id] if (task_id, entry["episode_index"]) not in done]

@@ -47,12 +47,15 @@ class EvalConfig:
     video_exec_step: int = -1
     video_steps: int = 20
     action_steps: int = 50
+    video_guidance: float = 5.0
 
     def validate(self):
         validate_name(self.source_run)
         if self.stage not in ("smoke", "eval", "heldout"):
             raise ValueError("Evaluation stage must be smoke, eval, or heldout")
         validate_sampler_steps(self.video_steps, self.action_steps, self.video_exec_step)
+        if type(self.video_guidance) is not float or not 1.0 <= self.video_guidance <= 10.0:
+            raise ValueError("video_guidance must be a float in [1, 10]")
         if not self.task_ids or any(task not in TASK_IDS for task in self.task_ids) or len(set(self.task_ids)) != len(self.task_ids):
             raise ValueError("task_ids must be distinct LIBERO-10 task ids")
         if type(self.shards) is not int or type(self.shard) is not int or not 0 <= self.shard < self.shards:
@@ -102,7 +105,7 @@ class EvalConfig:
             "video_steps": self.video_steps,
             "action_steps": self.action_steps,
             "video_exec_step": self.video_exec_step,
-            "video_guidance": 5.0,
+            "video_guidance": self.video_guidance,
             "action_guidance": 1.0,
             "snr_shift": 5.0,
             "action_snr_shift": 0.05,

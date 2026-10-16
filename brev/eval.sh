@@ -4,7 +4,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${DICE_ENV_FILE:-$HERE/env.sh}"
 [ -f "$ENV_FILE" ] || { echo "copy brev/env.example to brev/env.sh and fill it in" >&2; exit 1; }
 source "$ENV_FILE"
-USAGE="usage: eval.sh <sft|run-name> <step> <candidates> <shard> <shards> [--video-steps V] [--video-exec-step E] [--action-steps A] [--residual-input z|base|z_base] [--plans M] [--plan-ranker v_plan|q|random] [--task 9] [--no-tmux]"
+USAGE="usage: eval.sh <sft|run-name> <step> <candidates> <shard> <shards> [--video-steps V] [--video-exec-step E] [--action-steps A] [--video-guidance G] [--residual-input z|base|z_base] [--plans M] [--plan-ranker v_plan|q|random] [--task 9] [--no-tmux]"
 RUN="${1:?$USAGE}"
 STEP="${2:?$USAGE}"
 K="${3:?$USAGE}"
@@ -14,6 +14,7 @@ shift 5
 VIDEO_STEPS=20
 VIDEO_EXEC_STEP=-1
 ACTION_STEPS=50
+VIDEO_GUIDANCE=5
 RESIDUAL_INPUT=z
 PLANS=1
 RANKER=v_plan
@@ -24,6 +25,7 @@ while [ $# -gt 0 ]; do
     --video-steps) VIDEO_STEPS="$2"; shift 2 ;;
     --video-exec-step) VIDEO_EXEC_STEP="$2"; shift 2 ;;
     --action-steps) ACTION_STEPS="$2"; shift 2 ;;
+    --video-guidance) VIDEO_GUIDANCE="$2"; shift 2 ;;
     --residual-input) RESIDUAL_INPUT="$2"; shift 2 ;;
     --plans) PLANS="$2"; shift 2 ;;
     --plan-ranker) RANKER="$2"; shift 2 ;;
@@ -48,6 +50,7 @@ STEP6="$(printf '%06d' "$STEP")"
 TT="$(printf '%02d' "$TASK")"
 SUFFIX=""
 [ "$VIDEO_STEPS" = 20 ] && [ "$VIDEO_EXEC_STEP" = -1 ] && [ "$ACTION_STEPS" = 50 ] || SUFFIX="-v${VIDEO_STEPS}e${VIDEO_EXEC_STEP}a${ACTION_STEPS}"
+[ "$VIDEO_GUIDANCE" = 5 ] || SUFFIX="$SUFFIX-g${VIDEO_GUIDANCE}"
 if [ "$RUN" = "sft" ]; then
   POLICY="sft-step$STEP6$SUFFIX"
   [ -f "$DICE_DATA/sft/libero30-sft/checkpoints/step_$STEP6/norm_stats.json" ] || { echo "missing SFT checkpoint step_$STEP6 under $DICE_DATA/sft" >&2; exit 1; }
@@ -61,7 +64,7 @@ fi
 OUT="$DICE_DATA/heldout/$POLICY/task_$TT"
 mkdir -p "$OUT"
 if [ "$RUN" = "sft" ]; then
-  CONFIG="$(python3 -c 'import json,sys; print(json.dumps({"source_run": "libero30-sft", "checkpoint_step": int(sys.argv[1]), "stage": "heldout", "task_ids": [int(sys.argv[2])], "shard": int(sys.argv[3]), "shards": int(sys.argv[4]), "video_exec_step": int(sys.argv[5]), "video_steps": int(sys.argv[6]), "action_steps": int(sys.argv[7])}))' "$STEP" "$TASK" "$SHARD" "$SHARDS" "$VIDEO_EXEC_STEP" "$VIDEO_STEPS" "$ACTION_STEPS")"
+  CONFIG="$(python3 -c 'import json,sys; print(json.dumps({"source_run": "libero30-sft", "checkpoint_step": int(sys.argv[1]), "stage": "heldout", "task_ids": [int(sys.argv[2])], "shard": int(sys.argv[3]), "shards": int(sys.argv[4]), "video_exec_step": int(sys.argv[5]), "video_steps": int(sys.argv[6]), "action_steps": int(sys.argv[7]), "video_guidance": float(sys.argv[8])}))' "$STEP" "$TASK" "$SHARD" "$SHARDS" "$VIDEO_EXEC_STEP" "$VIDEO_STEPS" "$ACTION_STEPS" "$VIDEO_GUIDANCE")"
   ARGS=(-m script.lingbot_eval run --config-json "$CONFIG" --prepared-path "$PREPARED" --output-dir "$OUT" --run-name "$POLICY-task$TT")
 else
   CONFIG="$(python3 -c 'import json,sys; print(json.dumps({"task_ids": [int(sys.argv[1])], "residual_input": sys.argv[2], "video_exec_step": int(sys.argv[3]), "video_steps": int(sys.argv[4]), "action_steps": int(sys.argv[5]), "plan_candidates": int(sys.argv[6])}))' "$TASK" "$RESIDUAL_INPUT" "$VIDEO_EXEC_STEP" "$VIDEO_STEPS" "$ACTION_STEPS" "$PLANS")"

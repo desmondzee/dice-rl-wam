@@ -383,9 +383,9 @@ def test_shard_evaluation_persists_resumes_and_never_touches_wandb(tmp_path, mon
         f"episode_{index:03d}.json" for index in (0, 1, 4, 5, 8, 9, 12, 13, 16, 17)]
     assert module.read_json(output / "episodes/task_04/episode_000.json")["video"] == "videos/task_04.mp4"
     assert sys.modules["wandb"] is None
-    assert loaded and all(args[3:] == (-1, 20, 50) for args in loaded)
+    assert loaded and all(args[3:] == (-1, 20, 50, 5.0) for args in loaded)
     early = module.evaluate(replace(cfg, shard=2, video_exec_step=10, video_steps=12, action_steps=8), prepared_path, output, "test-run")
-    assert early["complete"] and loaded[-1][3:] == (10, 12, 8) and len(visited) == 30
+    assert early["complete"] and loaded[-1][3:] == (10, 12, 8, 5.0) and len(visited) == 30
     recorded = module.read_json(output / "settings" / "shard_2.json")["config"]
     assert recorded["video_exec_step"] == 10 and recorded["protocol"]["video_exec_step"] == 10
     assert (recorded["video_steps"], recorded["action_steps"]) == (12, 8)
@@ -657,3 +657,12 @@ def test_results_report_does_not_overwrite_existing_reports(tmp_path):
         create_report(root)
     assert (root / "report.html").read_text() == "user content"
     assert not (root / "report_data.json").exists()
+
+
+def test_video_guidance_enters_the_protocol_and_is_validated():
+    from script.lingbot_eval_config import EvalConfig
+    assert EvalConfig(stage="heldout").protocol()["video_guidance"] == 5.0
+    assert EvalConfig(stage="heldout", video_guidance=3.0).validate().protocol()["video_guidance"] == 3.0
+    with pytest.raises(ValueError):
+        EvalConfig(stage="heldout", video_guidance=0.5).validate()
+
