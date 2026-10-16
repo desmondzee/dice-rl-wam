@@ -453,7 +453,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture, config.video_exec_step,
                                   config.video_steps, config.action_steps)
     model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon,
-                              plan_candidates=config.plan_candidates, state_features=config.state_features, proprio=config.proprio)
+                              plan_candidates=config.plan_candidates, state_features=config.state_features, proprio=config.proprio,
+                              plan_target=config.plan_target)
     policy.residual_model = model
     policy.eval_candidates = config.k_candidates
     policy.eval_plans = config.plan_candidates
@@ -723,7 +724,8 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
         layout = DiceResidualModel.layout_of(payload)
         config = replace(config, **layout).validate()
         model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon,
-                                  plan_candidates=config.plan_candidates, state_features=config.state_features, proprio=config.proprio)
+                                  plan_candidates=config.plan_candidates, state_features=config.state_features, proprio=config.proprio,
+                                  plan_target=config.plan_target)
         model.load_inference_state_dict(payload)
     except Exception as exc:
         raise RuntimeError(f"Failed to load residual weights {residual_path}: {exc}") from exc

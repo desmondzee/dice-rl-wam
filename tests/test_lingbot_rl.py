@@ -453,6 +453,38 @@ def test_plan_critic_regresses_onto_max_candidate_min_q_and_leaves_q_and_actor_a
     assert model.rank_plans(state[:1], pools[0]) == int(values.reshape(-1).argmax())
 
 
+def test_plan_critic_trains_on_rollout_labels_and_ranks_by_the_mean_readout():
+    torch.manual_seed(0)
+    model = DiceResidualModel(device="cpu", residual_input="base", plan_candidates=2, plan_target="rollout")
+    for parameter in model.critic.parameters():
+        torch.nn.init.normal_(parameter, std=0.05)
+    state, pools = torch.randn(5, STATE_DIM), torch.randn(5, 2, STATE_DIM)
+    z_all = torch.randn(5, 4, HORIZON, ACTION_DIM)
+    a_base = mask_unused_dof(torch.randn(5, 2, 4, HORIZON, ACTION_DIM))
+    labels = torch.randn(5, 2, 4)
+    with torch.no_grad():
+        flat_state = state[:, None, None].expand(5, 2, 4, STATE_DIM).reshape(-1, STATE_DIM)
+        flat_pool = pools[:, :, None].expand(5, 2, 4, STATE_DIM).reshape(-1, STATE_DIM)
+        flat_z = z_all[:, None].expand(5, 2, 4, HORIZON, ACTION_DIM).reshape(-1, HORIZON, ACTION_DIM)
+        flat_base = a_base.reshape(-1, HORIZON, ACTION_DIM)
+        action = apply_residual(flat_base, model.actor(flat_state, flat_z, flat_base))
+        q_target = model.critic(model.critic_state(flat_state, flat_pool), action).reshape(5, 2, 4).max(dim=2).values
+    with pytest.raises(ValueError):
+        model.update_plan_critic(state, pools, z_all, a_base)
+    losses = [model.update_plan_critic(state, pools, z_all, a_base, labels)["plan_critic_loss"] for _ in range(30)]
+    info = model.update_plan_critic(state, pools, z_all, a_base, labels)
+    assert losses[-1] < losses[0] and info["plan_target_mean"] == pytest.approx(float(labels.mean()), abs=1e-5)
+    assert info["plan_target_q_mean"] == pytest.approx(float(q_target.mean()), abs=1e-5)
+    assert info["plan_label_vs_q_agreement"] == pytest.approx(float((labels.mean(-1).argmax(1) == q_target.argmax(1)).float().mean()))
+    heads = torch.stack(model.plan_critic(state[:1].expand(2, -1), pools[0], return_all=True))
+    assert model.rank_plans(state[:1], pools[0]) == int(heads.mean(dim=0).reshape(-1).argmax())
+    payload = model.inference_state_dict()
+    assert payload["layout"]["plan_target"] == "rollout" and DiceResidualModel.layout_of(payload)["plan_target"] == "rollout"
+    assert "plan_target" not in DiceResidualModel(device="cpu", plan_candidates=2).inference_state_dict()["layout"]
+    with pytest.raises(ValueError, match="layout mismatch"):
+        DiceResidualModel(device="cpu", residual_input="base", plan_candidates=2).load_inference_state_dict(payload)
+
+
 def _replay_row(reward, done, expert=False):
     return {
         "s": np.zeros(STATE_DIM, np.float32),

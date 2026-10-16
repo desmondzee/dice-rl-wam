@@ -116,10 +116,12 @@ class PlanCritic(nn.Module):
 
 
 class DiceResidualModel:
-    def __init__(self, device="cpu", residual_input="z", epsilon=EPSILON, plan_candidates=1, state_features="pool", proprio=False):
+    def __init__(self, device="cpu", residual_input="z", epsilon=EPSILON, plan_candidates=1, state_features="pool", proprio=False,
+                 plan_target="q"):
         self.device = device
         self.epsilon = epsilon
         self.plans = int(plan_candidates)
+        self.plan_target = plan_target
         self.features = state_features
         self.proprio = bool(proprio)
         self.state_dim = STATE_DIM * (2 if state_features == "struct" else 1) + (PROPRIO_DIM if self.proprio else 0)
@@ -162,7 +164,10 @@ class DiceResidualModel:
     @staticmethod
     def layout_of(payload):
         layout = payload.get("layout", {})
-        return {"state_features": layout.get("state_features", "pool"), "proprio": bool(layout.get("proprio", False))}
+        out = {"state_features": layout.get("state_features", "pool"), "proprio": bool(layout.get("proprio", False))}
+        if "plan_target" in layout:
+            out["plan_target"] = layout["plan_target"]
+        return out
 
     def critic_state(self, state, pool):
         if self.plans == 1:
@@ -182,7 +187,10 @@ class DiceResidualModel:
     def rank_plans(self, state, pools):
         with torch.no_grad():
             pools = mlp_float(pools)
-            return int(self.plan_critic(mlp_float(state).expand(pools.shape[0], -1), pools).reshape(-1).argmax())
+            state = mlp_float(state).expand(pools.shape[0], -1)
+            if self.plan_target == "rollout":
+                return int(torch.stack(self.plan_critic(state, pools, return_all=True)).mean(dim=0).reshape(-1).argmax())
+            return int(self.plan_critic(state, pools).reshape(-1).argmax())
 
     def n_step_target(self, reward, done, next_critic_state, z_next_all, a_base_next_all, n_steps):
         with torch.no_grad():
@@ -261,7 +269,7 @@ class DiceResidualModel:
             "q_overestimation_online": float((overestimation * online).sum() / online.sum().clamp(min=1.0)),
         }
 
-    def update_plan_critic(self, state, pools_all, z_all, plan_a_base_all):
+    def update_plan_critic(self, state, pools_all, z_all, plan_a_base_all, plan_labels=None):
         state, pools_all = mlp_float(state), mlp_float(pools_all)
         z_all, plan_a_base_all = mlp_float(z_all), mlp_float(plan_a_base_all)
         batch, plans, k = plan_a_base_all.shape[:3]
@@ -273,6 +281,14 @@ class DiceResidualModel:
             flat_base = plan_a_base_all.reshape(-1, HORIZON, ACTION_DIM)
             action = apply_residual(flat_base, self.actor(flat_state, flat_z, flat_base))
             target = self.critic(self.critic_state(flat_state, flat_pool), action).reshape(batch, plans, k).max(dim=2).values
+        extra = {}
+        if self.plan_target == "rollout":
+            if plan_labels is None:
+                raise ValueError("rollout plan target needs plan_labels")
+            labels = mlp_float(plan_labels).mean(dim=-1)
+            extra = {"plan_target_q_mean": float(target.mean()),
+                     "plan_label_vs_q_agreement": float((labels.argmax(dim=1) == target.argmax(dim=1)).float().mean())}
+            target = labels
         preds = self.plan_critic(
             state[:, None].expand(batch, plans, sd).reshape(-1, sd), pools_all.reshape(-1, pd), return_all=True)
         loss = torch.stack([F.mse_loss(pred.reshape(batch, plans), target) for pred in preds]).sum()
@@ -282,7 +298,7 @@ class DiceResidualModel:
         self.plan_opt.step()
         self.plan_lr.step()
         return {"plan_critic_loss": float(loss.detach()), "v_plan_mean": float(torch.stack(preds).mean().detach()),
-                "plan_target_mean": float(target.mean())}
+                "plan_target_mean": float(target.mean()), **extra}
 
     def polyak_update(self):
         with torch.no_grad():
@@ -296,14 +312,16 @@ class DiceResidualModel:
             "target_critic": self.target_critic.state_dict(),
         }
         payload["layout"] = {"state_features": self.features, "proprio": self.proprio, "plan_candidates": self.plans}
+        if self.plan_target != "q":
+            payload["layout"]["plan_target"] = self.plan_target
         if self.plan_critic is not None:
             payload["plan_critic"] = self.plan_critic.state_dict()
         return payload
 
     def load_inference_state_dict(self, payload):
         layout = payload.get("layout")
-        if layout is not None and (layout["state_features"], bool(layout["proprio"]), int(layout.get("plan_candidates", self.plans))) \
-                != (self.features, self.proprio, self.plans):
+        if layout is not None and (layout["state_features"], bool(layout["proprio"]), int(layout.get("plan_candidates", self.plans)),
+                                   layout.get("plan_target", "q")) != (self.features, self.proprio, self.plans, self.plan_target):
             raise ValueError("residual checkpoint layout mismatch")
         self.actor.load_state_dict(payload["actor"])
         self.critic.load_state_dict(payload["critic"])
