@@ -251,3 +251,15 @@ Same 100 episodes with the 320k checkpoint choosing its plan at random (`--plan-
 By difficulty level (random-plan / V_plan successes of n): robot initial state 1: 6 / 4 of 7, 2: 12 / 14 of 20, 3: 2 / 3 of 6, 4: 1 / 3 of 10, 5: 1 / 2 of 9; layout 1: 17 / 14 of 26, 2: 7 / 5 of 12, 3: 4 / 8 of 10. Episode wall time 160 s.
 
 By LIBERO-Plus difficulty level (SFT / RL successes of n): robot initial state 1: 3 / 4 of 7, 2: 5 / 14 of 20, 3: 2 / 3 of 6, 4: 1 / 3 of 10, 5: 1 / 2 of 9; layout 1: 16 / 14 of 26, 2: 5 / 5 of 12, 3: 4 / 8 of 10. Episode wall time 155 s at M = 4. Raw results under `result/heldout-plus/<policy>/task_09/`.
+
+## Training under LIBERO-Plus perturbations, task 9 (GB10s, launched 2026-10-16 06:14 BST)
+
+Design: `docs/superpowers/specs/2026-10-16-ood-collection-design.md`; code at `1defbb1`. Two runs, prior frozen, same recipe and reset schedule, differing only in the critic and actor inputs: `dice-t9-plus-m4-pool` (Jarvis; image pools + proprioception) and `dice-t9-plus-m4-struct` (Watson; per-camera, per-latent-frame means + proprioception). Each episode draws, from a generator seeded by the run seed and the episode ordinal, one of: a standard initial state (on the LIBERO-Plus package, which lacks the base tasks, so the base bddl and stored states are appended to its suite; physically identical to the standard install, rendered frames differ by 0.36 / 255 mean absolute per pixel), a robot-initial-state training variant (28 of 42; simulator-sampled objects), or a layout training variant (26 of 39; stored state). Held-out variants: robot-init {642, 645, …, 681}, layout {1984, 1987, …, 2020}. Proprioception is the dataset's 8-float end-effector convention; on the box the environment matched the demonstrations' first frames to within 0.016 per entry. Stored per chunk for the offline study: per-camera per-frame means, the 32 state tokens, plan and state latents, proprioception, and the simulator poses of microwave_1, porcelain_mug_1 and white_yellow_mug_1 plus the microwave door joint (22 floats). Budget 320k env steps, checkpoints every 80k, decision at 240k.
+
+| smoke (4 episodes, 2,100 env steps) | peak GPU memory | seconds per env step | resume file |
+|---|---|---|---|
+| pool + proprio | 38.7 GB | 0.54 | 3.2 GB (608 expert rows + 134 online) |
+| struct + proprio | 47.8 GB | 0.56 | 10.3 GB (about 955 M critic parameters with Adam state) |
+
+The smokes drew reset kinds 0, 1, 0, 2, 1 with variants 673, 1989, 670, as the schedule predicts. Expert features rebuilt once under recipe v3 (2.3 GB).
+
