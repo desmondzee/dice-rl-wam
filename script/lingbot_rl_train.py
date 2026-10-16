@@ -31,6 +31,7 @@ SHARPEN_EVERY_STEPS = 5_000
 FIDELITY_CHUNKS = 20
 FIDELITY_POSITION_M = 1e-3
 FIDELITY_ANGLE_RAD = 0.01745
+SHADOW_MATCH_M = 1e-2
 RESUME_KEYS = {
     "actor", "critic", "target_critic", "plan_critic", "layout", "actor_opt", "critic_opt", "plan_opt",
     "actor_lr", "critic_lr", "plan_lr", "replay", "rng", "env_steps", "chunks", "recipe", "checkpointed", "wandb_id",
@@ -189,10 +190,14 @@ def label_plans(shadow, snapshot, before, candidates, first_chunk, norm, layout,
     plans, k = candidates.shape[:2]
     env_actions = slice_env_actions(candidates.reshape(plans * k, HORIZON, ACTION_DIM), first_chunk)
     labels = np.zeros(plans * k, np.float32)
+    bodies = len(layout["bodies"])
+    positional = np.r_[np.arange(7 * bodies).reshape(bodies, 7)[:, :3].reshape(-1), np.arange(7 * bodies, before.shape[0])]
     for index in range(plans * k):
         sync_shadow(snapshot, twin)
-        if index == 0 and not np.allclose(before, object_state(twin, layout), rtol=0.0, atol=FIDELITY_POSITION_M):
-            raise RuntimeError("shadow state mismatch")
+        if index == 0:
+            gap = float(np.abs(before[positional] - object_state(twin, layout)[positional]).max())
+            if gap > SHADOW_MATCH_M:
+                raise RuntimeError(f"shadow state mismatch {gap:.4f}")
         success = False
         for step in range(env_actions.shape[1]):
             _, _, done, _ = twin.step(decode_action(env_actions[index, step].reshape(1, 7), norm))

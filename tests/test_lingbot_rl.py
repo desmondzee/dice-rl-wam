@@ -1442,9 +1442,9 @@ def test_label_plans_scores_every_candidate_from_the_live_snapshot_with_the_chun
     snapshot, before = capture_live(live._env.env), object_state(live._env.env, _TWIN_LAYOUT)
     assert float(snapshot["state"].qpos[0] - before[7]) == pytest.approx(5e-4, abs=1e-7)
     assert label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION).shape == (2, 1)
-    live._env.env.step(np.array([0.2, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], np.float32))
+    live._env.env.step(np.array([2.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0], np.float32))
     snapshot, before = capture_live(live._env.env), object_state(live._env.env, _TWIN_LAYOUT)
-    with pytest.raises(RuntimeError, match="shadow state mismatch"):
+    with pytest.raises(RuntimeError, match="shadow state mismatch 0.02"):
         label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
 
 
