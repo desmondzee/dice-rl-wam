@@ -247,6 +247,15 @@ The same for V_plan's own ten heads (its target unchanged: max over candidates o
 
 V_plan's head spread is half of Q's (0.024 vs 0.046 on task 9; 0.032 vs 0.052 on task 0).
 
+ΔV against ΔH for the two V_plan runs (2026-10-16; figures `result/analysis/dvdh/dvdh_offline.png`, `dvdh_online.png`). Definitions as in the trainer's replay metrics: plan ΔV = V_plan(executed plan) − mean over the 4 plans; plan ΔH = mean over pool dimensions of log-std over all 4 plans' pools minus log-std over the executed pools; action ΔV = Q(a_base + residual) − Q(a_base) over the 4 candidates; action ΔH = binned-entropy(base candidates) − binned-entropy(residual actions). Online (live critic, logged every 5k env steps) and recomputed per window of 1,000 chunks with the final critic.
+
+| run | plan ΔV online, first → last | plan ΔV with the Q-mean ranker as judge (offline, last windows) | plan ΔH, online and offline | action ΔV online | action ΔH online | action Δlog-std online |
+|---|---|---|---|---|---|---|
+| task 9 (320k) | −0.005 → 0.037 (max 0.050) | 0.01 – 0.03 | within ±0.005, no trend | 0.006 → 0.055 | −0.005 → 0.001 | 0.009 → 0.075 |
+| task 0 (240k) | −0.006 → 0.012 (max 0.029) | −0.01 – 0.016 | within ±0.006, no trend | 0.005 → 0.022 | −0.005 → 0.003 | 0.015 → 0.042 |
+
+Pool dispersion across all plans and across the executed plans is the same to three digits (0.0185 per dimension). The executed residual actions are 4–8% more dispersed than the base candidates, not less. The fraction of chunks whose executed plan is the final critic's favourite rises from 0.31 to 0.57 (task 9) and 0.24 to 0.64 (task 0) after selection starts at 64k.
+
 ### Implementation checks (Jarvis, 2026-10-13)
 
 1,100-step smoke: plan-critic loss 4.6 → 0.21 and TD loss 1.86 → 0.05 over nine update logs. On real weights, across-plan base-action spread 0.05–0.06 vs within-plan 0.013–0.019 on the first chunk of three starts; plan pools differ across plans by about 10% of their magnitude. Batched sampling equals the single-plan pass bit for bit at M = 1 and differs from the looped reference at M = 2 by 2 bf16 ulps after the first pass, 0.35 in the final latent. One video pass: 175 ms at CFG batch 2 (78 ms GEMM), 606 ms at batch 8 (392 ms GEMM); batching four plans is 10% faster than looping (6.7 vs 7.4 s per chunk; 1.9 s at M = 1).
