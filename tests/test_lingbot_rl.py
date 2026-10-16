@@ -489,6 +489,42 @@ def test_plan_rows_default_finalize_and_sample_with_one_shape():
     assert legacy.sample(2, 0.0)["plan_pools_all"].shape == (2, 3, STATE_DIM)
 
 
+def test_feature_rows_default_finalize_and_sample_in_bf16_with_store_only_keys():
+    buffer = ChunkReplay(plans=2)
+    first = _replay_row(0.0, 0.0)
+    first.update(proprio=np.full(8, 0.5, np.float32), state_struct=np.full((2, STATE_DIM), 1.0, np.float32),
+                 plan_struct=np.full((8, STATE_DIM), 1.0, np.float32), object_state=np.arange(11, dtype=np.float32),
+                 reset_kind=2, variant_index=1989)
+    buffer.add_online(first)
+    second = _replay_row(1.0, 1.0)
+    second.update(proprio=np.full(8, 2.0, np.float32), state_struct=torch.full((2, STATE_DIM), 2.0, dtype=torch.bfloat16),
+                  plan_struct_all=torch.full((2, 8, STATE_DIM), 3.0, dtype=torch.bfloat16),
+                  plan_latent_all=torch.zeros(2, 48, 4, 8, 16, dtype=torch.bfloat16))
+    buffer.add_online(second)
+    buffer.finalize_episode()
+    rows = buffer.rows()
+    assert rows[0]["state_struct"].dtype == torch.bfloat16 and rows[0]["plan_struct_all"].shape == (2, 8, STATE_DIM)
+    assert float(rows[0]["plan_struct_all"][1, 0, 0]) == 1.0 and rows[0]["state_tokens"].shape == (32, STATE_DIM)
+    assert rows[0]["plan_latent_all"].shape == (2, 48, 4, 8, 16) and rows[0]["state_latent"].shape == (48, 1, 8, 16)
+    assert float(rows[0]["proprio_next"][0]) == 2.0 and float(rows[1]["proprio_next"][0]) == 2.0
+    assert float(rows[0]["state_struct_next"][0, 0]) == 2.0 and float(rows[0]["plan_struct_next"][0, 0]) == 0.0
+    assert rows[0]["object_state"].shape == (11,) and rows[1]["object_state"].shape == (0,)
+    assert (rows[0]["reset_kind"], rows[0]["variant_index"], rows[1]["reset_kind"], rows[1]["variant_index"]) == (2, 1989, 0, 0)
+    batch = buffer.sample(2, 0.0)
+    assert batch["state_struct"].shape == (2, 2, STATE_DIM) and batch["state_struct"].dtype == torch.bfloat16
+    assert batch["proprio"].shape == (2, 8) and batch["plan_struct_all"].shape == (2, 2, 8, STATE_DIM)
+    assert batch["plan_struct"].shape == batch["plan_struct_next"].shape == (2, 8, STATE_DIM)
+    assert not {"state_tokens", "state_latent", "plan_latent_all", "object_state", "reset_kind", "variant_index"} & set(batch)
+    legacy = ChunkReplay(plans=2)
+    payload = buffer.state_dict()
+    for row in payload["data"]:
+        for key in ("proprio", "proprio_next", "state_struct", "state_struct_next", "state_tokens", "state_latent", "plan_struct",
+                    "plan_struct_all", "plan_struct_next", "plan_latent_all", "object_state", "reset_kind", "variant_index"):
+            row.pop(key)
+    legacy.load_state_dict(payload)
+    assert legacy.sample(2, 0.0)["plan_struct"].shape == (2, 8, STATE_DIM) and legacy.rows()[0]["object_state"].shape == (0,)
+
+
 def _eval_normalization():
     return {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
 
