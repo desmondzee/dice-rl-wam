@@ -156,6 +156,33 @@ def test_config_plan_target_enters_the_fingerprint_only_for_rollout():
             RLConfig(**bad).validate()
 
 
+def test_progress_rewards_approach_inside_and_closing_and_calibrates_the_door_from_the_rest_limit():
+    from script.lingbot_rl_progress import INSIDE_RADIUS, calibrate, phi, progress
+    layout = {"bodies": ["microwave_1", "porcelain_mug_1", "white_yellow_mug_1"], "joints": ["microwave_1_microjoint"], "body_quaternion": "wxyz"}
+
+    def state(mug, door):
+        poses = np.zeros((3, 7), np.float32)
+        poses[2, :3] = mug
+        return np.concatenate([poses.reshape(-1), [door]]).astype(np.float32)
+
+    model = SimpleNamespace(jnt_range=np.array([[-2.094, 0.0]]), joint_name2id=lambda name: {"microwave_1_microjoint": 0}[name])
+    inner = SimpleNamespace(sim=SimpleNamespace(model=model))
+    calibration = calibrate(9, inner, layout, state([0.3, 0.0, 0.0], -2.0))
+    assert (calibration["door_closed"], calibration["door_open"], calibration["door_initial"]) == (0.0, -2.094, -2.0)
+    assert calibration["mug"] == "white_yellow_mug_1" and calibration["phi_initial"] == pytest.approx(-0.3)
+    far, near = state([0.3, 0.0, 0.0], -2.094), state([0.05, 0.0, 0.0], -2.094)
+    assert phi(calibration, layout, far, False) == pytest.approx(-0.3) and phi(calibration, layout, near, False) == pytest.approx(0.95)
+    assert phi(calibration, layout, state([0.05, 0.0, 0.0], 0.0), False) == pytest.approx(1.95)
+    assert phi(calibration, layout, state([0.05, 0.0, 0.0], 0.0), True) == pytest.approx(3.95)
+    assert progress(calibration, layout, far, near, False) == pytest.approx(1.25)
+    assert progress(calibration, layout, far, state([0.3, 0.0, 0.0], -1.0), False) == pytest.approx(0.0)
+    assert INSIDE_RADIUS == 0.12
+    with pytest.raises(ValueError):
+        calibrate(0, inner, layout, far)
+    with pytest.raises(ValueError):
+        calibrate(9, inner, {**layout, "bodies": ["microwave_1", "porcelain_mug_1"]}, far)
+
+
 def test_evaluate_records_video_exec_step_and_passes_it_to_the_policy(tmp_path, monkeypatch):
     import script.lingbot_eval as eval_module
     import script.lingbot_rl_train as train
