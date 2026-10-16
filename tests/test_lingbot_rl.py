@@ -179,6 +179,49 @@ def test_evaluate_records_video_exec_step_and_passes_it_to_the_policy(tmp_path, 
     assert [entry["episode_index"] for entry in settings["episode_plan"]] == [1, 51]
 
 
+def test_evaluate_reconstructs_the_input_layout_from_the_residual_checkpoint(tmp_path, monkeypatch):
+    import script.lingbot_eval as eval_module
+    import script.lingbot_rl_train as train
+    envs = []
+
+    class StubEnv:
+        def __init__(self, **env_kwargs):
+            envs.append(env_kwargs)
+
+        def close(self):
+            return None
+
+    tasks = [{"task_id": task_id, "instruction": f"task-{task_id}", "initial_state_count": 50} for task_id in range(10)]
+    stub = _StubPolicy()
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a: stub)
+    monkeypatch.setattr(train, "LiberoEnv", StubEnv)
+    monkeypatch.setattr(eval_module, "read_checkpoint_metadata", lambda path: {"architecture": {}, "normalization": _eval_normalization()})
+    monkeypatch.setattr(eval_module, "describe_suite", lambda path: (object(), tasks))
+    monkeypatch.setattr(train, "run_rl_episode", lambda policy, env, entry, instruction, norm, device, proprio, **k: {
+        **entry, "success": True, "seconds": 1.0, "policy_steps": 3, "proprio": proprio})
+    torch.save(DiceResidualModel(device="cpu", state_features="struct", proprio=True).inference_state_dict(), tmp_path / "residual.pt")
+    prepared = tmp_path / "prepared.json"
+    prepared.write_text(json.dumps({"checkpoint": "ckpt", "model_path": "model", "assets_path": "assets",
+                                    "source_run": "libero30-sft", "checkpoint_step": 600}))
+    summary = train.evaluate(config_from_dict({"task_ids": [9]}), prepared, tmp_path / "out",
+                             residual_path=tmp_path / "residual.pt", shard=1, shards=50)
+    assert summary["complete"] and (stub.residual_model.features, stub.residual_model.proprio) == ("struct", True)
+    assert envs[0]["obs_type"] == "pixels_agent_pos"
+    settings = json.loads((tmp_path / "out" / "settings" / "shard_1.json").read_text())
+    assert settings["layout"] == {"state_features": "struct", "proprio": True} and settings["rl"]["state_features"] == "struct"
+    episode = json.loads((tmp_path / "out" / "episodes" / "task_09" / "episode_001.json").read_text())
+    assert episode["proprio"] is True
+    pool_payload = DiceResidualModel(device="cpu").inference_state_dict()
+    torch.save(pool_payload, tmp_path / "pool.pt")
+    with pytest.raises(RuntimeError, match="layout mismatch"):
+        train.evaluate(config_from_dict({"task_ids": [9], "plan_candidates": 2}), prepared, tmp_path / "bad",
+                       residual_path=tmp_path / "pool.pt", shard=1, shards=50)
+    pool_payload.pop("layout")
+    torch.save(pool_payload, tmp_path / "legacy.pt")
+    train.evaluate(config_from_dict({"task_ids": [9]}), prepared, tmp_path / "legacy", residual_path=tmp_path / "legacy.pt", shard=1, shards=50)
+    assert (stub.residual_model.features, stub.residual_model.proprio) == ("pool", False) and envs[-1]["obs_type"] == "pixels"
+
+
 def test_config_from_dict_restores_task_ids_and_validates():
     cfg = RLConfig(task_ids=(0, 3)).validate()
     payload = cfg.to_dict()

@@ -8,8 +8,9 @@ from lerobot.envs.libero import LiberoEnv, _get_suite
 from PIL import Image
 
 from script.lingbot_eval import (
-    file_sha256, load_policy, read_checkpoint_metadata, read_json, run_episode, video_frame, write_json,
+    file_sha256, load_policy, read_checkpoint_metadata, read_json, video_frame, write_json,
 )
+from script.lingbot_rl_train import run_rl_episode
 
 ENV_KWARGS = dict(task_suite_name="libero_10", is_libero_plus=True, episode_length=520, observation_height=128,
                   observation_width=128, obs_type="pixels", n_envs=1, num_steps_wait=10, control_freq=20,
@@ -22,7 +23,15 @@ def read_prepared(path):
     return read_json(data["prepared_path"]) if "prepared_path" in data else data
 
 
-def load(args, prepared, architecture):
+def residual_layout(payload):
+    from script.lingbot_rl_model import DiceResidualModel
+
+    if payload is None:
+        return {"state_features": "pool", "proprio": False}
+    return DiceResidualModel.layout_of(payload)
+
+
+def load(args, prepared, architecture, payload, layout):
     if args.policy == "sft":
         return load_policy(prepared["checkpoint"], prepared["model_path"], architecture, -1, args.video_steps, args.action_steps)
     from script.lingbot_rl_model import DiceResidualModel
@@ -30,8 +39,8 @@ def load(args, prepared, architecture):
 
     policy = load_residual_policy(prepared["checkpoint"], prepared["model_path"], architecture, -1, args.video_steps, args.action_steps)
     model = DiceResidualModel(device="cuda", residual_input=args.residual_input, epsilon=args.epsilon,
-                              plan_candidates=args.plan_candidates)
-    model.load_inference_state_dict(torch.load(args.residual, map_location="cpu", weights_only=True))
+                              plan_candidates=args.plan_candidates, **layout)
+    model.load_inference_state_dict(payload)
     policy.residual_model = model
     policy.eval_candidates = args.eval_candidates
     policy.eval_plans = args.plan_candidates
@@ -101,9 +110,11 @@ def main():
     instruction = next(task["instruction"] for task in prepared["tasks"] if task["task_id"] == plan["task_id"])
     if instruction != plan["instruction"]:
         raise ValueError("Plan instruction differs from the prepared base task")
+    payload = torch.load(args.residual, map_location="cpu", weights_only=True) if args.residual else None
+    layout = residual_layout(payload)
     settings = {"args": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items() if key != "resume"},
                 "checkpoint": prepared["checkpoint"], "instruction": instruction, "plan_sha256": file_sha256(args.plan),
-                "driver_sha256": file_sha256(__file__), "residual_sha256": file_sha256(args.residual) if args.residual else None}
+                "driver_sha256": file_sha256(__file__), "residual_sha256": file_sha256(args.residual) if args.residual else None, "layout": layout}
     settings_path = args.out / "settings" / "run.json"
     if settings_path.exists():
         if not args.resume:
@@ -130,12 +141,13 @@ def main():
         print(json.dumps(summary, indent=2))
         return
     torch.cuda.reset_peak_memory_stats()
-    policy = load(args, prepared, metadata["architecture"])
+    policy = load(args, prepared, metadata["architecture"], payload, layout)
     suite = _get_suite("libero_10")
     for entry in episodes:
         if entry["episode_index"] in done:
             continue
-        env = LiberoEnv(task_suite=suite, task_id=entry["variant_index"], init_states=entry["reset_rule"] == "stored_state", **ENV_KWARGS)
+        env = LiberoEnv(task_suite=suite, task_id=entry["variant_index"], init_states=entry["reset_rule"] == "stored_state",
+                        **{**ENV_KWARGS, "obs_type": "pixels_agent_pos" if layout["proprio"] else "pixels"})
         record = instrument(env, args.out / "frames" / f"episode_{entry['episode_index']:03d}.png")
         writer = None
         video = args.out / "videos" / f"task_{entry['task_id']:02d}.mp4"
@@ -143,7 +155,7 @@ def main():
             video.parent.mkdir(parents=True, exist_ok=True)
             writer = imageio.get_writer(str(video), fps=20, codec="libx264", macro_block_size=16)
         try:
-            row = run_episode(policy, env, entry, instruction, metadata["normalization"], "cuda", video_writer=writer)
+            row = run_rl_episode(policy, env, entry, instruction, metadata["normalization"], "cuda", layout["proprio"], video_writer=writer)
         finally:
             if writer is not None:
                 writer.close()

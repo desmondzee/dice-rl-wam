@@ -4,6 +4,7 @@ import os
 import platform
 import random
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -690,7 +691,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
 def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, residual_path=None,
              resume=False, commit=None, eval_candidates=None, shard=0, shards=1, plan_ranker="v_plan"):
     from script.lingbot_eval import (
-        aggregate_results, describe_suite, file_sha256, read_checkpoint_metadata, read_json, run_episode, write_json,
+        aggregate_results, describe_suite, file_sha256, read_checkpoint_metadata, read_json, write_json,
     )
     from script.lingbot_eval_config import shard_plan
 
@@ -708,11 +709,14 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     policy = load_residual_policy(
         prepared["checkpoint"], prepared["model_path"], prepared.get("architecture") or metadata.get("architecture") or {},
         eval_cfg.video_exec_step, eval_cfg.video_steps, eval_cfg.action_steps)
-    model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon,
-                              plan_candidates=config.plan_candidates)
     residual_path = Path(residual_path or Path(output_dir) / "residual.pt")
     try:
-        model.load_inference_state_dict(torch.load(residual_path, map_location="cpu", weights_only=True))
+        payload = torch.load(residual_path, map_location="cpu", weights_only=True)
+        layout = DiceResidualModel.layout_of(payload)
+        config = replace(config, **layout).validate()
+        model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon,
+                                  plan_candidates=config.plan_candidates, state_features=config.state_features, proprio=config.proprio)
+        model.load_inference_state_dict(payload)
     except Exception as exc:
         raise RuntimeError(f"Failed to load residual weights {residual_path}: {exc}") from exc
     policy.residual_model = model
@@ -728,7 +732,7 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     output_dir = Path(output_dir)
     write_json(output_dir / "settings" / f"shard_{shard}.json", {
         "config": eval_cfg.to_dict(), "rl": config.to_dict(), "eval_candidates": policy.eval_candidates,
-        "eval_plans": policy.eval_plans, "plan_ranker": plan_ranker,
+        "eval_plans": policy.eval_plans, "plan_ranker": plan_ranker, "layout": layout,
         "residual_sha256": file_sha256(residual_path), "episode_plan": [entry for task in tasks for entry in plans[task["task_id"]]]})
 
     def summarize():
@@ -740,14 +744,14 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
 
     rows = []
     for task in tasks:
-        env = make_env(task["task_id"], suite)
+        env = make_env(task["task_id"], suite, proprio=config.proprio)
         try:
             for entry in plans[task["task_id"]]:
                 path = output_dir / "episodes" / f"task_{task['task_id']:02d}" / f"episode_{entry['episode_index']:03d}.json"
                 if resume and path.exists():
                     rows.append(read_json(path))
                     continue
-                rows.append(run_episode(policy, env, entry, task["instruction"], metadata["normalization"], device))
+                rows.append(run_rl_episode(policy, env, entry, task["instruction"], metadata["normalization"], device, config.proprio))
                 write_json(path, rows[-1])
                 summarize()
         finally:
