@@ -341,7 +341,7 @@ def test_plan_critic_regresses_onto_max_candidate_min_q_and_leaves_q_and_actor_a
     model = DiceResidualModel(device="cpu", residual_input="base", plan_candidates=2)
     assert single.plan_critic is None and single.critic.heads[0][0].in_features == STATE_DIM + HORIZON * ACTION_DIM
     assert model.critic.heads[0][0].in_features == 2 * STATE_DIM + HORIZON * ACTION_DIM
-    assert set(single.inference_state_dict()) == {"actor", "critic", "target_critic"}
+    assert set(single.inference_state_dict()) == {"actor", "critic", "target_critic", "layout"}
     assert {"plan_critic", "plan_opt", "plan_lr"} <= set(model.resume_state_dict())
     for parameter in model.critic.parameters():
         torch.nn.init.normal_(parameter, std=0.05)
@@ -387,6 +387,39 @@ def _online_buffer():
         buf.add_online(_replay_row(reward, done))
     buf.finalize_episode()
     return buf
+
+
+def test_model_input_layout_follows_state_features_and_proprio():
+    from script.lingbot_rl_model import PROPRIO_DIM
+    struct = DiceResidualModel(device="cpu", state_features="struct", proprio=True)
+    mixed = DiceResidualModel(device="cpu", plan_candidates=2, proprio=True)
+    assert (struct.state_dim, struct.plan_dim) == (2 * STATE_DIM + PROPRIO_DIM, 0)
+    assert (mixed.state_dim, mixed.plan_dim) == (STATE_DIM + PROPRIO_DIM, STATE_DIM)
+    assert struct.actor.net[0].in_features == struct.state_dim + HORIZON * ACTION_DIM and struct.plan_critic is None
+    assert struct.critic.heads[0][0].in_features == struct.state_dim + HORIZON * ACTION_DIM
+    assert mixed.critic.heads[0][0].in_features == mixed.state_dim + mixed.plan_dim + HORIZON * ACTION_DIM
+    assert mixed.plan_critic.heads[0][0].in_features == mixed.state_dim + mixed.plan_dim
+    s, st, pr = torch.zeros(3, STATE_DIM), torch.arange(3 * 2 * STATE_DIM).reshape(3, 2, STATE_DIM).float(), torch.ones(3, PROPRIO_DIM)
+    state = struct.state_input(s, st, pr)
+    assert torch.equal(state[:, :2 * STATE_DIM], st.reshape(3, -1)) and torch.equal(state[:, -PROPRIO_DIM:], pr)
+    assert torch.equal(mixed.state_input(s, st, pr)[:, :STATE_DIM], s) and mixed.plan_input(None, None) is None
+    assert struct.plan_input(torch.zeros(3, 2, STATE_DIM), torch.ones(3, 2, 8, STATE_DIM)).shape == (3, 2, 8 * STATE_DIM)
+    with pytest.raises(ValueError):
+        struct.state_input(s, st, None)
+    payload = struct.inference_state_dict()
+    assert payload["layout"] == {"state_features": "struct", "proprio": True, "plan_candidates": 1}
+    assert DiceResidualModel.layout_of({"actor": {}}) == {"state_features": "pool", "proprio": False}
+    with pytest.raises(ValueError, match="layout mismatch"):
+        DiceResidualModel(device="cpu", proprio=True).load_inference_state_dict(payload)
+    info = mixed.update_plan_critic(mixed.state_input(s, None, pr), torch.randn(3, 2, STATE_DIM), torch.randn(3, 4, HORIZON, ACTION_DIM),
+                                    mask_unused_dof(torch.randn(3, 2, 4, HORIZON, ACTION_DIM)))
+    assert set(info) == {"plan_critic_loss", "v_plan_mean", "plan_target_mean"}
+    del struct, mixed
+    torch.manual_seed(0)
+    a = DiceResidualModel(device="cpu", plan_candidates=2)
+    torch.manual_seed(0)
+    b = DiceResidualModel(device="cpu", plan_candidates=2, state_features="pool", proprio=False)
+    assert all(torch.equal(x, y) for x, y in zip(a.critic.parameters(), b.critic.parameters()))
 
 
 def test_update_runs_actor_and_polyak_on_every_second_gradient_step():
@@ -604,6 +637,30 @@ def test_policy_class_exposes_collection_api():
     for name in ("decode_candidates", "extract_critic_state", "extract_critic_state_from_latent",
                  "commit_executed", "select_action"):
         assert callable(getattr(ResidualLingBotPolicy, name))
+
+
+def test_policy_feeds_proprio_from_the_batch_or_the_select_action_stash():
+    from lerobot.policies.lingbot_va.modeling_lingbot_va import LingBotVAPolicy
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy.eval_candidates, policy.eval_plans, policy.eval_plan_ranker = 2, 1, "v_plan"
+    policy.residual_model = DiceResidualModel(device="cpu", state_features="struct", proprio=True)
+    captured = {}
+    policy.decode_candidates = lambda batch, k: {"s": torch.zeros(1, STATE_DIM), "state_struct": torch.ones(1, 2, STATE_DIM),
+                                                 "z": torch.zeros(2, HORIZON, ACTION_DIM), "a_base": torch.zeros(2, HORIZON, ACTION_DIM),
+                                                 "first_chunk": False, "latents": torch.zeros(1)}
+    policy._apply_residual_choice = lambda dec, index: captured.update(state=dec["state_in"]) or torch.zeros(1, 16, USED_DOF)
+    policy.predict_action_chunk({"task": ["t"], "proprio": torch.full((1, 8), 3.0)})
+    assert captured["state"].shape == (1, 2 * STATE_DIM + 8) and float(captured["state"][0, -1]) == 3.0 and float(captured["state"][0, 0]) == 1.0
+    policy._last_proprio = torch.full((1, 8), 5.0)
+    policy.predict_action_chunk(None)
+    assert float(captured["state"][0, -1]) == 5.0
+    original = LingBotVAPolicy.select_action
+    LingBotVAPolicy.select_action = lambda self, batch, **kwargs: "ok"
+    try:
+        assert policy.select_action({"proprio": torch.full((1, 8), 7.0)}) == "ok" and float(policy._last_proprio[0, 0]) == 7.0
+    finally:
+        LingBotVAPolicy.select_action = original
 
 
 def test_commit_executed_writes_residual_not_base():
@@ -1211,7 +1268,7 @@ def test_train_smoke_loop_gates_updates_saves_weights_and_runs_hook(tmp_path, mo
     assert out["envs"] and all(env["init_states"] is False for env in out["envs"])
     assert stamp.read_text() == "42"
     payload = torch.load(tmp_path / "residual.pt", map_location="cpu", weights_only=True)
-    assert set(payload) <= {"actor", "critic", "target_critic"}
+    assert set(payload) <= {"actor", "critic", "target_critic", "layout"}
     assert "transformer" not in out["resume"]
     assert out["resume"]["env_steps"] == 42
     assert out["resume"]["checkpointed"] == []
@@ -1310,8 +1367,8 @@ def test_save_inference_checkpoints_keeps_latest_and_step_copy(tmp_path):
     assert step.is_file()
     loaded_latest = torch.load(latest, map_location="cpu", weights_only=True)
     loaded_step = torch.load(step, map_location="cpu", weights_only=True)
-    assert set(loaded_latest) == {"actor", "critic", "target_critic"}
-    assert set(loaded_step) == {"actor", "critic", "target_critic"}
+    assert set(loaded_latest) == {"actor", "critic", "target_critic", "layout"}
+    assert set(loaded_step) == {"actor", "critic", "target_critic", "layout"}
     torch.testing.assert_close(loaded_latest["actor"]["net.0.bias"], loaded_step["actor"]["net.0.bias"])
     assert "transformer" not in loaded_latest
     assert "replay" not in loaded_latest

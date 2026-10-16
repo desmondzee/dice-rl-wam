@@ -28,6 +28,7 @@ LR_MIN = 1e-6
 BATCH = 256
 REPLAY_CAPACITY = 100_000
 K_CANDIDATES = 4
+PROPRIO_DIM = 8
 
 
 def mlp_float(tensor):
@@ -70,10 +71,10 @@ RESIDUAL_INPUTS = {"z": ("z",), "base": ("base",), "z_base": ("z", "base")}
 
 
 class ResidualActor(nn.Module):
-    def __init__(self, residual_input="z"):
+    def __init__(self, residual_input="z", state_dim=STATE_DIM):
         super().__init__()
         self.inputs = RESIDUAL_INPUTS[residual_input]
-        self.net = _mlp(STATE_DIM + len(self.inputs) * HORIZON * ACTION_DIM, HORIZON * ACTION_DIM)
+        self.net = _mlp(state_dim + len(self.inputs) * HORIZON * ACTION_DIM, HORIZON * ACTION_DIM)
         final = self.net[-1]
         nn.init.zeros_(final.weight)
         nn.init.zeros_(final.bias)
@@ -102,9 +103,9 @@ class CriticEnsemble(nn.Module):
 
 
 class PlanCritic(nn.Module):
-    def __init__(self):
+    def __init__(self, state_dim=STATE_DIM, plan_dim=STATE_DIM):
         super().__init__()
-        self.heads = nn.ModuleList([_mlp(2 * STATE_DIM, 1) for _ in range(ENSEMBLE)])
+        self.heads = nn.ModuleList([_mlp(state_dim + plan_dim, 1) for _ in range(ENSEMBLE)])
 
     def forward(self, state, pool, return_all=False):
         x = torch.cat([mlp_float(state), mlp_float(pool)], dim=-1)
@@ -115,12 +116,16 @@ class PlanCritic(nn.Module):
 
 
 class DiceResidualModel:
-    def __init__(self, device="cpu", residual_input="z", epsilon=EPSILON, plan_candidates=1):
+    def __init__(self, device="cpu", residual_input="z", epsilon=EPSILON, plan_candidates=1, state_features="pool", proprio=False):
         self.device = device
         self.epsilon = epsilon
         self.plans = int(plan_candidates)
-        self.actor = ResidualActor(residual_input).to(device)
-        self.critic = CriticEnsemble(STATE_DIM * (2 if self.plans > 1 else 1)).to(device)
+        self.features = state_features
+        self.proprio = bool(proprio)
+        self.state_dim = STATE_DIM * (2 if state_features == "struct" else 1) + (PROPRIO_DIM if self.proprio else 0)
+        self.plan_dim = STATE_DIM * (8 if state_features == "struct" else 1) if self.plans > 1 else 0
+        self.actor = ResidualActor(residual_input, self.state_dim).to(device)
+        self.critic = CriticEnsemble(self.state_dim + self.plan_dim).to(device)
         self.target_critic = copy.deepcopy(self.critic).to(device)
         for parameter in self.target_critic.parameters():
             parameter.requires_grad_(False)
@@ -130,9 +135,34 @@ class DiceResidualModel:
         self.critic_lr = torch.optim.lr_scheduler.LambdaLR(self.critic_opt, cosine_restart_lr)
         self.plan_critic = self.plan_opt = self.plan_lr = None
         if self.plans > 1:
-            self.plan_critic = PlanCritic().to(device)
+            self.plan_critic = PlanCritic(self.state_dim, self.plan_dim).to(device)
             self.plan_opt = torch.optim.Adam(self.plan_critic.parameters(), lr=ADAM_LR, weight_decay=WEIGHT_DECAY)
             self.plan_lr = torch.optim.lr_scheduler.LambdaLR(self.plan_opt, cosine_restart_lr)
+
+    def state_input(self, pool, struct, proprio):
+        if self.features == "pool":
+            state = mlp_float(pool)
+        else:
+            struct = mlp_float(struct)
+            state = struct.reshape(struct.shape[0], -1)
+        if not self.proprio:
+            return state
+        if proprio is None:
+            raise ValueError("proprio is required by this recipe")
+        return torch.cat([state, mlp_float(proprio).to(state.device)], dim=-1)
+
+    def plan_input(self, pool, struct):
+        if pool is None:
+            return None
+        if self.features == "pool":
+            return mlp_float(pool)
+        struct = mlp_float(struct)
+        return struct.reshape(*struct.shape[:-2], -1)
+
+    @staticmethod
+    def layout_of(payload):
+        layout = payload.get("layout", {})
+        return {"state_features": layout.get("state_features", "pool"), "proprio": bool(layout.get("proprio", False))}
 
     def critic_state(self, state, pool):
         if self.plans == 1:
@@ -161,7 +191,7 @@ class DiceResidualModel:
             a_base_next_all = mlp_float(a_base_next_all)
             batch, k = z_next_all.shape[0], z_next_all.shape[1]
             critic_k = next_critic_state.unsqueeze(1).expand(batch, k, next_critic_state.shape[-1]).reshape(batch * k, -1)
-            state_k = critic_k[:, :STATE_DIM]
+            state_k = critic_k[:, :self.state_dim]
             z_flat = z_next_all.reshape(batch * k, HORIZON, ACTION_DIM)
             base_flat = a_base_next_all.reshape(batch * k, HORIZON, ACTION_DIM)
             a_next = apply_residual(base_flat, self.actor(state_k, z_flat, base_flat))
@@ -235,15 +265,16 @@ class DiceResidualModel:
         state, pools_all = mlp_float(state), mlp_float(pools_all)
         z_all, plan_a_base_all = mlp_float(z_all), mlp_float(plan_a_base_all)
         batch, plans, k = plan_a_base_all.shape[:3]
+        sd, pd = state.shape[-1], pools_all.shape[-1]
         with torch.no_grad():
-            flat_state = state[:, None, None].expand(batch, plans, k, STATE_DIM).reshape(-1, STATE_DIM)
-            flat_pool = pools_all[:, :, None].expand(batch, plans, k, STATE_DIM).reshape(-1, STATE_DIM)
+            flat_state = state[:, None, None].expand(batch, plans, k, sd).reshape(-1, sd)
+            flat_pool = pools_all[:, :, None].expand(batch, plans, k, pd).reshape(-1, pd)
             flat_z = z_all[:, None].expand(batch, plans, k, HORIZON, ACTION_DIM).reshape(-1, HORIZON, ACTION_DIM)
             flat_base = plan_a_base_all.reshape(-1, HORIZON, ACTION_DIM)
             action = apply_residual(flat_base, self.actor(flat_state, flat_z, flat_base))
             target = self.critic(self.critic_state(flat_state, flat_pool), action).reshape(batch, plans, k).max(dim=2).values
         preds = self.plan_critic(
-            state[:, None].expand(batch, plans, STATE_DIM).reshape(-1, STATE_DIM), pools_all.reshape(-1, STATE_DIM), return_all=True)
+            state[:, None].expand(batch, plans, sd).reshape(-1, sd), pools_all.reshape(-1, pd), return_all=True)
         loss = torch.stack([F.mse_loss(pred.reshape(batch, plans), target) for pred in preds]).sum()
         self.plan_opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -264,11 +295,16 @@ class DiceResidualModel:
             "critic": self.critic.state_dict(),
             "target_critic": self.target_critic.state_dict(),
         }
+        payload["layout"] = {"state_features": self.features, "proprio": self.proprio, "plan_candidates": self.plans}
         if self.plan_critic is not None:
             payload["plan_critic"] = self.plan_critic.state_dict()
         return payload
 
     def load_inference_state_dict(self, payload):
+        layout = payload.get("layout")
+        if layout is not None and (layout["state_features"], bool(layout["proprio"]), int(layout.get("plan_candidates", self.plans))) \
+                != (self.features, self.proprio, self.plans):
+            raise ValueError("residual checkpoint layout mismatch")
         self.actor.load_state_dict(payload["actor"])
         self.critic.load_state_dict(payload["critic"])
         self.target_critic.load_state_dict(payload["target_critic"])

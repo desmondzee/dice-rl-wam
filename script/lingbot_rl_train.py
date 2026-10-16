@@ -25,7 +25,7 @@ from script.lingbot_rl_sharpen import bin_entropy, log_std
 LiberoEnv = None
 SHARPEN_EVERY_STEPS = 5_000
 RESUME_KEYS = {
-    "actor", "critic", "target_critic", "plan_critic", "actor_opt", "critic_opt", "plan_opt",
+    "actor", "critic", "target_critic", "plan_critic", "layout", "actor_opt", "critic_opt", "plan_opt",
     "actor_lr", "critic_lr", "plan_lr", "replay", "rng", "env_steps", "chunks", "recipe", "checkpointed", "wandb_id",
 }
 
@@ -117,7 +117,7 @@ def _atomic_torch(path, payload):
 
 def save_inference(path, model):
     payload = model.inference_state_dict()
-    if set(payload) - {"actor", "critic", "target_critic", "plan_critic"}:
+    if set(payload) - {"actor", "critic", "target_critic", "plan_critic", "layout"}:
         raise ValueError("Inference dump may only contain actor and critic weights")
     _atomic_torch(path, payload)
 

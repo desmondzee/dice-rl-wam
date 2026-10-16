@@ -137,12 +137,28 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self.eval_candidates = 4
         self.eval_plans = 1
         self.eval_plan_ranker = "v_plan"
+        self._last_proprio = None
 
     def _get_t5_prompt_embeds(self, prompt, max_sequence_length):
         key = (tuple([prompt] if isinstance(prompt, str) else prompt), max_sequence_length)
         if key not in self._text_cache:
             self._text_cache[key] = super()._get_t5_prompt_embeds(prompt, max_sequence_length).detach()
         return self._text_cache[key].clone()
+
+    def select_action(self, batch, **kwargs):
+        self._last_proprio = batch.get("proprio")
+        return super().select_action(batch, **kwargs)
+
+    def _state_input(self, decoded, batch):
+        if self.residual_model is None:
+            return decoded["s"].float()
+        proprio = batch.get("proprio") if batch is not None else self._last_proprio
+        return self.residual_model.state_input(decoded["s"], decoded.get("state_struct"), proprio)
+
+    def _plan_input(self, pool, struct):
+        if self.residual_model is None:
+            return pool.float()
+        return self.residual_model.plan_input(pool, struct)
 
     def _encode_frames(self, raw_frames):
         latent = super()._encode_frames(raw_frames)
@@ -621,12 +637,13 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         if decode_all:
             decoded = self._decode_actions(action_noise.repeat(plans, 1, 1, 1, 1), frame_st_id, k, plans)
             out["plan_a_base_all"] = model_to_mlp(decoded).float().reshape(plans, k, HORIZON, ACTION_DIM)
+        state_in, pools_in = self._state_input(out, batch), self._plan_input(pools, out["plan_struct_all"])
         if random_plan:
             index = int(np.random.randint(plans))
         elif rank_candidates is not None:
-            index = int(rank_candidates(state.float(), pools, out["plan_a_base_all"], out["z"]))
+            index = int(rank_candidates(state_in, pools_in, out["plan_a_base_all"], out["z"]))
         else:
-            index = int(rank_fn(state.float(), pools))
+            index = int(rank_fn(state_in, pools_in))
         if not 0 <= index < plans:
             raise ValueError("rank_fn must return a plan index")
         out.update({"plan_pool": pools[index:index + 1], "plan_struct": out["plan_struct_all"][index:index + 1],
@@ -646,9 +663,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
     def _apply_residual_choice(self, decoded, index):
         a_base = decoded["a_base"][index:index + 1].float()
         noise = decoded["z"][index:index + 1].float()
-        state = decoded["s"].float()
-        if state.shape[0] != 1:
-            state = state[:1]
+        state = decoded["state_in"][:1]
         if self.residual_model is None:
             chosen = a_base
         else:
@@ -669,16 +684,15 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
                 rank_candidates=self.residual_model.rank_candidates if self.eval_plan_ranker == "q" else None)
         else:
             decoded = self.decode_candidates(batch, k=k)
+        decoded["state_in"] = self._state_input(decoded, batch)
         index = 0
         if self.residual_model is not None and decoded["a_base"].shape[0] > 1:
             a_base = decoded["a_base"].float()
             noise = decoded["z"].float()
-            state = decoded["s"].float()
-            if state.shape[0] != a_base.shape[0]:
-                state = state[:1].expand(a_base.shape[0], -1)
+            state = decoded["state_in"].expand(a_base.shape[0], -1)
             executed = apply_residual(a_base, self.residual_model.actor(state, noise, a_base))
             if plans > 1:
-                state = self.residual_model.critic_state(state, decoded["plan_pool"].expand(k, -1))
+                state = self.residual_model.critic_state(state, self._plan_input(decoded["plan_pool"], decoded.get("plan_struct")).expand(k, -1))
             index = int(self.residual_model.critic(state, executed).reshape(-1).argmax())
         return self._apply_residual_choice(decoded, index)
 
