@@ -34,6 +34,11 @@ def pool_critic_state(video_tokens, text_tokens):
     return torch.cat([video_tokens, text_tokens], dim=1).mean(dim=1)
 
 
+def structured_means(video_tokens, frames, rows, cols):
+    b, width = video_tokens.shape[0], video_tokens.shape[-1]
+    return video_tokens.reshape(b, frames, rows, 2, cols // 2, width).mean(dim=(2, 4))
+
+
 def histogram_entropy(samples, bins=32):
     values = samples.detach().float().cpu().numpy()
     if values.ndim == 3:
@@ -188,16 +193,20 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         return self._pool_from_latent(latent)
 
     @torch.no_grad()
-    def extract_critic_state_from_latent(self, latent, batch):
+    def extract_features_from_latent(self, latent, batch):
         self.eval()
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
         if latent.ndim != 5:
             raise ValueError("Published latents must be shaped (B, C, T, H, W)")
-        return self._pool_from_latent(latent.to(device=self.config.device, dtype=self.dtype))
+        return self._features_from_latent(latent.to(device=self.config.device, dtype=self.dtype))
 
     @torch.no_grad()
-    def _pool_from_latent(self, latent):
+    def extract_critic_state_from_latent(self, latent, batch):
+        return self.extract_features_from_latent(latent, batch)["pool"]
+
+    @torch.no_grad()
+    def _features_from_latent(self, latent):
         b = latent.shape[0]
         name = self._ensure_critic_cache(b)
         captured = []
@@ -218,9 +227,17 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             text_tokens = self.transformer.condition_embedder.text_embedder(
                 self._prompt_embeds.to(self.dtype)
             ).float()
-            return pool_critic_state(video_tokens, text_tokens.expand(b, -1, -1))
+            patch = self.config.patch_size
+            latent_h, latent_w = self._latent_hw
+            return {"pool": pool_critic_state(video_tokens, text_tokens.expand(b, -1, -1)),
+                    "struct": structured_means(video_tokens, latent.shape[2] // patch[0], latent_h // patch[1], latent_w // patch[2]),
+                    "tokens": video_tokens}
         finally:
             handle.remove()
+
+    @torch.no_grad()
+    def _pool_from_latent(self, latent):
+        return self._features_from_latent(latent)["pool"]
 
     def _snapshot_kv(self):
         snaps = []
@@ -315,7 +332,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
         first, init_latent, frame_st_id, critic_latent = self._begin_chunk(batch)
-        state = self._pool_from_latent(critic_latent)
+        feats = self._features_from_latent(critic_latent)
         actions, latents, z_model, video = self._infer(
             init_latent, frame_st_id, video_noise=video_noise, action_noise=action_noise, k=k
         )
@@ -324,7 +341,10 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         self._exec_step = 0
         self._started = True
         return {
-            "s": state.float(),
+            "s": feats["pool"].float(),
+            "state_struct": feats["struct"][:, 0],
+            "state_tokens": feats["tokens"],
+            "state_latent": critic_latent,
             "z": model_to_mlp(z_model).float(),
             "a_base": model_to_mlp(actions).float(),
             "video_noise": video,
@@ -578,7 +598,8 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         timesteps, exec_step = self._video_timesteps()
         self._action_scheduler.set_timesteps(cfg.action_num_inference_steps)
         first, init_latent, frame_st_id, critic_latent = self._begin_chunk(batch)
-        state = self._pool_from_latent(critic_latent)
+        feats = self._features_from_latent(critic_latent)
+        state = feats["pool"]
         latent_h, latent_w = self._latent_hw
         video_noise = torch.randn(plans, 48, cfg.frame_chunk_size, latent_h, latent_w, device=device, dtype=self.dtype)
         action_noise = torch.randn(
@@ -590,8 +611,11 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             last = i == len(timesteps) - 1
             latents = self._video_pass_batched(
                 latents, t, latent_cond, frame_st_id, write=last, advance=not last or exec_step != -1)
-        pools = self._pool_from_latent(latents).float()
-        out = {"s": state.float(), "z": model_to_mlp(action_noise).float(), "plan_pools": pools,
+        plan_feats = self._features_from_latent(latents)
+        pools = plan_feats["pool"].float()
+        out = {"s": state.float(), "state_struct": feats["struct"][:, 0], "state_tokens": feats["tokens"], "state_latent": critic_latent,
+               "z": model_to_mlp(action_noise).float(), "plan_pools": pools,
+               "plan_struct_all": plan_feats["struct"].reshape(plans, -1, STATE_DIM), "plan_latent_all": latents,
                "video_noise": video_noise, "first_chunk": first}
         decode_all = decode_all or rank_candidates is not None
         if decode_all:
@@ -605,7 +629,8 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             index = int(rank_fn(state.float(), pools))
         if not 0 <= index < plans:
             raise ValueError("rank_fn must return a plan index")
-        out.update({"plan_pool": pools[index:index + 1], "plan_index": index, "latents": latents[index:index + 1]})
+        out.update({"plan_pool": pools[index:index + 1], "plan_struct": out["plan_struct_all"][index:index + 1],
+                    "plan_index": index, "latents": latents[index:index + 1]})
         if decode_all:
             out["a_base"] = out["plan_a_base_all"][index]
             select_kv_rows(self.transformer, [index, plans + index])

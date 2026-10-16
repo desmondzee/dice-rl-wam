@@ -1592,6 +1592,7 @@ def _mock_policy(seed=0, blocks=2):
             self.blocks = [SimpleNamespace(attn1=SimpleNamespace(attn_caches={
                 "pos": {"k": torch.zeros(2, 1, 1, 1), "v": torch.zeros(2, 1, 1, 1)}})) for _ in range(blocks)]
             self.calls = []
+            self.create_empty_cache = lambda *args, **kwargs: None
 
         def forward(self, payload, update_cache=0, cache_name="pos", action_mode=False):
             self.calls.append((action_mode, update_cache))
@@ -1615,7 +1616,7 @@ def _mock_policy(seed=0, blocks=2):
         device="cpu", frame_chunk_size=4, action_dim=ACTION_DIM, action_per_frame=4, num_inference_steps=4,
         video_exec_step=-1, action_num_inference_steps=3, guidance_scale=5.0, action_guidance_scale=1.0,
         patch_size=(1, 2, 2), used_action_channel_ids=list(range(USED_DOF)), camera_layout="width_concat",
-        height=32, width=32, obs_cam_keys=("a", "b"))
+        height=32, width=32, obs_cam_keys=("a", "b"), attn_window=30)
     policy.dtype = torch.float32
     policy._use_cfg = True
     policy._frozen = None
@@ -1632,6 +1633,7 @@ def _mock_policy(seed=0, blocks=2):
     policy._obs_buffer = []
     policy._executed_actions = None
     policy.residual_model = None
+    policy._critic_cache_batches = {}
     return policy
 
 
@@ -1674,6 +1676,11 @@ def _reference_infer(policy, video_noise, action_noise):
     return actions, latents
 
 
+def _mock_features(pool):
+    return lambda latent: {"pool": pool(latent), "struct": pool(latent)[:, None, None].expand(-1, latent.shape[2], 2, -1),
+                           "tokens": pool(latent)[:, None].expand(-1, 32 * latent.shape[2], -1)}
+
+
 def test_single_plan_infer_reproduces_baseline_bit_for_bit():
     policy = _mock_policy()
     torch.manual_seed(1)
@@ -1691,13 +1698,36 @@ def test_single_plan_infer_reproduces_baseline_bit_for_bit():
 def test_decode_candidates_keeps_its_keys_on_the_mocked_policy():
     policy = _mock_policy()
     policy._begin_chunk = lambda batch: (False, None, 4, torch.zeros(1, 48, 1, 2, 4))
-    policy._pool_from_latent = lambda latent: torch.zeros(1, STATE_DIM)
+    policy._features_from_latent = _mock_features(lambda latent: torch.zeros(1, STATE_DIM))
     decoded = policy.decode_candidates({"task": ["t"]}, k=4)
-    assert set(decoded) == {"s", "z", "a_base", "video_noise", "latents", "first_chunk"}
+    assert set(decoded) == {"s", "state_struct", "state_tokens", "state_latent", "z", "a_base", "video_noise", "latents", "first_chunk"}
     assert decoded["a_base"].shape == decoded["z"].shape == (4, HORIZON, ACTION_DIM)
     assert decoded["latents"].shape == decoded["video_noise"].shape == (1, 48, 4, 2, 4)
     assert decoded["first_chunk"] is False and policy._exec_step == 0
     assert [call for call in policy.transformer.calls if call == (False, 1)] == [(False, 1)]
+
+
+def test_structured_means_split_cameras_and_match_the_pool_without_text():
+    from script.lingbot_rl_policy import structured_means
+    tokens = torch.zeros(2, 4 * 4 * 8, STATE_DIM)
+    grid = tokens.reshape(2, 4, 4, 8, STATE_DIM)
+    grid[:, :, :, :4] = 1.0
+    grid[:, :, :, 4:] = 3.0
+    grid[1, 2] += 10.0
+    struct = structured_means(tokens, 4, 4, 8)
+    assert struct.shape == (2, 4, 2, STATE_DIM)
+    assert torch.equal(struct[0, :, 0], torch.ones(4, STATE_DIM)) and torch.equal(struct[0, :, 1], torch.full((4, STATE_DIM), 3.0))
+    assert torch.equal(struct[1, 2, 0], torch.full((STATE_DIM,), 11.0)) and torch.equal(struct[1, 1, 0], torch.ones(STATE_DIM))
+    torch.testing.assert_close(pool_critic_state(tokens[:1], torch.full((1, 512, STATE_DIM), 2.0))[0], struct[0].mean(dim=(0, 1)))
+
+
+def test_features_from_latent_splits_the_real_token_grid_by_camera_in_one_pass():
+    policy = _mock_policy()
+    latent = torch.randn(1, 48, 4, 2, 4)
+    calls = len(policy.transformer.calls)
+    feats = policy._features_from_latent(latent)
+    assert len(policy.transformer.calls) == calls + 1
+    assert torch.equal(feats["struct"][0, :, 0], feats["tokens"][0, 0::2]) and torch.equal(feats["struct"][0, :, 1], feats["tokens"][0, 1::2])
 
 
 def test_decode_plans_shapes_and_restores_policy_state():
@@ -1755,16 +1785,18 @@ def test_select_plan_batched_matches_looped_decode_plans_and_keeps_winner_rows()
     torch.manual_seed(11)
     ref = looped.decode_plans({"task": ["t"]}, plans=2, exec_step=-1, k=3)
     policy = _mock_policy()
-    policy._begin_chunk, policy._pool_from_latent = begin, pool
+    policy._begin_chunk, policy._features_from_latent = begin, _mock_features(pool)
     torch.manual_seed(11)
     out = policy.select_plan({"task": ["t"]}, plans=2, k=3, rank_fn=lambda s, pools: 1, decode_all=True)
     assert out["plan_index"] == 1 and torch.equal(out["plan_pool"], out["plan_pools"][1:2])
+    assert {"state_struct", "state_tokens", "state_latent", "plan_struct_all", "plan_latent_all"} <= set(out)
+    assert torch.equal(out["plan_struct"], out["plan_struct_all"][1:2]) and torch.equal(out["plan_latent_all"][1:2], out["latents"])
     torch.testing.assert_close(out["plan_a_base_all"], ref["a_base"], rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(out["latents"], ref["latents"][1:2], rtol=1e-5, atol=1e-6)
     cache = policy.transformer.blocks[0].attn1.attn_caches["pos"]["k"]
     assert cache.shape[0] == 2
     winner = _mock_policy()
-    winner._begin_chunk, winner._pool_from_latent = begin, pool
+    winner._begin_chunk, winner._features_from_latent = begin, _mock_features(pool)
     winner.decode_candidates({"task": ["t"]}, k=3, video_noise=ref["video_noise"][1:2], action_noise=mlp_to_model(ref["z"]))
     torch.testing.assert_close(cache, winner.transformer.blocks[0].attn1.attn_caches["pos"]["k"], rtol=1e-5, atol=1e-6)
     out = policy.select_plan({"task": ["t"]}, plans=2, k=3, rank_fn=lambda s, pools: 0)
