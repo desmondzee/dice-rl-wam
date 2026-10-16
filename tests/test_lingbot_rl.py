@@ -646,6 +646,30 @@ def test_feature_rows_default_finalize_and_sample_in_bf16_with_store_only_keys()
     assert legacy.rows()[1]["plan_latent_all"].numel() == 0 and legacy.rows()[1]["state_struct"].shape == (2, STATE_DIM)
 
 
+def test_plan_labels_default_to_zeros_and_sample_with_the_plan_shape():
+    buffer = ChunkReplay(plans=2)
+    first = _replay_row(0.0, 0.0)
+    first["plan_labels"] = np.arange(8, dtype=np.float32).reshape(2, 4)
+    buffer.add_online(first)
+    buffer.add_online(_replay_row(1.0, 1.0))
+    buffer.finalize_episode()
+    rows = buffer.rows()
+    assert rows[0]["plan_labels"].dtype == np.float32 and float(rows[0]["plan_labels"][1, 3]) == 7.0
+    assert rows[1]["plan_labels"].shape == (2, K_CANDIDATES) and not rows[1]["plan_labels"].any()
+    batch = buffer.sample(2, 0.0)
+    assert batch["plan_labels"].shape == (2, 2, K_CANDIDATES) and batch["plan_labels"].dtype == torch.float32
+    bad = _replay_row(0.0, 0.0)
+    bad["plan_labels"] = np.zeros((3, K_CANDIDATES), np.float32)
+    with pytest.raises(ValueError):
+        buffer.add_online(bad)
+    legacy = ChunkReplay(plans=2)
+    payload = buffer.state_dict()
+    for row in payload["data"]:
+        row.pop("plan_labels")
+    legacy.load_state_dict(payload)
+    assert legacy.sample(2, 0.0)["plan_labels"].shape == (2, 2, K_CANDIDATES) and not legacy.rows()[0]["plan_labels"].any()
+
+
 def _eval_normalization():
     return {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
 

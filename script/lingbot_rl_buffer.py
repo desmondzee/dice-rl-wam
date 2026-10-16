@@ -3,7 +3,7 @@ import torch
 
 from script.lingbot_rl_model import GAMMA, K_CANDIDATES, N_STEP_CHUNKS, REPLAY_CAPACITY, STATE_DIM
 
-PLAN_FLOAT_KEYS = ("plan_pool", "plan_pools_all", "plan_a_base_all", "plan_pool_next")
+PLAN_FLOAT_KEYS = ("plan_pool", "plan_pools_all", "plan_a_base_all", "plan_pool_next", "plan_labels")
 FLOAT_KEYS = (
     "s", "z", "a_base", "a", "reward", "done", "s_next", "a_next", "n_steps", "is_expert",
     "z_all", "a_base_all", "z_next_all", "a_base_next_all", "mc_return", *PLAN_FLOAT_KEYS, "proprio", "proprio_next",
@@ -63,8 +63,10 @@ class ChunkReplay:
         stored.setdefault("plan_index", 0)
         _default(stored, "plan_a_base_all", lambda: np.repeat(_host_float(stored["a_base_all"])[None], self.plans, axis=0))
         _default(stored, "plan_pool_next", lambda: np.array(stored["plan_pool"], copy=True))
+        _default(stored, "plan_labels", lambda: np.zeros((self.plans, K_CANDIDATES), np.float32))
         if _host_float(stored["plan_pools_all"]).shape[0] != self.plans or \
-                _host_float(stored["plan_a_base_all"]).shape[0] != self.plans:
+                _host_float(stored["plan_a_base_all"]).shape[0] != self.plans or \
+                _host_float(stored["plan_labels"]).shape != (self.plans, K_CANDIDATES):
             raise ValueError(f"Rows must carry exactly {self.plans} plans")
         stored["plan_index"] = int(stored["plan_index"])
         return stored
