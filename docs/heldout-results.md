@@ -226,6 +226,18 @@ Q ensembles on disjoint data (320k buffer, 20,581 online rows, last 20% held out
 | MC regression, bootstrap resample per head | 0.46 | 0.65 | 0.35 |
 | MC regression, disjoint tenth per head | 0.42 | 0.45 | 0.33 |
 
+Aggregation of the live critic for ranking (320k task 9 buffer, 20,581 online rows; 240k task 0 buffer, 15,561 rows; CPU, 2026-10-16). The same Q heads and actor, all four plans and four candidates per row; only the statistic used to score a plan changes. Split-half: heads 1–5 vs 6–10. Outcome link: Pearson correlation between the executed plan's score minus the mean over the four plans and the row's Monte Carlo return (confounded by training time, as above, but identical across rankers).
+
+| ranker | task 9: split-half agreement / captured | task 9: outcome correlation | task 0: split-half agreement / captured | task 0: outcome correlation | within-state spread, task 9 / task 0 |
+|---|---|---|---|---|---|
+| min over heads, max over candidates (the recipe) | 0.63 / 0.90 | 0.41 | 0.44 / 0.64 | 0.15 | 0.176 / 0.116 |
+| min over heads, mean over candidates | 0.64 / 0.91 | 0.43 | 0.45 / 0.65 | 0.15 | 0.192 / 0.129 |
+| mean over heads, max over candidates | 0.70 / 0.93 | 0.41 | 0.56 / 0.77 | 0.39 | 0.129 / 0.046 |
+| mean over heads, mean over candidates | 0.71 / 0.94 | 0.42 | 0.56 / 0.77 | 0.37 | 0.137 / 0.048 |
+| live V_plan (trained on min / max targets) | 0.55 agreement with the recipe ranker | 0.39 | 0.45 | 0.13 | — |
+
+Mean head spread (std across heads of one candidate's Q): 0.046 (task 9), 0.052 (task 0).
+
 ### Implementation checks (Jarvis, 2026-10-13)
 
 1,100-step smoke: plan-critic loss 4.6 → 0.21 and TD loss 1.86 → 0.05 over nine update logs. On real weights, across-plan base-action spread 0.05–0.06 vs within-plan 0.013–0.019 on the first chunk of three starts; plan pools differ across plans by about 10% of their magnitude. Batched sampling equals the single-plan pass bit for bit at M = 1 and differs from the looped reference at M = 2 by 2 bf16 ulps after the first pass, 0.35 in the final latent. One video pass: 175 ms at CFG batch 2 (78 ms GEMM), 606 ms at batch 8 (392 ms GEMM); batching four plans is 10% faster than looping (6.7 vs 7.4 s per chunk; 1.9 s at M = 1).
