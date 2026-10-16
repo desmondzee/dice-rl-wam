@@ -10,7 +10,7 @@ import numpy as np
 import torch
 
 from script.lingbot_eval_config import TASK_IDS, EvalConfig, episode_plan
-from script.lingbot_rl_buffer import ChunkReplay
+from script.lingbot_rl_buffer import ChunkReplay, host_bf16
 from script.lingbot_rl_config import RLConfig, config_from_dict
 from script.lingbot_rl_data import featurize_experts, load_manifest_episodes
 from script.lingbot_rl_model import (
@@ -27,6 +27,7 @@ SHARPEN_EVERY_STEPS = 5_000
 RESUME_KEYS = {
     "actor", "critic", "target_critic", "plan_critic", "layout", "actor_opt", "critic_opt", "plan_opt",
     "actor_lr", "critic_lr", "plan_lr", "replay", "rng", "env_steps", "chunks", "recipe", "checkpointed", "wandb_id",
+    "episodes",
 }
 
 
@@ -38,13 +39,103 @@ def _env_class():
     return LiberoEnv
 
 
-def make_env(task_id, suite=None, init_states=True):
+def make_env(task_id, suite=None, init_states=True, plus=False, proprio=False):
     return _env_class()(
         task_suite=suite, task_id=task_id, task_suite_name="libero_10",
-        episode_length=520, observation_height=128, observation_width=128, obs_type="pixels",
+        episode_length=520, observation_height=128, observation_width=128,
+        obs_type="pixels_agent_pos" if proprio else "pixels",
         init_states=init_states, n_envs=1, num_steps_wait=10, control_freq=20, control_mode="relative",
-        hard_reset=True,
+        hard_reset=True, is_libero_plus=plus,
     )
+
+
+def _plus_suite():
+    from lerobot.envs.libero import _get_suite
+    return _get_suite("libero_10")
+
+
+RESET_KINDS = ("standard", "robot_init", "layout")
+
+
+def draw_reset(config, episode):
+    if not config.plus_train:
+        return 0, None, 0.0
+    rng = np.random.default_rng([config.seed, episode])
+    kind = int(rng.integers(3))
+    if kind == 0:
+        return 0, None, float(rng.random())
+    variants = config.plus_train[("robot_init", "layout")[kind - 1]]
+    return kind, int(variants[rng.integers(len(variants))]), float(rng.random())
+
+
+def proprio_from_observation(observation):
+    state = observation["robot_state"]
+    quat = np.asarray(state["eef"]["quat"], dtype=np.float64).reshape(4)
+    w = min(max(float(quat[3]), -1.0), 1.0)
+    den = float(np.sqrt(max(1.0 - w * w, 0.0)))
+    axis_angle = np.zeros(3) if den <= 1e-10 else quat[:3] * (2.0 * np.arccos(w) / den)
+    return np.concatenate([np.asarray(state["eef"]["pos"], dtype=np.float64).reshape(3), axis_angle,
+                           np.asarray(state["gripper"]["qpos"], dtype=np.float64).reshape(2)]).astype(np.float32)
+
+
+def rl_observation_batch(observation, instruction, device, proprio):
+    from script.lingbot_eval import observation_batch
+    batch = observation_batch(observation, instruction, device)
+    if proprio:
+        batch["proprio"] = torch.from_numpy(proprio_from_observation(observation))[None].to(device)
+    return batch
+
+
+def run_rl_episode(policy, env, entry, instruction, norm, device, proprio, video_writer=None):
+    from script.lingbot_eval import decode_action, run_episode, seed_all, video_frame
+    if not proprio:
+        return run_episode(policy, env, entry, instruction, norm, device, video_writer=video_writer)
+    started = time.perf_counter()
+    seed_all(entry["seed"])
+    env.init_state_id = entry["init_state_id"]
+    observation, _ = env.reset(seed=entry["seed"])
+    policy.reset()
+    seed_all(entry["seed"])
+    if video_writer is not None:
+        video_writer.append_data(video_frame(observation))
+    success = terminated = truncated = False
+    with torch.inference_mode():
+        for step in range(1, 521):
+            normalized = policy.select_action(rl_observation_batch(observation, instruction, device, True))
+            observation, _, terminated, truncated, info = env.step(decode_action(normalized, norm))
+            success = env_success(info)
+            if video_writer is not None:
+                video_writer.append_data(video_frame(observation))
+            if success or terminated or truncated:
+                break
+    truncated = bool(truncated or (step == 520 and not success and not terminated))
+    return {**entry, "instruction": instruction, "success": success, "policy_steps": step, "terminated": bool(terminated),
+            "truncated": truncated, "seconds": time.perf_counter() - started}
+
+
+def object_layout(inner):
+    model = inner.sim.model
+    bodies = sorted(inner.obj_body_id)
+    joints = []
+    for name in bodies:
+        root = inner.obj_body_id[name]
+        for joint in range(model.njnt):
+            if model.jnt_type[joint] not in (2, 3):
+                continue
+            body = model.jnt_bodyid[joint]
+            while body > 0 and body != root:
+                body = model.body_parentid[body]
+            if body == root:
+                joints.append(model.joint_id2name(joint))
+    return {"bodies": bodies, "joints": joints, "body_quaternion": "wxyz"}
+
+
+def object_state(inner, layout):
+    data, model = inner.sim.data, inner.sim.model
+    parts = [np.concatenate([data.body_xpos[inner.obj_body_id[name]], data.body_xquat[inner.obj_body_id[name]]])
+             for name in layout["bodies"]]
+    parts.append(np.asarray([data.qpos[model.get_joint_qpos_addr(name)] for name in layout["joints"]], dtype=np.float64))
+    return np.concatenate(parts).astype(np.float32)
 
 
 def sharpening_metrics(model, state, a_base, action):
@@ -63,11 +154,12 @@ def replay_sharpening(model, sample):
     online = mlp_float(sample["is_expert"]).reshape(-1) == 0
     if int(online.sum()) < 2:
         return {}
-    state, z_all, base_all = mlp_float(sample["s"])[online], mlp_float(sample["z_all"])[online], mlp_float(sample["a_base_all"])[online]
-    pool = sample.get("plan_pool")
+    state = model.state_input(sample["s"], sample.get("state_struct"), sample.get("proprio"))[online]
+    z_all, base_all = mlp_float(sample["z_all"])[online], mlp_float(sample["a_base_all"])[online]
+    pool = model.plan_input(sample.get("plan_pool"), sample.get("plan_struct"))
     batch, k = z_all.shape[:2]
     state_k = state.unsqueeze(1).expand(batch, k, -1).reshape(batch * k, -1)
-    pool_k = None if pool is None else mlp_float(pool)[online].unsqueeze(1).expand(batch, k, -1).reshape(batch * k, -1)
+    pool_k = None if pool is None else pool[online].unsqueeze(1).expand(batch, k, -1).reshape(batch * k, -1)
     critic_k = model.critic_state(state_k, pool_k)
     base_flat = base_all.reshape(batch * k, HORIZON, ACTION_DIM)
     with torch.no_grad():
@@ -77,7 +169,7 @@ def replay_sharpening(model, sample):
         metrics = {"replay_delta_v": delta_v, "replay_delta_h": float((bin_entropy(before) - bin_entropy(after)).mean()),
                    "replay_delta_log_std": float((log_std(after) - log_std(before)).mean())}
         if model.plan_critic is not None:
-            pools_all = mlp_float(sample["plan_pools_all"])[online]
+            pools_all = model.plan_input(sample["plan_pools_all"], sample.get("plan_struct_all"))[online]
             plans = pools_all.shape[1]
             v_plan = model.plan_critic(state.unsqueeze(1).expand(batch, plans, -1).reshape(batch * plans, -1),
                                        pools_all.reshape(batch * plans, -1)).reshape(batch, plans)
@@ -162,7 +254,7 @@ def restore_rng(rng):
         torch.cuda.set_rng_state_all(_cpu_byte_rng(rng["cuda"]))
 
 
-def save_resume(path, model, buffer, env_steps, chunks, recipe, checkpointed=(), wandb_id=None):
+def save_resume(path, model, buffer, env_steps, chunks, recipe, checkpointed=(), wandb_id=None, episodes=0):
     payload = {
         **model.resume_state_dict(),
         "replay": buffer.state_dict(),
@@ -172,6 +264,7 @@ def save_resume(path, model, buffer, env_steps, chunks, recipe, checkpointed=(),
         "recipe": recipe,
         "checkpointed": sorted(int(point) for point in checkpointed),
         "wandb_id": wandb_id,
+        "episodes": int(episodes),
     }
     if "transformer" in payload or set(payload) - RESUME_KEYS:
         raise ValueError("Resume payload includes disallowed keys")
@@ -193,7 +286,7 @@ def load_resume(path, model, buffer, recipe):
     if payload.get("rng"):
         restore_rng(payload["rng"])
     checkpointed = {int(point) for point in payload.get("checkpointed", ())}
-    return int(payload["env_steps"]), int(payload.get("chunks", 0)), checkpointed, payload.get("wandb_id")
+    return int(payload["env_steps"]), int(payload.get("chunks", 0)), checkpointed, payload.get("wandb_id"), int(payload.get("episodes", 0))
 
 
 def _read_prepared(path):
@@ -255,34 +348,35 @@ def _update_from_buffer(model, buffer, expert_ratio, device, filter_active):
     info = {}
     for step in range(GRADIENT_STEPS):
         sample = _sample_batch(buffer, expert_ratio, device)
-        critic_state = model.critic_state(sample["s"], sample.get("plan_pool"))
-        next_critic_state = model.critic_state(sample["s_next"], sample.get("plan_pool_next"))
+        state = model.state_input(sample["s"], sample["state_struct"], sample["proprio"])
+        next_state = model.state_input(sample["s_next"], sample["state_struct_next"], sample["proprio_next"])
+        critic_state = model.critic_state(state, model.plan_input(sample["plan_pool"], sample["plan_struct"]))
+        next_critic_state = model.critic_state(next_state, model.plan_input(sample["plan_pool_next"], sample["plan_struct_next"]))
         target = model.n_step_target(
             sample["reward"], sample["done"], next_critic_state,
             sample["z_next_all"], sample["a_base_next_all"], sample["n_steps"])
         if (step + 1) % ACTOR_EVERY == 0:
             info.update(model.update_actor(
-                sample["s"], critic_state, sample["a"], sample["z_all"], sample["a_base_all"], sample["is_expert"],
+                state, critic_state, sample["a"], sample["z_all"], sample["a_base_all"], sample["is_expert"],
                 sample["mc_return"], filter_active))
         info.update(model.update_critic(critic_state, sample["a"], target))
         if model.plan_critic is not None:
-            info.update(model.update_plan_critic(sample["s"], sample["plan_pools_all"], sample["z_all"], sample["plan_a_base_all"]))
+            info.update(model.update_plan_critic(
+                state, model.plan_input(sample["plan_pools_all"], sample["plan_struct_all"]), sample["z_all"], sample["plan_a_base_all"]))
         if (step + 1) % ACTOR_EVERY == 0:
             model.polyak_update()
     return info
 
 
-def _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir, episodes):
-    from script.lingbot_eval import run_episode
-
+def _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir, episodes, proprio=False):
     plan_cfg = EvalConfig(stage="heldout", seed=42)
     rows = []
     for task in tasks:
         plan = episode_plan(plan_cfg, task["task_id"], plan_cfg.episodes_per_task)[:episodes]
-        env = make_env(task["task_id"], suite, init_states=False)
+        env = make_env(task["task_id"], suite, init_states=False, proprio=proprio)
         try:
             for entry in plan:
-                row = run_episode(policy, env, entry, task["instruction"], norm, device)
+                row = run_rl_episode(policy, env, entry, task["instruction"], norm, device, proprio)
                 rows.append(row)
                 _write_json(
                     checkpoint_dir(output_dir, env_steps) / "train_eval" / f"task_{task['task_id']:02d}_{entry['episode_index']:02d}.json",
@@ -303,10 +397,11 @@ def _maybe_sharpen(model, policy, batch, device):
         decoded = policy.select_plan(batch, policy.eval_plans, 8, rank_fn=model.rank_plans)
     else:
         decoded = policy.decode_candidates(batch, k=8)
-    pool = decoded["plan_pool"].to(device=device, dtype=torch.float32) if policy.eval_plans > 1 else None
+    state = model.state_input(decoded["s"].to(device), decoded.get("state_struct"), batch.get("proprio"))
+    pool = model.plan_input(decoded["plan_pool"].to(device), decoded.get("plan_struct")) if policy.eval_plans > 1 else None
     a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
     noise = decoded["z"].to(device=device, dtype=torch.float32)
-    state = decoded["s"].to(device=device, dtype=torch.float32)
+    pooled = state
     if state.shape[0] == 1 and a_base.shape[0] > 1:
         state = state.expand(a_base.shape[0], -1)
     with torch.no_grad():
@@ -314,7 +409,6 @@ def _maybe_sharpen(model, policy, batch, device):
     if a_base.ndim == 3:
         a_base = a_base.unsqueeze(0)
         action = action.unsqueeze(0)
-        pooled = decoded["s"].to(device)
     else:
         pooled = state
     critic_state = model.critic_state(pooled, None if pool is None else pool.expand(pooled.shape[0], -1))
@@ -353,7 +447,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     policy = load_residual_policy(prepared.get("checkpoint"), prepared.get("model_path"), architecture, config.video_exec_step,
                                   config.video_steps, config.action_steps)
     model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon,
-                              plan_candidates=config.plan_candidates)
+                              plan_candidates=config.plan_candidates, state_features=config.state_features, proprio=config.proprio)
     policy.residual_model = model
     policy.eval_candidates = config.k_candidates
     policy.eval_plans = config.plan_candidates
@@ -369,22 +463,35 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         if episodes or cache_path.is_file():
             _ingest_experts(buffer, featurize_experts(policy, episodes, manifest, norm, cache_path), config.task_ids)
     suite = None
-    if prepared.get("assets_path"):
+    if config.plus_train:
+        suite = _plus_suite()
+    elif prepared.get("assets_path"):
         from script.lingbot_eval import describe_suite
         suite, suite_tasks = describe_suite(prepared["assets_path"])
         tasks = suite_tasks
     tasks = [task for task in tasks if task["task_id"] in config.task_ids]
+    layout = None
+    if config.proprio:
+        rng = capture_rng()
+        env = make_env(tasks[0]["task_id"], suite, init_states=False, proprio=True)
+        try:
+            env.reset(seed=config.seed)
+            layout = object_layout(env._env.env)
+        finally:
+            env.close()
+        restore_rng(rng)
     env_steps = 0
     chunks = 0
+    episodes = 0
     checkpointed = set()
     wandb_id = None
     resume_path = output_dir / "resume" / "latest.pt"
     if resume:
-        env_steps, chunks, checkpointed, wandb_id = load_resume(resume_path, model, buffer, recipe)
+        env_steps, chunks, checkpointed, wandb_id, episodes = load_resume(resume_path, model, buffer, recipe)
     if max_env_steps is None and env_steps == 0:
         if not any(float(row["is_expert"]) == 1.0 for row in buffer.rows()):
             raise RuntimeError("Expert features missing; RLPD requires the SFT demos")
-    _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe, "runtime": runtime})
+    _write_json(output_dir / "settings.json", {"config": config.to_dict(), "recipe": recipe, "runtime": runtime, "object_layout": layout})
     wandb_kwargs = {
         "project": config.wandb_project,
         "entity": config.wandb_entity,
@@ -415,31 +522,34 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         if point in eval_points:
             policy.eval_candidates = 1 if env_steps < config.selection_warmup_steps else config.k_candidates
             rng = capture_rng()
-            summary = _train_eval(policy, tasks, norm, device, suite, point, output_dir, config.train_eval_episodes)
+            summary = _train_eval(policy, tasks, norm, device, suite, point, output_dir, config.train_eval_episodes, config.proprio)
             restore_rng(rng)
             logged = {"train_eval/macro_success_rate": summary["macro_success_rate"], "env_steps": env_steps}
             for task_id, success in summary["per_task_success"].items():
                 logged[f"train_eval/task_{task_id}_success"] = success
-            env = make_env(tasks[0]["task_id"], suite, init_states=False)
+            env = make_env(tasks[0]["task_id"], suite, init_states=False, proprio=config.proprio)
             try:
                 observation, _ = env.reset(seed=0)
                 policy.reset()
                 logged.update(_maybe_sharpen(
-                    model, policy, observation_batch(observation, tasks[0]["instruction"], device), device))
+                    model, policy, rl_observation_batch(observation, tasks[0]["instruction"], device, config.proprio), device))
             finally:
                 env.close()
                 policy.reset()
             run.log(logged)
-        save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id)
+        save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id, episodes)
         if commit is not None:
             commit(point)
 
     maybe_checkpoint()
-    episodes = 0
     while env_steps < budget:
         task = tasks[int(np.random.randint(len(tasks)))]
         task_id = task["task_id"]
-        env = make_env(task_id, suite, init_states=False)
+        kind, variant, draw = draw_reset(config, episodes)
+        env_task = task_id if variant is None else variant
+        env = make_env(env_task, suite, init_states=kind == 2, plus=kind > 0, proprio=config.proprio)
+        if kind == 2:
+            env.init_state_id = int(draw * len(env._init_states))
         policy.reset()
         observation, _ = env.reset(seed=config.seed + env_steps)
         episode_return = 0.0
@@ -448,7 +558,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         saw_success = False
         try:
             while env_steps < budget and episode_length < 520:
-                batch = observation_batch(observation, task["instruction"], device)
+                batch = rl_observation_batch(observation, task["instruction"], device, config.proprio)
+                sim_state = object_state(env._env.env, layout) if layout is not None else None
                 started = time.perf_counter()
                 plans = config.plan_candidates
                 if plans > 1:
@@ -457,10 +568,10 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                                                  random_plan=random_plan, decode_all=True)
                 else:
                     decoded = policy.decode_candidates(batch, k=config.k_candidates)
-                state = decoded["s"].to(device=device, dtype=torch.float32)
+                state = model.state_input(decoded["s"].to(device), decoded.get("state_struct"), batch.get("proprio"))
                 noise = decoded["z"].to(device=device, dtype=torch.float32)
                 a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
-                pool = decoded["plan_pool"].to(device=device, dtype=torch.float32) if plans > 1 else None
+                plan_in = model.plan_input(decoded["plan_pool"].to(device), decoded.get("plan_struct")) if plans > 1 else None
                 k = a_base.shape[0]
                 if k != config.k_candidates:
                     raise RuntimeError("action candidate batching failed")
@@ -470,16 +581,16 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     if env_steps < config.selection_warmup_steps:
                         star = int(np.random.randint(k))
                     else:
-                        critic_k = model.critic_state(state_k, None if pool is None else pool.expand(k, -1))
+                        critic_k = model.critic_state(state_k, None if plan_in is None else plan_in.expand(k, -1))
                         star = int(model.critic(critic_k, executed).reshape(-1).argmax())
                     if plans > 1:
-                        pools_all = decoded["plan_pools"].to(device=device, dtype=torch.float32)
+                        plans_in = model.plan_input(decoded["plan_pools"].to(device), decoded.get("plan_struct_all"))
                         all_base = decoded["plan_a_base_all"].to(device=device, dtype=torch.float32)
                         flat_state = state.expand(plans * k, -1)
                         flat_base = all_base.reshape(plans * k, HORIZON, ACTION_DIM)
-                        q_all = model.critic(model.critic_state(flat_state, pools_all.repeat_interleave(k, dim=0)),
+                        q_all = model.critic(model.critic_state(flat_state, plans_in.repeat_interleave(k, dim=0)),
                                              apply_residual(flat_base, model.actor(flat_state, noise.repeat(plans, 1, 1), flat_base))).reshape(plans, k).max(dim=1).values
-                        v_all = model.plan_critic(state.expand(plans, -1), pools_all).reshape(-1)
+                        v_all = model.plan_critic(state.expand(plans, -1), plans_in).reshape(-1)
                         plan_info = {"plan_agreement": float(int(v_all.argmax()) == int(q_all.argmax())),
                                      "plan_regret": float(q_all.max() - q_all[decoded["plan_index"]]),
                                      "plan_value_spread": float(v_all.max() - v_all.min()),
@@ -510,7 +621,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 chunk_seconds += time.perf_counter() - started
                 chunk_actions += executed_n
                 episode_return += chunk_reward
-                s_cpu = _host_array(state)[0]
+                s_cpu = _host_array(decoded["s"])[0]
                 buffer.add_online({
                     "s": s_cpu,
                     "z": _host_array(noise[star]),
@@ -524,8 +635,14 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     "task_id": task_id,
                     "n_env_actions": executed_n,
                     "is_expert": np.float32(0.0),
-                    **({"plan_pool": _host_array(pool)[0], "plan_pools_all": _host_array(pools_all),
+                    "reset_kind": kind,
+                    "variant_index": env_task,
+                    **({"proprio": _host_array(batch["proprio"])[0], "object_state": sim_state} if config.proprio else {}),
+                    **{key: host_bf16(decoded[key][0]) for key in ("state_struct", "state_tokens", "state_latent") if key in decoded},
+                    **({"plan_pool": _host_array(decoded["plan_pool"].to(device))[0], "plan_pools_all": _host_array(decoded["plan_pools"].to(device)),
                         "plan_index": int(decoded["plan_index"]), "plan_a_base_all": _host_array(all_base)} if plans > 1 else {}),
+                    **({"plan_struct": host_bf16(decoded["plan_struct"][0]), "plan_struct_all": host_bf16(decoded["plan_struct_all"]),
+                        "plan_latent_all": host_bf16(decoded["plan_latent_all"])} if plans > 1 and "plan_struct_all" in decoded else {}),
                 })
                 chunks += 1
                 expert_ratio = config.rlpd_expert_ratio(env_steps)
@@ -536,7 +653,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         update_info.update(replay_sharpening(model, _sample_batch(buffer, expert_ratio, device)))
                         next_sharpen = env_steps - env_steps % SHARPEN_EVERY_STEPS + SHARPEN_EVERY_STEPS
                     run.log({
-                        **update_info, **plan_info, "env_steps": env_steps, "chunks": chunks, "expert_ratio": expert_ratio,
+                        **update_info, **plan_info, **({f"{key}/{RESET_KINDS[kind]}": value for key, value in plan_info.items()} if config.plus_train else {}),
+                        "env_steps": env_steps, "chunks": chunks, "expert_ratio": expert_ratio,
                         "buffer_online_rows": buffer.ready_online_count(),
                         "selection_active": float(env_steps >= config.selection_warmup_steps),
                         "seconds_per_env_step": chunk_seconds / max(chunk_actions, 1),
@@ -548,16 +666,19 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             buffer.finalize_episode()
         finally:
             env.close()
+        name = RESET_KINDS[kind]
         run.log({
             "env_steps": env_steps, "episode_return": episode_return,
             "episode_success": episode_success, "episode_length": episode_length,
+            "reset_kind": kind, "variant_index": env_task,
+            **({f"episode_success_{name}": episode_success, f"episode_length_{name}": episode_length} if config.plus_train else {}),
         })
         episodes += 1
         maybe_checkpoint()
         if episodes % 10 == 0:
-            save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id)
+            save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id, episodes)
     save_inference(output_dir / "residual.pt", model)
-    save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id)
+    save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id, episodes)
     _write_json(output_dir / "summary.json", {"env_steps": env_steps, "chunks": chunks})
     if commit is not None:
         commit(env_steps)

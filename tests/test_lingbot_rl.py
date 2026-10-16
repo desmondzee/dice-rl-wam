@@ -1,9 +1,12 @@
+import importlib.util
 import io
 import json
+import os
 import random
 import zipfile
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -1102,11 +1105,12 @@ def test_save_load_resume_roundtrips_rng_checkpointed_and_schedulers(tmp_path):
     random.seed(999)
     restored = DiceResidualModel(device="cpu")
     buffer = ChunkReplay()
-    env_steps, chunks, checkpointed, wandb_id = load_resume(path, restored, buffer, recipe)
+    env_steps, chunks, checkpointed, wandb_id, episodes = load_resume(path, restored, buffer, recipe)
     assert env_steps == 0
     assert chunks == 0
     assert checkpointed == {0, 80_000}
     assert wandb_id == "8otkv33a"
+    assert episodes == 0
     assert restored.actor_lr.state_dict()["last_epoch"] == 12 == restored.critic_lr.last_epoch
     assert restored.actor_opt.param_groups[0]["lr"] == model.actor_opt.param_groups[0]["lr"]
     assert any(float(row["is_expert"]) == 1.0 for row in buffer.rows())
@@ -1133,7 +1137,7 @@ def test_load_resume_restores_rng_from_non_byte_mapped_tensor(tmp_path):
     payload["rng"]["torch"] = payload["rng"]["torch"].to(dtype=torch.int32)
     torch.save(payload, path)
     torch.manual_seed(0)
-    env_steps, chunks, checkpointed, wandb_id = load_resume(
+    env_steps, chunks, checkpointed, wandb_id, episodes = load_resume(
         path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
     assert env_steps == 12
     assert chunks == 3
@@ -1168,7 +1172,7 @@ def test_load_resume_accepts_legacy_torch_numpy_rng(tmp_path):
     payload.pop("checkpointed")
     payload.pop("wandb_id")
     torch.save(payload, path)
-    env_steps, _, checkpointed, wandb_id = load_resume(
+    env_steps, _, checkpointed, wandb_id, episodes = load_resume(
         path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
     assert env_steps == 0
     assert checkpointed == set()
@@ -1191,15 +1195,22 @@ class _StubPolicy:
             "a_base": a_base,
             "video_noise": torch.zeros(1),
             "first_chunk": True,
+            "state_struct": torch.zeros(1, 2, STATE_DIM),
+            "state_tokens": torch.zeros(1, 32, STATE_DIM),
+            "state_latent": torch.zeros(1, 48, 1, 8, 16),
         }
 
     def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False):
         type(self).plan_calls.append((plans, k, random_plan, decode_all))
         base = self.decode_candidates(batch, k)
         pools = torch.stack([torch.full((STATE_DIM,), float(m)) for m in range(plans)])
+        struct_all = pools[:, None].expand(plans, 8, STATE_DIM)
         all_base = torch.stack([base["a_base"] + 10.0 * m for m in range(plans)])
-        index = 1 if random_plan else int(rank_fn(base["s"], pools))
-        return {**base, "plan_pools": pools, "plan_pool": pools[index:index + 1], "plan_index": index,
+        model = self.residual_model
+        index = 1 if random_plan else int(rank_fn(
+            model.state_input(base["s"], base["state_struct"], batch.get("proprio")), model.plan_input(pools, struct_all)))
+        return {**base, "plan_pools": pools, "plan_struct_all": struct_all, "plan_latent_all": torch.zeros(plans, 48, 4, 8, 16),
+                "plan_pool": pools[index:index + 1], "plan_struct": struct_all[index:index + 1], "plan_index": index,
                 "plan_a_base_all": all_base, "a_base": all_base[index]}
 
     def commit_executed(self, chunk, first_chunk=False):
@@ -1209,8 +1220,8 @@ class _StubPolicy:
         return None
 
 
-def _sum_critic_model(device="cpu", residual_input="z", epsilon=-0.5, plan_candidates=1):
-    model = DiceResidualModel(device=device, residual_input=residual_input, plan_candidates=plan_candidates)
+def _sum_critic_model(device="cpu", residual_input="z", epsilon=-0.5, plan_candidates=1, **kwargs):
+    model = DiceResidualModel(device=device, residual_input=residual_input, plan_candidates=plan_candidates, **kwargs)
     model.critic = _SumCritic()
     return model
 
@@ -1226,10 +1237,17 @@ def _smoke_train(tmp_path, monkeypatch, budget, prepared=None, model_factory=Non
         def __init__(self, **env_kwargs):
             envs.append(env_kwargs)
             self.steps = 0
+            self.proprio = env_kwargs.get("obs_type") == "pixels_agent_pos"
+            self._init_states = [0]
+            self._env = SimpleNamespace(env=None)
 
         def _obs(self):
             zeros = np.zeros((128, 128, 3), np.uint8)
-            return {"pixels": {"image": zeros, "image2": zeros}}
+            obs = {"pixels": {"image": zeros, "image2": zeros}}
+            if self.proprio:
+                obs["robot_state"] = {"eef": {"pos": np.array([0.1, 0.2, 0.3]), "quat": np.array([0.0, 0.0, 0.0, 1.0])},
+                                      "gripper": {"qpos": np.array([0.04, -0.04])}}
+            return obs
 
         def reset(self, seed=None):
             self.steps = 0
@@ -1259,6 +1277,9 @@ def _smoke_train(tmp_path, monkeypatch, budget, prepared=None, model_factory=Non
         monkeypatch.setattr(train, "DiceResidualModel", model_factory)
     monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _StubPolicy())
     monkeypatch.setattr(train, "LiberoEnv", StubEnv)
+    monkeypatch.setattr(train, "_plus_suite", lambda: None)
+    monkeypatch.setattr(train, "object_layout", lambda inner: {"bodies": ["mug"], "joints": ["door"]})
+    monkeypatch.setattr(train, "object_state", lambda inner, layout: np.array([7.0, 8.0], np.float32))
     monkeypatch.setattr(train.np.random, "randint", lambda n: 0 if n == 1 else 1)
     monkeypatch.setitem(sys.modules, "wandb", type("W", (), {
         "init": staticmethod(lambda **k: wandb_calls.append(k) or Run()),
@@ -1362,6 +1383,118 @@ def test_train_resume_reuses_wandb_id_and_skips_ingest(tmp_path, monkeypatch):
         tmp_path, monkeypatch, 24, prepared=prepared, resume=True, dataset_root=tmp_path / "dataset")
     assert out["wandb"][0]["id"] == "run-from-checkpoint"
     assert out["wandb"][0]["resume"] == "must"
+
+
+def test_draw_reset_is_per_episode_deterministic_and_covers_every_kind():
+    from script.lingbot_rl_config import plus_train_variants
+    from script.lingbot_rl_train import draw_reset
+    config = RLConfig(task_ids=(9,), plus_train=plus_train_variants())
+    draws = [draw_reset(config, episode) for episode in range(300)]
+    assert draws == [draw_reset(config, episode) for episode in range(300)]
+    assert {draw[0] for draw in draws} == {0, 1, 2} and all(0.0 <= draw[2] < 1.0 for draw in draws)
+    assert all(draw[1] is None for draw in draws if draw[0] == 0)
+    assert all(draw[1] in config.plus_train[("robot_init", "layout")[draw[0] - 1]] for draw in draws if draw[0])
+    assert [draw[:2] for draw in draws[:4]] == [(0, None), (1, 673), (0, None), (2, 1989)]
+    assert draw_reset(RLConfig(), 5) == (0, None, 0.0)
+
+
+def test_proprio_from_observation_follows_the_dataset_convention():
+    from script.lingbot_rl_train import proprio_from_observation
+    observation = {"robot_state": {"eef": {"pos": np.array([1.0, 2.0, 3.0]), "quat": np.array([0.0, 0.0, np.sin(0.3), np.cos(0.3)])},
+                                   "gripper": {"qpos": np.array([0.04, -0.04])}}}
+    state = proprio_from_observation(observation)
+    assert state.dtype == np.float32 and state.shape == (8,)
+    np.testing.assert_allclose(state, [1.0, 2.0, 3.0, 0.0, 0.0, 0.6, 0.04, -0.04], atol=1e-6)
+    observation["robot_state"]["eef"]["quat"] = np.array([0.0, 0.0, 0.0, 1.0])
+    np.testing.assert_allclose(proprio_from_observation(observation)[3:6], 0.0)
+
+
+def test_object_layout_walks_articulated_joints_under_base_bodies_and_reads_poses():
+    from script.lingbot_rl_train import object_layout, object_state
+    model = SimpleNamespace(njnt=3, jnt_type=[0, 3, 3], jnt_bodyid=[2, 4, 5], body_parentid=[0, 0, 0, 0, 3, 1],
+                            joint_id2name=lambda joint: ["mug_free", "door_hinge", "robot_joint"][joint],
+                            get_joint_qpos_addr=lambda name: {"door_hinge": 9}[name])
+    data = SimpleNamespace(body_xpos=np.arange(18, dtype=np.float64).reshape(6, 3), body_xquat=np.arange(24, dtype=np.float64).reshape(6, 4),
+                           qpos=np.arange(12, dtype=np.float64))
+    inner = SimpleNamespace(sim=SimpleNamespace(model=model, data=data), obj_body_id={"mug": 2, "microwave": 3})
+    layout = object_layout(inner)
+    assert layout == {"bodies": ["microwave", "mug"], "joints": ["door_hinge"], "body_quaternion": "wxyz"}
+    expected = np.concatenate([data.body_xpos[3], data.body_xquat[3], data.body_xpos[2], data.body_xquat[2], [9.0]]).astype(np.float32)
+    np.testing.assert_array_equal(object_state(inner, layout), expected)
+    inner.obj_body_id["cookies"] = 5
+    np.testing.assert_array_equal(object_state(inner, layout), expected)
+    with pytest.raises(KeyError):
+        object_state(inner, {"bodies": ["bowl"], "joints": []})
+
+
+def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(tmp_path, monkeypatch):
+    import script.lingbot_rl_model as model_module
+    from script.lingbot_rl_config import plus_train_variants
+    from script.lingbot_rl_train import draw_reset
+    monkeypatch.setattr(model_module, "HIDDEN", (32, 32, 32))
+    config = RLConfig(task_ids=(9,), plan_candidates=2, plan_random_prob=0.0, selection_warmup_steps=0, residual_input="base",
+                      proprio=True, state_features="struct", plus_train=plus_train_variants())
+    out = _smoke_train(tmp_path, monkeypatch, 60, model_factory=lambda **kw: DiceResidualModel(**kw), config=config)
+    probe, envs = out["envs"][0], out["envs"][1:]
+    assert (probe["task_id"], probe["init_states"], probe["obs_type"]) == (9, False, "pixels_agent_pos")
+    draws = [draw_reset(config, episode) for episode in range(len(envs))]
+    assert [draw[0] for draw in draws] == [0, 1, 0, 2, 1] and all(env["obs_type"] == "pixels_agent_pos" for env in envs)
+    assert [(env["task_id"], env["init_states"], env["is_libero_plus"]) for env in envs] == \
+        [(9 if variant is None else variant, kind == 2, kind > 0) for kind, variant, _ in draws]
+    rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
+    np.testing.assert_allclose(rows[0]["proprio"], [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, -0.04], atol=1e-6)
+    assert rows[0]["plan_pool"].shape == rows[0]["s"].shape == (STATE_DIM,) and rows[0]["plan_pools_all"].shape == (2, STATE_DIM)
+    assert rows[0]["state_struct"].dtype == torch.bfloat16 and rows[0]["object_state"].tolist() == [7.0, 8.0]
+    assert [row["reset_kind"] for row in rows] == [0, 1, 0, 2, 1] and [row["variant_index"] for row in rows[:2]] == [9, 673]
+    episode_logs = [entry for entry in out["logs"] if "reset_kind" in entry]
+    assert episode_logs[1]["variant_index"] == 673 and {"episode_success_robot_init", "episode_length_robot_init"} <= set(episode_logs[1])
+    updates = [entry for entry in out["logs"] if "plan_critic_loss" in entry]
+    assert updates and any(key.startswith("plan_agreement/") for key in updates[0])
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    assert settings["object_layout"] == {"bodies": ["mug"], "joints": ["door"]} and settings["config"]["plus_train"]["layout"][0] == 1982
+    assert out["resume"]["episodes"] == 5 and out["resume"]["layout"] == {"state_features": "struct", "proprio": True, "plan_candidates": 2}
+    assert out["wandb"][0]["config"]["proprio"] is True and out["wandb"][0]["config"]["state_features"] == "struct"
+    assert not any("episode_success_standard" in entry for entry in _smoke_train(tmp_path / "plain", monkeypatch, 24)["logs"])
+
+
+_GB10 = bool(os.environ.get("DICE_DATA")) and importlib.util.find_spec("libero") is not None
+
+
+@pytest.mark.skipif(not _GB10, reason="needs DICE_DATA and the LIBERO install on a GB10")
+def test_env_proprio_matches_the_first_demo_frame_of_a_stored_initial_state():
+    import pyarrow.parquet as pq
+    from pathlib import Path
+    from script.lingbot_eval import describe_suite, read_json, seed_all
+    from script.lingbot_rl_train import _env_class, proprio_from_observation
+    data = Path(os.environ["DICE_DATA"])
+    prepared = read_json(data / "prepared.json")
+    prepared = read_json(prepared["prepared_path"]) if "prepared_path" in prepared else prepared
+    manifest = read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json")
+    root = Path((data / "dataset_root").read_text().strip())
+    instruction = next(task["instruction"] for task in prepared["tasks"] if task["task_id"] == 9)
+    demos = []
+    for episode in [episode for episode in manifest["episodes"] if episode["tasks"][0] == instruction][:3]:
+        chunk = episode["episode_index"] // manifest["info"]["chunks_size"]
+        path = root / manifest["info"]["data_path"].format(episode_chunk=chunk, episode_index=episode["episode_index"])
+        demos.append(np.asarray(pq.read_table(path, columns=["observation.state"])["observation.state"][0].as_py(), np.float32))
+    suite, _ = describe_suite(prepared["assets_path"])
+    env = _env_class()(task_suite=suite, task_id=9, task_suite_name="libero_10", episode_length=520, observation_height=128,
+                       observation_width=128, obs_type="pixels_agent_pos", init_states=True, n_envs=1, num_steps_wait=0,
+                       control_freq=20, control_mode="relative", hard_reset=True)
+    try:
+        states = []
+        for state_id in range(len(env._init_states)):
+            env.init_state_id = state_id
+            seed_all(0)
+            observation, _ = env.reset(seed=0)
+            states.append(proprio_from_observation(observation))
+    finally:
+        env.close()
+    states = np.stack(states)
+    assert states.shape == (50, 8)
+    for demo in demos:
+        gaps = np.abs(states - demo[None]).max(axis=1)
+        assert gaps.min() < 2e-3, (gaps.min(), np.abs(states - demo[None])[gaps.argmin()])
 
 
 def test_save_inference_checkpoints_keeps_latest_and_step_copy(tmp_path):
