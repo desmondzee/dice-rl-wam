@@ -47,6 +47,7 @@ class RLConfig:
     state_features: str = "pool"
     proprio: bool = False
     plus_train: dict = field(default_factory=dict)
+    plan_target: str = "q"
 
     def validate(self):
         validate_name(self.source_run)
@@ -86,6 +87,10 @@ class RLConfig:
                 raise ValueError("plus_train variants must be distinct task 9 training variants")
         if self.plus_train and tuple(self.task_ids) != (9,):
             raise ValueError("plus_train collection is defined for task 9 only")
+        if self.plan_target not in ("q", "rollout"):
+            raise ValueError("plan_target must be q or rollout")
+        if self.plan_target == "rollout" and (self.plan_candidates < 2 or not self.proprio):
+            raise ValueError("rollout plan labels need plan_candidates > 1 and proprio")
         return self
 
     @property
@@ -192,6 +197,8 @@ class RLConfig:
                 "plus_train": {axis: [int(v) for v in variants] for axis, variants in sorted(self.plus_train.items())},
                 "collection_mix": "thirds_standard_robot_init_layout" if self.plus_train else "standard",
             })
+        if self.plan_target != "q":
+            protocol.update({"plan_target": self.plan_target, "plan_critic": "regression_mean_k_rollout_progress"})
         return protocol
 
     def to_dict(self):

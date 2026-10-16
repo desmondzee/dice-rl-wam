@@ -142,6 +142,20 @@ def test_default_protocol_is_unchanged_by_the_feature_fields():
     assert set(RLConfig(proprio=True).protocol()) == set(base) | {"state_features", "proprio", "plus_train", "collection_mix"}
 
 
+def test_config_plan_target_enters_the_fingerprint_only_for_rollout():
+    base = RLConfig().protocol()
+    assert "plan_target" not in base and len(base) == 78
+    rollout = RLConfig(task_ids=(9,), plan_candidates=4, proprio=True, plan_target="rollout")
+    protocol = rollout.protocol()
+    assert protocol["plan_target"] == "rollout" and protocol["plan_critic"] == "regression_mean_k_rollout_progress"
+    assert set(protocol) == set(RLConfig(task_ids=(9,), plan_candidates=4, proprio=True).protocol()) | {"plan_target"}
+    assert config_from_dict(json.loads(json.dumps(rollout.to_dict()))).plan_target == "rollout"
+    for bad in (dict(plan_target="mc"), dict(task_ids=(9,), proprio=True, plan_target="rollout"),
+                dict(task_ids=(9,), plan_candidates=4, plan_target="rollout")):
+        with pytest.raises(ValueError):
+            RLConfig(**bad).validate()
+
+
 def test_evaluate_records_video_exec_step_and_passes_it_to_the_policy(tmp_path, monkeypatch):
     import script.lingbot_eval as eval_module
     import script.lingbot_rl_train as train
