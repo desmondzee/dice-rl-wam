@@ -29,7 +29,7 @@
 - **Batches with proprio.** `script/lingbot_eval.py` is not edited. `lingbot_rl_train.rl_observation_batch(observation, instruction, device, proprio)` wraps `observation_batch` and adds `batch["proprio"]` (1, 8) float32; `lingbot_rl_train.run_rl_episode(..., proprio, video_writer=None)` delegates to `lingbot_eval.run_episode` when `proprio` is False (bit-for-bit today's path) and otherwise runs the same loop with `rl_observation_batch`.
 - **Reset draw RNG.** `draw_reset(config, episode)` uses `np.random.default_rng([config.seed, episode])`, so episode `i` draws the same (kind, variant, state) in both runs regardless of episode lengths, and the global `np.random` stream is untouched (bit-for-bit for `plus_train` empty). The episode ordinal is saved in the resume file (`episodes`). For seed 42 the first twelve draws are `(0, None), (1, 673), (0, None), (2, 1989), (1, 670), (0, None), (2, 1997), (1, 661), (1, 677), (2, 2001), (2, 1995), (1, 640)`; all three kinds appear by episode 3.
 - **Layout reset state.** The third value of the draw is a uniform float; `init_state_id = int(draw * len(env._init_states))` (one stored state per layout variant today, so 0).
-- **Object poses.** `object_state` is recorded whenever `config.proprio` is set (both runs). At startup the trainer resets one base-task env (`init_states=False`, seed `config.seed`, RNG captured and restored around it), reads `object_layout(env._env.env)` = sorted `obj_body_id` names plus every non-free MuJoCo joint whose body lies under an object body (the articulated joints), writes it to `settings.json` as `object_layout`, and at every chunk start reads `object_state(env._env.env, layout)` = `[body_xpos (3), body_xquat (4)] per body` then the joint `qpos` values; distractor bodies of layout variants are not in the layout and are ignored; a missing name raises. Expert rows carry an empty `object_state`.
+- **Object poses.** `object_state` is recorded whenever `config.proprio` is set (both runs). At startup the trainer resets one base-task env (`init_states=False`, seed `config.seed`, RNG captured and restored around it), reads `object_layout(env._env.env)` = sorted `obj_body_id` names plus every hinge or slide MuJoCo joint (`jnt_type` 2 or 3) whose body lies under an object body (the articulated joints), writes it to `settings.json` as `object_layout` (with `"body_quaternion": "wxyz"`: MuJoCo's `body_xquat` is w-x-y-z while the proprio quaternion is robosuite's x-y-z-w; `object_state` is offline-only so no conversion is applied), and at every chunk start reads `object_state(env._env.env, layout)` = `[body_xpos (3), body_xquat (4)] per body` then the joint `qpos` values; distractor bodies of layout variants are not in the layout and are ignored; a missing name raises. Expert rows carry an empty `object_state`.
 - **Plus suite.** With `plus_train` set, the trainer uses `_get_suite("libero_10")` from the active LIBERO-Plus install (as the plus driver does) instead of `describe_suite`, since the plus suite has more than ten tasks; task 9 of it must be the base task (checked in Task 9).
 - **Checkpoint layout.** `inference_state_dict()` adds `"layout": {"state_features", "proprio", "plan_candidates"}`; `load_inference_state_dict` raises on a mismatch; `DiceResidualModel.layout_of(payload)` returns `{"state_features", "proprio"}` with pool / False defaults for pre-change checkpoints. `plan_candidates` and `residual_input` still come from the eval config as today.
 - **Variant split (spec section 1).** Train robot-init (28): 640, 641, 643, 644, 646, 647, 649, 650, 652, 653, 655, 656, 658, 659, 661, 662, 664, 665, 667, 668, 670, 671, 673, 674, 676, 677, 679, 680. Test robot-init (14): 642, 645, 648, 651, 654, 657, 660, 663, 666, 669, 672, 675, 678, 681. Train layout (26): 1982, 1983, 1985, 1986, 1988, 1989, 1991, 1992, 1994, 1995, 1997, 1998, 2000, 2001, 2003, 2004, 2006, 2007, 2009, 2010, 2012, 2013, 2015, 2016, 2018, 2019. Test layout (13): 1984, 1987, 1990, 1993, 1996, 1999, 2002, 2005, 2008, 2011, 2014, 2017, 2020.
@@ -66,7 +66,7 @@
 - Test: `tests/test_lingbot_rl.py`
 
 **Interfaces:**
-- Produces: `RLConfig.state_features: str = "pool"`, `RLConfig.proprio: bool = False`, `RLConfig.plus_train: dict = {}` (axis → tuple of variant indices, both axes or none); `PLUS_VARIANTS`, `plus_split(axis) -> (train_tuple, test_tuple)`, `plus_train_variants() -> {"robot_init": (...), "layout": (...)}`; protocol keys `state_features`, `proprio`, `plus_train` (lists), `collection_mix` (`"standard"` | `"thirds_standard_robot_init_layout"`); `config_from_dict` restores `plus_train` tuples from JSON lists.
+- Produces: `RLConfig.state_features: str = "pool"`, `RLConfig.proprio: bool = False`, `RLConfig.plus_train: dict = {}` (axis → tuple of variant indices, both axes or none); `PLUS_VARIANTS`, `plus_split(axis) -> (train_tuple, test_tuple)`, `plus_train_variants() -> {"robot_init": (...), "layout": (...)}`; protocol keys `state_features`, `proprio`, `plus_train` (lists), `collection_mix` (`"standard"` | `"thirds_standard_robot_init_layout"`), present only when at least one field is non-default (the default protocol is unchanged); `config_from_dict` restores `plus_train` tuples from JSON lists.
 
 - [ ] **Step 1: Write the failing test** (after `test_config_plan_fields_enter_the_fingerprint`)
 
@@ -74,7 +74,6 @@
 def test_config_feature_fields_enter_the_fingerprint_for_both_runs():
     from script.lingbot_rl_config import plus_split, plus_train_variants
     base = RLConfig().protocol()
-    assert (base["state_features"], base["proprio"], base["plus_train"], base["collection_mix"]) == ("pool", False, {}, "standard")
     assert plus_split("robot_init")[1] == tuple(range(642, 682, 3)) and plus_split("layout")[1] == tuple(range(1984, 2021, 3))
     train = plus_train_variants()
     assert (len(train["robot_init"]), len(train["layout"])) == (28, 26) and 642 not in train["robot_init"]
@@ -86,15 +85,22 @@ def test_config_feature_fields_enter_the_fingerprint_for_both_runs():
     restored = config_from_dict(json.loads(json.dumps(RLConfig(task_ids=(9,), plus_train=train).to_dict())))
     assert restored.plus_train == train
     for bad in (dict(state_features="tokens"), dict(proprio=1), dict(task_ids=(9,), plus_train={"view": (1,)}),
-                dict(task_ids=(9,), plus_train={"layout": (1984,)}), dict(task_ids=(9,), plus_train={"layout": (1982,)}),
-                dict(plus_train=train)):
+                dict(task_ids=(9,), plus_train={"robot_init": (640,), "layout": (1984,)}), dict(plus_train=train)):
         with pytest.raises(ValueError):
             RLConfig(**bad).validate()
+
+
+def test_default_protocol_is_unchanged_by_the_feature_fields():
+    base = RLConfig().protocol()
+    assert not {"state_features", "proprio", "plus_train", "collection_mix"} & set(base) and len(base) == 78
+    assert set(RLConfig(proprio=True).protocol()) == set(base) | {"state_features", "proprio", "plus_train", "collection_mix"}
 ```
+
+(78 is the number of keys `protocol()` returns today, from `version` to `libero_assets_revision`.)
 
 - [ ] **Step 2: Run it**
 
-Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py -k feature_fields`
+Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py -k "feature_fields or default_protocol"`
 Expected: FAIL with `ImportError: cannot import name 'plus_split'`.
 
 - [ ] **Step 3: Implement** in `script/lingbot_rl_config.py`
@@ -140,14 +146,20 @@ In `validate()` before `return self`:
             raise ValueError("plus_train collection is defined for task 9 only")
 ```
 
-In `protocol()` after `"plan_pool": ...,`:
+In `protocol()` change `return {` to `protocol = {` and, after the closing `}` of that dict, add before returning:
 
 ```python
-            "state_features": self.state_features,
-            "proprio": self.proprio,
-            "plus_train": {axis: [int(v) for v in variants] for axis, variants in sorted(self.plus_train.items())},
-            "collection_mix": "thirds_standard_robot_init_layout" if self.plus_train else "standard",
+        if (self.state_features, self.proprio, bool(self.plus_train)) != ("pool", False, False):
+            protocol.update({
+                "state_features": self.state_features,
+                "proprio": self.proprio,
+                "plus_train": {axis: [int(v) for v in variants] for axis, variants in sorted(self.plus_train.items())},
+                "collection_mix": "thirds_standard_robot_init_layout" if self.plus_train else "standard",
+            })
+        return protocol
 ```
+
+The default protocol is byte-identical to today's, so existing resume files at the old recipe still load; any non-default value adds all four keys, so both new runs (and any later change to the fields) are fingerprinted.
 
 In `config_from_dict` after the `task_ids` block:
 
@@ -176,8 +188,8 @@ git commit -m "Add state_features, proprio and the plus_train variant split to t
 - Produces:
   - `structured_means(video_tokens (b, f·rows·cols, C), frames, rows, cols) -> (b, frames, 2, C)`: camera halves of each row, text excluded.
   - `ResidualLingBotPolicy._features_from_latent(latent (b, 48, T, h, w)) -> {"pool": (b, 3072), "struct": (b, T, 2, 3072), "tokens": (b, 32·T, 3072)}` from one transformer pass; `_pool_from_latent(latent)` = its `"pool"`.
-  - `extract_features_from_latent(latent, batch)` (same dict, inputs moved to the policy device/dtype); `extract_critic_state_from_latent` = its `"pool"`.
-  - `decode_candidates` output gains `state_struct (1, 2, 3072)`, `state_tokens (1, 32, 3072)`, `state_latent (1, 48, 1, h, w)`; `select_plan` output gains those plus `plan_struct_all (M, 8, 3072)`, `plan_latents_all (M, 48, 4, h, w)`, `plan_struct (1, 8, 3072)` of the executed plan. Ranking still receives the raw pool and pools in this task (Task 4 switches it to the model inputs).
+  - `extract_features_from_latent(latent, batch)` (same dict, inputs moved to the policy device/dtype); `extract_critic_state_from_latent` = its `"pool"` until Task 5 removes it.
+  - `decode_candidates` output gains `state_struct (1, 2, 3072)`, `state_tokens (1, 32, 3072)`, `state_latent (1, 48, 1, h, w)`; `select_plan` output gains those plus `plan_struct_all (M, 8, 3072)`, `plan_latent_all (M, 48, 4, h, w)`, `plan_struct (1, 8, 3072)` of the executed plan. Ranking still receives the raw pool and pools in this task (Task 4 switches it to the model inputs).
 
 - [ ] **Step 1: Mock support** in `tests/test_lingbot_rl.py`
 
@@ -208,23 +220,20 @@ def test_structured_means_split_cameras_and_match_the_pool_without_text():
     torch.testing.assert_close(pool_critic_state(tokens[:1], torch.full((1, 512, STATE_DIM), 2.0))[0], struct[0].mean(dim=(0, 1)))
 
 
-def test_features_from_latent_returns_pool_struct_and_tokens_from_one_pass():
+def test_features_from_latent_splits_the_real_token_grid_by_camera_in_one_pass():
     policy = _mock_policy()
     latent = torch.randn(1, 48, 4, 2, 4)
     calls = len(policy.transformer.calls)
     feats = policy._features_from_latent(latent)
     assert len(policy.transformer.calls) == calls + 1
-    assert feats["pool"].shape == (1, STATE_DIM) and feats["struct"].shape == (1, 4, 2, STATE_DIM) and feats["tokens"].shape == (1, 8, STATE_DIM)
     assert torch.equal(feats["struct"][0, :, 0], feats["tokens"][0, 0::2]) and torch.equal(feats["struct"][0, :, 1], feats["tokens"][0, 1::2])
-    assert torch.equal(feats["pool"], policy._pool_from_latent(latent))
 ```
 
 Append to `test_select_plan_batched_matches_looped_decode_plans_and_keeps_winner_rows` right after `assert out["plan_index"] == 1 and torch.equal(out["plan_pool"], out["plan_pools"][1:2])`:
 
 ```python
-    assert out["plan_struct_all"].shape == (2, 8, STATE_DIM) and torch.equal(out["plan_struct"], out["plan_struct_all"][1:2])
-    assert out["state_struct"].shape == (1, 2, STATE_DIM) and out["state_tokens"].shape == (1, 32, STATE_DIM)
-    assert out["plan_latents_all"].shape == (2, 48, 4, 2, 4) and out["state_latent"].shape == (1, 48, 1, 2, 4)
+    assert {"state_struct", "state_tokens", "state_latent", "plan_struct_all", "plan_latent_all"} <= set(out)
+    assert torch.equal(out["plan_struct"], out["plan_struct_all"][1:2]) and torch.equal(out["plan_latent_all"][1:2], out["latents"])
 ```
 
 - [ ] **Step 3: Run them**
@@ -316,7 +325,7 @@ In `select_plan` replace `state = self._pool_from_latent(critic_latent)` with `f
         pools = plan_feats["pool"].float()
         out = {"s": state.float(), "state_struct": feats["struct"][:, 0], "state_tokens": feats["tokens"], "state_latent": critic_latent,
                "z": model_to_mlp(action_noise).float(), "plan_pools": pools,
-               "plan_struct_all": plan_feats["struct"].reshape(plans, -1, STATE_DIM), "plan_latents_all": latents,
+               "plan_struct_all": plan_feats["struct"].reshape(plans, -1, STATE_DIM), "plan_latent_all": latents,
                "video_noise": video_noise, "first_chunk": first}
 ```
 
@@ -449,6 +458,8 @@ After `_plan_defaults`:
         return stored
 ```
 
+`_feature_defaults` materialises full-size defaults (`state_tokens`, `state_latent`, `plan_latent_all`, about 0.6 MB bf16 per row) for expert rows and legacy rows that lack them; over a run that is about 2–3 GB of placeholder tensors in the buffer and the resume file, accepted for one row contract.
+
 In `_store`, after `self._plan_defaults(stored)` add `self._feature_defaults(stored)`. In `finalize_episode`, after the `plan_pool_next` line:
 
 ```python
@@ -512,7 +523,6 @@ def test_model_input_layout_follows_state_features_and_proprio():
     assert torch.equal(state[:, :2 * STATE_DIM], st.reshape(3, -1)) and torch.equal(state[:, -PROPRIO_DIM:], pr)
     assert torch.equal(mixed.state_input(s, st, pr)[:, :STATE_DIM], s) and mixed.plan_input(None, None) is None
     assert struct.plan_input(torch.zeros(3, 2, STATE_DIM), torch.ones(3, 2, 8, STATE_DIM)).shape == (3, 2, 8 * STATE_DIM)
-    assert torch.equal(mixed.plan_input(torch.full((3, 2, STATE_DIM), 2.0), None), torch.full((3, 2, STATE_DIM), 2.0))
     with pytest.raises(ValueError):
         struct.state_input(s, st, None)
     payload = struct.inference_state_dict()
@@ -812,6 +822,8 @@ Expected: FAIL with `AttributeError: 'StubPolicy' object has no attribute 'extra
 
 In the trailing loop add `rows[index]["proprio_next"] = rows[index + 1]["proprio"].copy()` beside the `s_next` line.
 
+`extract_critic_state_from_latent` is now unused: delete it from `script/lingbot_rl_policy.py` and replace its name in `test_policy_class_exposes_collection_api` with `"extract_features_from_latent"`.
+
 In `load_manifest_episodes`: read `columns=["action", "episode_index", "frame_index", "observation.state"]`; after the `actions` check:
 
 ```python
@@ -824,10 +836,10 @@ and add `"states": states,` to the appended dict. The recipe string is in `exper
 
 - [ ] **Step 4: Verify and commit**
 
-Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py`
+Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py && .cache/eval-venv/bin/python -m compileall -q script/`
 
 ```bash
-git add script/lingbot_rl_data.py tests/test_lingbot_rl.py
+git add script/lingbot_rl_data.py script/lingbot_rl_policy.py tests/test_lingbot_rl.py
 git commit -m "Expert recipe v3: structured features, tokens and latents from the published latents, proprioception from the parquet."
 ```
 
@@ -864,7 +876,7 @@ git commit -m "Expert recipe v3: structured features, tokens and latents from th
         model = self.residual_model
         index = 1 if random_plan else int(rank_fn(
             model.state_input(base["s"], base["state_struct"], batch.get("proprio")), model.plan_input(pools, struct_all)))
-        return {**base, "plan_pools": pools, "plan_struct_all": struct_all, "plan_latents_all": torch.zeros(plans, 48, 4, 8, 16),
+        return {**base, "plan_pools": pools, "plan_struct_all": struct_all, "plan_latent_all": torch.zeros(plans, 48, 4, 8, 16),
                 "plan_pool": pools[index:index + 1], "plan_struct": struct_all[index:index + 1], "plan_index": index,
                 "plan_a_base_all": all_base, "a_base": all_base[index]}
 ```
@@ -927,7 +939,7 @@ def test_object_layout_walks_articulated_joints_under_base_bodies_and_reads_pose
                            qpos=np.arange(12, dtype=np.float64))
     inner = SimpleNamespace(sim=SimpleNamespace(model=model, data=data), obj_body_id={"mug": 2, "microwave": 3})
     layout = object_layout(inner)
-    assert layout == {"bodies": ["microwave", "mug"], "joints": ["door_hinge"]}
+    assert layout == {"bodies": ["microwave", "mug"], "joints": ["door_hinge"], "body_quaternion": "wxyz"}
     expected = np.concatenate([data.body_xpos[3], data.body_xquat[3], data.body_xpos[2], data.body_xquat[2], [9.0]]).astype(np.float32)
     np.testing.assert_array_equal(object_state(inner, layout), expected)
     inner.obj_body_id["cookies"] = 5
@@ -936,18 +948,13 @@ def test_object_layout_walks_articulated_joints_under_base_bodies_and_reads_pose
         object_state(inner, {"bodies": ["bowl"], "joints": []})
 
 
-def test_update_from_buffer_feeds_struct_and_proprio_inputs():
-    from script.lingbot_rl_train import _update_from_buffer
-    model = DiceResidualModel(device="cpu", state_features="struct", proprio=True)
-    info = _update_from_buffer(model, _online_buffer(), 0.0, "cpu", False)
-    assert {"critic_loss", "actor_loss"} <= set(info)
-
-
 def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(tmp_path, monkeypatch):
+    import script.lingbot_rl_model as model_module
     from script.lingbot_rl_config import plus_train_variants
     from script.lingbot_rl_train import draw_reset
+    monkeypatch.setattr(model_module, "HIDDEN", (32, 32, 32))
     config = RLConfig(task_ids=(9,), plan_candidates=2, plan_random_prob=0.0, selection_warmup_steps=0, residual_input="base",
-                      proprio=True, plus_train=plus_train_variants())
+                      proprio=True, state_features="struct", plus_train=plus_train_variants())
     out = _smoke_train(tmp_path, monkeypatch, 60, model_factory=lambda **kw: DiceResidualModel(**kw), config=config)
     probe, envs = out["envs"][0], out["envs"][1:]
     assert (probe["task_id"], probe["init_states"], probe["obs_type"]) == (9, False, "pixels_agent_pos")
@@ -957,9 +964,8 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
         [(9 if variant is None else variant, kind == 2, kind > 0) for kind, variant, _ in draws]
     rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
     np.testing.assert_allclose(rows[0]["proprio"], [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, -0.04], atol=1e-6)
-    assert rows[0]["state_struct"].dtype == torch.bfloat16 and rows[0]["state_struct"].shape == (2, STATE_DIM)
-    assert rows[0]["plan_struct_all"].shape == (2, 8, STATE_DIM) and rows[0]["plan_latent_all"].shape == (2, 48, 4, 8, 16)
-    assert rows[0]["state_tokens"].shape == (32, STATE_DIM) and rows[0]["object_state"].tolist() == [7.0, 8.0]
+    assert rows[0]["plan_pool"].shape == rows[0]["s"].shape == (STATE_DIM,) and rows[0]["plan_pools_all"].shape == (2, STATE_DIM)
+    assert rows[0]["state_struct"].dtype == torch.bfloat16 and rows[0]["object_state"].tolist() == [7.0, 8.0]
     assert [row["reset_kind"] for row in rows] == [0, 1, 0, 2, 1] and [row["variant_index"] for row in rows[:2]] == [9, 673]
     episode_logs = [entry for entry in out["logs"] if "reset_kind" in entry]
     assert episode_logs[1]["variant_index"] == 673 and {"episode_success_robot_init", "episode_length_robot_init"} <= set(episode_logs[1])
@@ -967,8 +973,8 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
     assert updates and any(key.startswith("plan_agreement/") for key in updates[0])
     settings = json.loads((tmp_path / "settings.json").read_text())
     assert settings["object_layout"] == {"bodies": ["mug"], "joints": ["door"]} and settings["config"]["plus_train"]["layout"][0] == 1982
-    assert out["resume"]["episodes"] == 5 and out["resume"]["layout"] == {"state_features": "pool", "proprio": True, "plan_candidates": 2}
-    assert out["wandb"][0]["config"]["proprio"] is True and out["wandb"][0]["config"]["state_features"] == "pool"
+    assert out["resume"]["episodes"] == 5 and out["resume"]["layout"] == {"state_features": "struct", "proprio": True, "plan_candidates": 2}
+    assert out["wandb"][0]["config"]["proprio"] is True and out["wandb"][0]["config"]["state_features"] == "struct"
     assert not any("episode_success_standard" in entry for entry in _smoke_train(tmp_path / "plain", monkeypatch, 24)["logs"])
 
 
@@ -1012,11 +1018,11 @@ def test_env_proprio_matches_the_first_demo_frame_of_a_stored_initial_state():
         assert gaps.min() < 2e-3, (gaps.min(), np.abs(states - demo[None])[gaps.argmin()])
 ```
 
-(`import importlib.util` and `import os` at the top of the test file.) The trainer test keeps `state_features` at "pool" so the unit tests never build the struct M=2 model (about 2.5 GB of float32 parameters); the struct path through the update is covered by `test_update_from_buffer_feeds_struct_and_proprio_inputs` on a plan-free model and by run B's smoke in Task 9. The GB10 test compares every one of the 50 standard task 9 initial states with the first `observation.state` of three manifest demonstrations, so it needs no demo-to-state mapping; a failure with gaps only in entries 3–5 means the axis-angle or quaternion convention differs from the dataset's, and the launch is gated on it (spec section 7).
+(`import importlib.util` and `import os` at the top of the test file.) The trainer test runs the struct M=2 recipe with `HIDDEN` patched to (32, 32, 32) so the model is small (`_mlp` reads the module global at construction); the stored `plan_pool` / `plan_pools_all` width assertion is what catches a trainer that stores the 24576-wide model inputs instead of the raw pools (expert rows and buffer defaults are 3072-wide, and `sample` would fail to stack them). The GB10 test compares every one of the 50 standard task 9 initial states with the first `observation.state` of three manifest demonstrations, so it needs no demo-to-state mapping; a failure with gaps only in entries 3–5 means the axis-angle or quaternion convention differs from the dataset's, and the launch is gated on it (spec section 7).
 
 - [ ] **Step 3: Run them**
 
-Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py -k "draw_reset or proprio_from_observation or object_layout or feeds_struct or under_plus or demo_frame"`
+Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py -k "draw_reset or proprio_from_observation or object_layout or under_plus or demo_frame"`
 Expected: FAIL with `ImportError` (`draw_reset`); the GB10 test reports SKIPPED.
 
 - [ ] **Step 4: Environment, draw, proprio, object poses, episodes** in `script/lingbot_rl_train.py`
@@ -1105,14 +1111,14 @@ def object_layout(inner):
     for name in bodies:
         root = inner.obj_body_id[name]
         for joint in range(model.njnt):
-            if model.jnt_type[joint] == 0:
+            if model.jnt_type[joint] not in (2, 3):
                 continue
             body = model.jnt_bodyid[joint]
             while body > 0 and body != root:
                 body = model.body_parentid[body]
             if body == root:
                 joints.append(model.joint_id2name(joint))
-    return {"bodies": bodies, "joints": joints}
+    return {"bodies": bodies, "joints": joints, "body_quaternion": "wxyz"}
 
 
 def object_state(inner, layout):
@@ -1227,7 +1233,7 @@ Build the model with `state_features=config.state_features, proprio=config.propr
         observation, _ = env.reset(seed=config.seed + env_steps)
 ```
 
-Inside the chunk loop: `batch = rl_observation_batch(observation, task["instruction"], device, config.proprio)` then `sim_state = object_state(env._env.env, layout) if layout is not None else None`; `state = model.state_input(decoded["s"].to(device), decoded.get("state_struct"), batch.get("proprio"))`; `pool = model.plan_input(decoded["plan_pool"].to(device), decoded.get("plan_struct")) if plans > 1 else None`; `pools_all = model.plan_input(decoded["plan_pools"].to(device), decoded.get("plan_struct_all"))`; `s_cpu = _host_array(decoded["s"])[0]`. The row:
+Inside the chunk loop: `batch = rl_observation_batch(observation, task["instruction"], device, config.proprio)` then `sim_state = object_state(env._env.env, layout) if layout is not None else None`; `state = model.state_input(decoded["s"].to(device), decoded.get("state_struct"), batch.get("proprio"))`; rename the existing `pool` / `pools_all` variables to `plan_in` / `plans_in` at every use in the loop (`critic_k`, `q_all`, `v_all`): `plan_in = model.plan_input(decoded["plan_pool"].to(device), decoded.get("plan_struct")) if plans > 1 else None`; `plans_in = model.plan_input(decoded["plan_pools"].to(device), decoded.get("plan_struct_all"))`; `s_cpu = _host_array(decoded["s"])[0]`. The row:
 
 ```python
                 buffer.add_online({
@@ -1247,12 +1253,14 @@ Inside the chunk loop: `batch = rl_observation_batch(observation, task["instruct
                     "variant_index": env_task,
                     **({"proprio": _host_array(batch["proprio"])[0], "object_state": sim_state} if config.proprio else {}),
                     **{key: host_bf16(decoded[key][0]) for key in ("state_struct", "state_tokens", "state_latent") if key in decoded},
-                    **({"plan_pool": _host_array(pool)[0], "plan_pools_all": _host_array(pools_all),
+                    **({"plan_pool": _host_array(decoded["plan_pool"].to(device))[0], "plan_pools_all": _host_array(decoded["plan_pools"].to(device)),
                         "plan_index": int(decoded["plan_index"]), "plan_a_base_all": _host_array(all_base)} if plans > 1 else {}),
                     **({"plan_struct": host_bf16(decoded["plan_struct"][0]), "plan_struct_all": host_bf16(decoded["plan_struct_all"]),
-                        "plan_latent_all": host_bf16(decoded["plan_latents_all"])} if plans > 1 and "plan_struct_all" in decoded else {}),
+                        "plan_latent_all": host_bf16(decoded["plan_latent_all"])} if plans > 1 and "plan_struct_all" in decoded else {}),
                 })
 ```
+
+The stored `plan_pool` / `plan_pools_all` are the raw 3072-wide pools in both runs (expert rows and buffer defaults are 3072-wide too); the model inputs `plan_in` / `plans_in` are used only for ranking and `plan_info`.
 
 Update log: `**plan_info, **({f"{key}/{RESET_KINDS[kind]}": value for key, value in plan_info.items()} if config.plus_train else {}),`. Episode log:
 
@@ -1266,7 +1274,7 @@ Update log: `**plan_info, **({f"{key}/{RESET_KINDS[kind]}": value for key, value
         })
 ```
 
-Note `plan_pool`, `plan_pools_all` and `s` stay the raw pools in both runs (the `decoded["plan_pool"]`/`decoded["plan_pools"]` tensors), while `pool`/`pools_all` are the model inputs used for ranking and the plan metrics; with the defaults the two coincide bit-for-bit.
+With the defaults `plan_in` / `plans_in` equal the raw pools bit-for-bit.
 
 - [ ] **Step 6: `brev/train.sh`**
 
@@ -1274,7 +1282,7 @@ Both usage strings append ` [--state-features pool|struct] [--proprio] [--plus]`
 
 ```bash
 PLUS_TRAIN='{}'
-[ "$PLUS" = 1 ] && PLUS_TRAIN="$(PYTHONPATH="$DICE_REPO" python3 -c 'import json; from script.lingbot_rl_config import plus_train_variants; print(json.dumps({axis: list(variants) for axis, variants in plus_train_variants().items()}))')"
+[ "$PLUS" = 1 ] && PLUS_TRAIN="$(PYTHONPATH="$DICE_REPO" "$PY" -c 'import json; from script.lingbot_rl_config import plus_train_variants; print(json.dumps({axis: list(variants) for axis, variants in plus_train_variants().items()}))')"
 ```
 
 The config JSON python gains `, "state_features": sys.argv[10], "proprio": sys.argv[11] == "1", "plus_train": json.loads(sys.argv[12])` before the closing `}` and the arguments `"$STATE_FEATURES" "$PROPRIO" "$PLUS_TRAIN"` after `"$PLAN_CANDIDATES"`. The `run.sh` block becomes:
@@ -1323,7 +1331,7 @@ git commit -m "Collect under LIBERO-Plus resets with proprioception, object pose
 
 **Interfaces:**
 - Consumes: `DiceResidualModel.layout_of`, `load_inference_state_dict` mismatch check (Task 4); `make_env(proprio=)`, `run_rl_episode` (Task 6).
-- Produces: `evaluate()` replaces `config.state_features` / `config.proprio` with the checkpoint layout, builds the env with `proprio`, runs `run_rl_episode`, and writes `"layout"` into `settings/shard_<n>.json`; the plus driver does the same with `residual_layout(args)` and records `"layout"` in `settings/run.json`.
+- Produces: `evaluate()` replaces `config.state_features` / `config.proprio` with the checkpoint layout, builds the env with `proprio`, runs `run_rl_episode`, and writes `"layout"` into `settings/shard_<n>.json`; the plus driver loads the residual payload once, derives the layout with `residual_layout(payload)` and records `"layout"` in `settings/run.json`.
 
 - [ ] **Step 1: Write the failing test** (after `test_evaluate_records_video_exec_step_and_passes_it_to_the_policy`)
 
@@ -1400,15 +1408,15 @@ Add `"layout": layout,` to the shard settings dict. In the episode loop: `env = 
 Replace `load`:
 
 ```python
-def residual_layout(args):
+def residual_layout(payload):
     from script.lingbot_rl_model import DiceResidualModel
 
-    if not args.residual:
+    if payload is None:
         return {"state_features": "pool", "proprio": False}
-    return DiceResidualModel.layout_of(torch.load(args.residual, map_location="cpu", weights_only=True))
+    return DiceResidualModel.layout_of(payload)
 
 
-def load(args, prepared, architecture, layout):
+def load(args, prepared, architecture, payload, layout):
     if args.policy == "sft":
         return load_policy(prepared["checkpoint"], prepared["model_path"], architecture, -1, args.video_steps, args.action_steps)
     from script.lingbot_rl_model import DiceResidualModel
@@ -1417,7 +1425,7 @@ def load(args, prepared, architecture, layout):
     policy = load_residual_policy(prepared["checkpoint"], prepared["model_path"], architecture, -1, args.video_steps, args.action_steps)
     model = DiceResidualModel(device="cuda", residual_input=args.residual_input, epsilon=args.epsilon,
                               plan_candidates=args.plan_candidates, **layout)
-    model.load_inference_state_dict(torch.load(args.residual, map_location="cpu", weights_only=True))
+    model.load_inference_state_dict(payload)
     policy.residual_model = model
     policy.eval_candidates = args.eval_candidates
     policy.eval_plans = args.plan_candidates
@@ -1425,7 +1433,7 @@ def load(args, prepared, architecture, layout):
     return policy
 ```
 
-In `main`: `layout = residual_layout(args)` before `settings`, with `"layout": layout` added to `settings`; `policy = load(args, prepared, metadata["architecture"], layout)`; the env line becomes `env = LiberoEnv(task_suite=suite, task_id=entry["variant_index"], init_states=entry["reset_rule"] == "stored_state", **{**ENV_KWARGS, "obs_type": "pixels_agent_pos" if layout["proprio"] else "pixels"})`; the episode line becomes `row = run_rl_episode(policy, env, entry, instruction, metadata["normalization"], "cuda", layout["proprio"], video_writer=writer)` with `from script.lingbot_rl_train import run_rl_episode` added to the imports (and `run_episode` dropped from the `script.lingbot_eval` import). The driver's `driver_sha256` changes, so an existing `--out` of the random-plan ablations must not be resumed with the new driver; do not overwrite `~/Documents/dice/libero-plus-config/plus_eval.py` on a box while an ablation is running.
+In `main`, before `settings`: `payload = torch.load(args.residual, map_location="cpu", weights_only=True) if args.residual else None` and `layout = residual_layout(payload)`, with `"layout": layout` added to `settings`; `policy = load(args, prepared, metadata["architecture"], payload, layout)`; the env line becomes `env = LiberoEnv(task_suite=suite, task_id=entry["variant_index"], init_states=entry["reset_rule"] == "stored_state", **{**ENV_KWARGS, "obs_type": "pixels_agent_pos" if layout["proprio"] else "pixels"})`; the episode line becomes `row = run_rl_episode(policy, env, entry, instruction, metadata["normalization"], "cuda", layout["proprio"], video_writer=writer)` with `from script.lingbot_rl_train import run_rl_episode` added to the imports (and `run_episode` dropped from the `script.lingbot_eval` import). The driver's `driver_sha256` changes, so an existing `--out` of the random-plan ablations must not be resumed with the new driver; do not overwrite `~/Documents/dice/libero-plus-config/plus_eval.py` on a box while an ablation is running.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -1462,8 +1470,12 @@ present on their axis.
 Collection (`brev/train.sh --plus`) draws per episode, with equal probability from `np.random.default_rng([seed, episode])`,
 a standard reset (`task_id 9`, `init_states=False`, seed `config.seed + env_steps`), a robot-init training variant
 (`init_states=False, is_libero_plus=True`, same seed rule as the plan above) or a layout training variant
-(`init_states=True`, uniform over its stored states). The held-out plan over the test variants
-(`task9-heldout-plan.json`) is built after the runs are launched.
+(`init_states=True`, uniform over its stored states). The draw schedule pairs the two runs per distribution, not per
+episode: episode `i` draws the same kind, variant and stored state in both runs, but the simulator's object sampling
+is seeded by `config.seed + env_steps`, which diverges with the runs' episode lengths. The buffer's `object_state`
+stores MuJoCo `body_xquat` in w-x-y-z order while `proprio` carries robosuite's x-y-z-w end-effector quaternion
+converted to axis-angle (`settings.json` records `object_layout.body_quaternion`). The held-out plan over the test
+variants (`task9-heldout-plan.json`) is built after the runs are launched.
 ```
 
 - [ ] **Step 2: Commit**
@@ -1558,5 +1570,7 @@ The expert features rebuild once more per run directory (copy `smoke-plus-*/expe
 - Spec coverage: section 1 runs / budget → Task 9 commands (320k, 80k checkpoints from the defaults); collection distribution and the two reset rules → Task 6 (`draw_reset`, `make_env`, `init_state_id`); variant split → Task 1 constants and Task 8 README; proprioception convention and extraction → Task 6 (`proprio_from_observation`, GB10 test), expert side → Task 5; run A / run B inputs → Task 4 (`state_input`, `plan_input`, dims); stored features incl. `object_state`, `reset_kind`, `variant_index` → Tasks 3, 5, 6; W&B config and per-kind metrics → Task 6; evaluation reconstruction → Task 7; section 3 `brev/train.sh` flags → Task 6; README → Task 8; section 3 tests → Tasks 1 (fingerprint), 2 (structured means), 3 (buffer round trip), 6 (reset draw, proprio GB10), 5 (expert v3), 4 (layout); section 6 step 1 smoke → Task 9; section 7 reset-equality check → Task 9 Step 2. Not in this plan: the offline feature study at the 80k checkpoints and the held-out plan / baselines (spec sections 1 "offline study", 4, 6 steps 3–5), which the spec defers to after the runs.
 - Type consistency: `state_input(pool, struct, proprio)` / `plan_input(pool, struct)` have the same signature in the model (Task 4), the policy helpers (Task 4), the stub (Task 6) and the trainer (Task 6); `plan_struct_all` is (M, 8, 3072) in the policy, buffer, expert rows (as `plan_struct` repeated) and `update_plan_critic` after `plan_input`; `draw_reset` returns `(kind, variant, draw)` everywhere; `load_resume` returns five values in Task 6 and its tests.
 - Bit-for-bit with defaults: `ResidualActor` / `CriticEnsemble` / `PlanCritic` widths and construction order are unchanged; `state_input` returns `mlp_float(pool)` and `plan_input` `mlp_float(pool)`; `draw_reset` returns without touching `np.random`; the object probe only runs with `proprio`; `run_rl_episode` delegates to `run_episode`; the extra per-kind log keys are gated on `plus_train`; `s`, `plan_pool`, `plan_pools_all` store the same raw pools as before.
-- Fingerprint: `state_features`, `proprio`, `plus_train`, `collection_mix` are protocol keys, so any change refuses an older resume (`test_load_resume_rejects_recipe_mismatch`).
-- Placeholder scan: every code step shows the code; the only unverifiable items (dataset axis-angle convention, MuJoCo binding attribute names, task 9 object names, the plus suite's task 9) are pinned to Task 9 Steps 1–2 with the exact commands and the expected output.
+- Fingerprint: `state_features`, `proprio`, `plus_train`, `collection_mix` enter the protocol as soon as any of them is non-default, so both runs are fingerprinted and any later change refuses the resume (`test_load_resume_rejects_recipe_mismatch`); the default protocol is byte-identical to today's, so the existing runs' resume files still load.
+- Verified from source: the published parquet (`.cache/hf/datasets--robbyant--libero-long-lerobot/snapshots/8c0313b1.../data/chunk-000/episode_000000.parquet`) has `observation.state` as `fixed_size_list<float>[8]` with entries 3–5 an axis-angle of magnitude about pi and the gripper entries about ±0.036; robosuite (`~/.cache/uv/git-v0/checkouts/79abe6cb204f004b/c848ca8`) reports `robot0_eef_quat` in x-y-z-w and its `quat2axisangle` is exactly `proprio_from_observation`'s formula; the MuJoCo binding names used by `object_layout` / `object_state` exist in robosuite's `binding_utils.py`; `body_xquat` is w-x-y-z (recorded as `object_layout.body_quaternion` since `object_state` is offline-only). The GB10 test in Task 6 still runs as the end-to-end check of the convention against three demos.
+- Remaining box-only checks (Task 9 Step 2): the task 9 object names and articulated joints found by `object_layout`, and that the plus suite's task 9 is the standard base task.
+- Tests kept to one per rejectable behaviour: fingerprint and unchanged default protocol (Task 1); structured means and the real-grid camera split (Task 2); the row contract with legacy defaults (Task 3); input layout / checkpoint layout and proprio plumbing (Task 4); expert v3 rows (Task 5); reset draw, proprio convention, object layout, the struct + plus + proprio training loop with raw-pool storage, the GB10 demo-frame check (Task 6); layout reconstruction and refusal (Task 7).
