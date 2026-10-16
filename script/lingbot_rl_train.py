@@ -543,6 +543,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             commit(point)
 
     maybe_checkpoint()
+    features = config.proprio or bool(config.plus_train) or config.state_features == "struct"
     while env_steps < budget:
         task = tasks[int(np.random.randint(len(tasks)))]
         task_id = task["task_id"]
@@ -639,11 +640,11 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     "reset_kind": kind,
                     "variant_index": env_task,
                     **({"proprio": _host_array(batch["proprio"])[0], "object_state": sim_state} if config.proprio else {}),
-                    **{key: host_bf16(decoded[key][0]) for key in ("state_struct", "state_tokens", "state_latent") if key in decoded},
+                    **({key: host_bf16(decoded[key][0]) for key in ("state_struct", "state_tokens", "state_latent") if key in decoded} if features else {}),
                     **({"plan_pool": _host_array(decoded["plan_pool"].to(device))[0], "plan_pools_all": _host_array(decoded["plan_pools"].to(device)),
                         "plan_index": int(decoded["plan_index"]), "plan_a_base_all": _host_array(all_base)} if plans > 1 else {}),
                     **({"plan_struct": host_bf16(decoded["plan_struct"][0]), "plan_struct_all": host_bf16(decoded["plan_struct_all"]),
-                        "plan_latent_all": host_bf16(decoded["plan_latent_all"])} if plans > 1 and "plan_struct_all" in decoded else {}),
+                        "plan_latent_all": host_bf16(decoded["plan_latent_all"])} if features and plans > 1 and "plan_struct_all" in decoded else {}),
                 })
                 chunks += 1
                 expert_ratio = config.rlpd_expert_ratio(env_steps)

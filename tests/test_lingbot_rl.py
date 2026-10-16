@@ -583,8 +583,8 @@ def test_feature_rows_default_finalize_and_sample_in_bf16_with_store_only_keys()
     buffer.finalize_episode()
     rows = buffer.rows()
     assert rows[0]["state_struct"].dtype == torch.bfloat16 and rows[0]["plan_struct_all"].shape == (2, 8, STATE_DIM)
-    assert float(rows[0]["plan_struct_all"][1, 0, 0]) == 1.0 and rows[0]["state_tokens"].shape == (32, STATE_DIM)
-    assert rows[0]["plan_latent_all"].shape == (2, 48, 4, 8, 16) and rows[0]["state_latent"].shape == (48, 1, 8, 16)
+    assert float(rows[0]["plan_struct_all"][1, 0, 0]) == 1.0 and rows[1]["plan_latent_all"].shape == (2, 48, 4, 8, 16)
+    assert all(rows[0][key].numel() == 0 and rows[0][key].dtype == torch.bfloat16 for key in ("state_tokens", "state_latent", "plan_latent_all"))
     assert float(rows[0]["proprio_next"][0]) == 2.0 and float(rows[1]["proprio_next"][0]) == 2.0
     assert float(rows[0]["state_struct_next"][0, 0]) == 2.0 and float(rows[0]["plan_struct_next"][0, 0]) == 0.0
     assert rows[0]["object_state"].shape == (11,) and rows[1]["object_state"].shape == (0,)
@@ -602,6 +602,7 @@ def test_feature_rows_default_finalize_and_sample_in_bf16_with_store_only_keys()
             row.pop(key)
     legacy.load_state_dict(payload)
     assert legacy.sample(2, 0.0)["plan_struct"].shape == (2, 8, STATE_DIM) and legacy.rows()[0]["object_state"].shape == (0,)
+    assert legacy.rows()[1]["plan_latent_all"].numel() == 0 and legacy.rows()[1]["state_struct"].shape == (2, STATE_DIM)
 
 
 def _eval_normalization():
@@ -1355,6 +1356,7 @@ def test_train_smoke_loop_gates_updates_saves_weights_and_runs_hook(tmp_path, mo
     assert updates[0]["buffer_online_rows"] == 3
     assert [float(row["done"]) for row in out["rows"]] == [1.0, 1.0, 1.0, 0.0]
     assert [int(row["n_env_actions"]) for row in out["rows"]] == [12, 12, 12, 6]
+    assert all(out["rows"][0][key].numel() == 0 for key in ("state_tokens", "state_latent", "plan_latent_all"))
 
 
 def test_selection_is_random_during_warmup_and_argmax_afterwards(tmp_path, monkeypatch):
@@ -1488,6 +1490,7 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
     np.testing.assert_allclose(rows[0]["proprio"], [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, -0.04], atol=1e-6)
     assert rows[0]["plan_pool"].shape == rows[0]["s"].shape == (STATE_DIM,) and rows[0]["plan_pools_all"].shape == (2, STATE_DIM)
     assert rows[0]["state_struct"].dtype == torch.bfloat16 and rows[0]["object_state"].tolist() == [7.0, 8.0]
+    assert rows[0]["state_tokens"].shape == (32, STATE_DIM) and rows[0]["plan_latent_all"].shape == (2, 48, 4, 8, 16)
     assert [row["reset_kind"] for row in rows] == [0, 1, 0, 2, 1] and [row["variant_index"] for row in rows[:2]] == [9, 673]
     episode_logs = [entry for entry in out["logs"] if "reset_kind" in entry]
     assert episode_logs[1]["variant_index"] == 673 and {"episode_success_robot_init", "episode_length_robot_init"} <= set(episode_logs[1])

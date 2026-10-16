@@ -24,6 +24,11 @@ def _host_float(value):
 def host_bf16(value):
     return torch.as_tensor(value).detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
 
+
+def _default(stored, key, make):
+    if key not in stored:
+        stored[key] = make()
+
 KEYS = (
     "s", "z", "a_base", "a", "reward", "done", "s_next", "a_next",
     "n_steps", "is_expert", "task_id", "n_env_actions",
@@ -53,11 +58,11 @@ class ChunkReplay:
             self._episode_start = max(0, self._episode_start - extra)
 
     def _plan_defaults(self, stored):
-        stored.setdefault("plan_pool", np.zeros(STATE_DIM, np.float32))
-        stored.setdefault("plan_pools_all", np.repeat(_host_float(stored["plan_pool"])[None], self.plans, axis=0))
+        _default(stored, "plan_pool", lambda: np.zeros(STATE_DIM, np.float32))
+        _default(stored, "plan_pools_all", lambda: np.repeat(_host_float(stored["plan_pool"])[None], self.plans, axis=0))
         stored.setdefault("plan_index", 0)
-        stored.setdefault("plan_a_base_all", np.repeat(_host_float(stored["a_base_all"])[None], self.plans, axis=0))
-        stored.setdefault("plan_pool_next", np.array(stored["plan_pool"], copy=True))
+        _default(stored, "plan_a_base_all", lambda: np.repeat(_host_float(stored["a_base_all"])[None], self.plans, axis=0))
+        _default(stored, "plan_pool_next", lambda: np.array(stored["plan_pool"], copy=True))
         if _host_float(stored["plan_pools_all"]).shape[0] != self.plans or \
                 _host_float(stored["plan_a_base_all"]).shape[0] != self.plans:
             raise ValueError(f"Rows must carry exactly {self.plans} plans")
@@ -65,26 +70,25 @@ class ChunkReplay:
         return stored
 
     def _feature_defaults(self, stored):
-        s = _host_float(stored["s"])
-        stored.setdefault("proprio", np.zeros(8, np.float32))
-        stored.setdefault("proprio_next", np.array(stored["proprio"], copy=True))
-        stored.setdefault("state_struct", np.repeat(s[None], 2, axis=0))
-        stored.setdefault("state_struct_next", torch.as_tensor(stored["state_struct"]).clone())
-        stored.setdefault("state_tokens", np.repeat(s[None], 32, axis=0))
-        stored.setdefault("state_latent", np.zeros((48, 1, 8, 16), np.float32))
-        stored.setdefault("plan_struct", np.repeat(_host_float(stored["plan_pool"])[None], 8, axis=0))
-        stored.setdefault("plan_struct_all", np.repeat(_host_float(stored["plan_struct"])[None], self.plans, axis=0))
-        stored.setdefault("plan_struct_next", torch.as_tensor(stored["plan_struct"]).clone())
+        _default(stored, "proprio", lambda: np.zeros(8, np.float32))
+        _default(stored, "proprio_next", lambda: np.array(stored["proprio"], copy=True))
+        _default(stored, "state_struct", lambda: np.repeat(_host_float(stored["s"])[None], 2, axis=0))
+        _default(stored, "state_struct_next", lambda: torch.as_tensor(stored["state_struct"]).clone())
+        _default(stored, "plan_struct", lambda: np.repeat(_host_float(stored["plan_pool"])[None], 8, axis=0))
+        _default(stored, "plan_struct_all", lambda: np.repeat(_host_float(stored["plan_struct"])[None], self.plans, axis=0))
+        _default(stored, "plan_struct_next", lambda: torch.as_tensor(stored["plan_struct"]).clone())
         plan_latent = stored.pop("plan_latent", None)
-        if plan_latent is None:
-            plan_latent = np.zeros((48, 4, 8, 16), np.float32)
-        stored.setdefault("plan_latent_all", np.repeat(_host_float(plan_latent)[None], self.plans, axis=0))
+        if plan_latent is not None:
+            _default(stored, "plan_latent_all", lambda: np.repeat(_host_float(plan_latent)[None], self.plans, axis=0))
+        for key in STORED_BF16_KEYS:
+            _default(stored, key, lambda: torch.zeros(0, dtype=torch.bfloat16))
         stored.setdefault("object_state", np.zeros(0, np.float32))
         stored.setdefault("reset_kind", 0)
         stored.setdefault("variant_index", int(stored["task_id"]))
         for key in (*BF16_KEYS, *STORED_BF16_KEYS):
             stored[key] = host_bf16(stored[key])
-        if stored["plan_struct_all"].shape[0] != self.plans or stored["plan_latent_all"].shape[0] != self.plans:
+        if stored["plan_struct_all"].shape[0] != self.plans or \
+                stored["plan_latent_all"].numel() and stored["plan_latent_all"].shape[0] != self.plans:
             raise ValueError(f"Rows must carry exactly {self.plans} plans")
         stored["object_state"] = _host_float(stored["object_state"])
         stored["reset_kind"] = int(stored["reset_kind"])

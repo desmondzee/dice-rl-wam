@@ -110,7 +110,7 @@ def main():
     instruction = next(task["instruction"] for task in prepared["tasks"] if task["task_id"] == plan["task_id"])
     if instruction != plan["instruction"]:
         raise ValueError("Plan instruction differs from the prepared base task")
-    payload = torch.load(args.residual, map_location="cpu", weights_only=True) if args.residual else None
+    payload = torch.load(args.residual, map_location="cpu", weights_only=True) if args.policy == "rl" else None
     layout = residual_layout(payload)
     settings = {"args": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items() if key != "resume"},
                 "checkpoint": prepared["checkpoint"], "instruction": instruction, "plan_sha256": file_sha256(args.plan),
