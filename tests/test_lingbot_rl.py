@@ -114,6 +114,31 @@ def test_config_plan_fields_enter_the_fingerprint():
         RLConfig(plan_candidates=9).validate()
 
 
+def test_config_feature_fields_enter_the_fingerprint_for_both_runs():
+    from script.lingbot_rl_config import plus_split, plus_train_variants
+    base = RLConfig().protocol()
+    assert plus_split("robot_init")[1] == tuple(range(642, 682, 3)) and plus_split("layout")[1] == tuple(range(1984, 2021, 3))
+    train = plus_train_variants()
+    assert (len(train["robot_init"]), len(train["layout"])) == (28, 26) and 642 not in train["robot_init"]
+    run_a = RLConfig(task_ids=(9,), plan_candidates=4, epsilon=-0.3, residual_input="base", proprio=True, plus_train=train).protocol()
+    run_b = RLConfig(task_ids=(9,), plan_candidates=4, epsilon=-0.3, residual_input="base", proprio=True, state_features="struct",
+                     plus_train=train).protocol()
+    assert run_a["collection_mix"] == "thirds_standard_robot_init_layout" and run_a["plus_train"]["layout"][:3] == [1982, 1983, 1985]
+    assert len({json.dumps(protocol, sort_keys=True) for protocol in (base, run_a, run_b)}) == 3
+    restored = config_from_dict(json.loads(json.dumps(RLConfig(task_ids=(9,), plus_train=train).to_dict())))
+    assert restored.plus_train == train
+    for bad in (dict(state_features="tokens"), dict(proprio=1), dict(task_ids=(9,), plus_train={"view": (1,)}),
+                dict(task_ids=(9,), plus_train={"robot_init": (640,), "layout": (1984,)}), dict(plus_train=train)):
+        with pytest.raises(ValueError):
+            RLConfig(**bad).validate()
+
+
+def test_default_protocol_is_unchanged_by_the_feature_fields():
+    base = RLConfig().protocol()
+    assert not {"state_features", "proprio", "plus_train", "collection_mix"} & set(base) and len(base) == 78
+    assert set(RLConfig(proprio=True).protocol()) == set(base) | {"state_features", "proprio", "plus_train", "collection_mix"}
+
+
 def test_evaluate_records_video_exec_step_and_passes_it_to_the_policy(tmp_path, monkeypatch):
     import script.lingbot_eval as eval_module
     import script.lingbot_rl_train as train

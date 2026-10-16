@@ -1,10 +1,23 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from script.lingbot_eval_config import (
     CAMERAS, LEROBOT_REVISION, LIBERO_ASSETS_REPO, LIBERO_ASSETS_REVISION,
     TASK_IDS, validate_name, validate_sampler_steps,
 )
 from script.lingbot_sft_config import MODEL_REPO, MODEL_REVISION
+
+PLUS_VARIANTS = {"robot_init": tuple(range(640, 682)), "layout": tuple(range(1982, 2021))}
+
+
+def plus_split(axis):
+    variants = PLUS_VARIANTS[axis]
+    train = tuple(variant for position, variant in enumerate(variants) if position % 3 != 2)
+    test = tuple(variant for position, variant in enumerate(variants) if position % 3 == 2)
+    return train, test
+
+
+def plus_train_variants():
+    return {axis: plus_split(axis)[0] for axis in PLUS_VARIANTS}
 
 
 @dataclass(frozen=True)
@@ -31,6 +44,9 @@ class RLConfig:
     epsilon: float = -0.5
     plan_candidates: int = 1
     plan_random_prob: float = 0.1
+    state_features: str = "pool"
+    proprio: bool = False
+    plus_train: dict = field(default_factory=dict)
 
     def validate(self):
         validate_name(self.source_run)
@@ -59,6 +75,17 @@ class RLConfig:
             raise ValueError("plan_candidates must be an integer in [1, 8]")
         if not 0.0 <= float(self.plan_random_prob) <= 1.0:
             raise ValueError("plan_random_prob must lie in [0, 1]")
+        if self.state_features not in ("pool", "struct"):
+            raise ValueError("state_features must be pool or struct")
+        if type(self.proprio) is not bool:
+            raise ValueError("proprio must be a bool")
+        if self.plus_train and set(self.plus_train) != set(PLUS_VARIANTS):
+            raise ValueError("plus_train must list both robot_init and layout variants")
+        for axis, variants in self.plus_train.items():
+            if not variants or len(set(variants)) != len(variants) or any(v not in plus_split(axis)[0] for v in variants):
+                raise ValueError("plus_train variants must be distinct task 9 training variants")
+        if self.plus_train and tuple(self.task_ids) != (9,):
+            raise ValueError("plus_train collection is defined for task 9 only")
         return self
 
     @property
@@ -78,7 +105,7 @@ class RLConfig:
 
     def protocol(self):
         self.validate()
-        return {
+        protocol = {
             "version": 3,
             "suite": "libero_10",
             "task_ids": list(self.task_ids),
@@ -158,6 +185,14 @@ class RLConfig:
             "libero_assets_repo": LIBERO_ASSETS_REPO,
             "libero_assets_revision": LIBERO_ASSETS_REVISION,
         }
+        if (self.state_features, self.proprio, bool(self.plus_train)) != ("pool", False, False):
+            protocol.update({
+                "state_features": self.state_features,
+                "proprio": self.proprio,
+                "plus_train": {axis: [int(v) for v in variants] for axis, variants in sorted(self.plus_train.items())},
+                "collection_mix": "thirds_standard_robot_init_layout" if self.plus_train else "standard",
+            })
+        return protocol
 
     def to_dict(self):
         return {**asdict(self), "task_ids": list(self.task_ids), "protocol": self.protocol()}
@@ -167,6 +202,8 @@ def config_from_dict(payload):
     fields = {key: payload[key] for key in payload if key in RLConfig.__dataclass_fields__}
     if "task_ids" in fields:
         fields["task_ids"] = tuple(int(task) for task in fields["task_ids"])
+    if "plus_train" in fields:
+        fields["plus_train"] = {axis: tuple(int(v) for v in variants) for axis, variants in fields["plus_train"].items()}
     return RLConfig(**fields).validate()
 
 
