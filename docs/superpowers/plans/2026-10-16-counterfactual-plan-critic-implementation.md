@@ -19,7 +19,8 @@
 - The run name is `dice-t9-plus-m4-pool-cf`; run B (`dice-t9-plus-m4-struct`, Watson) is untouched.
 - What stays fixed (spec section 2): the residual actor, the Q ensemble and its targets, the sampler, M = 4, K = 4, the reset schedule, the buffer's other keys, both evaluation protocols.
 - Do not edit `.cache/lerobot`; do not edit `script/lingbot_eval.py` (its `harness_sha256` enters evaluation provenance); do not instantiate Hydra `DistillResidualRLModel`; tests must not call `modal run` or `.remote()`.
-- No GPU jobs, Modal, ssh or remote machines from implementers; Task 7 is run by the controller on Jarvis.
+- No GPU jobs, Modal, ssh or remote machines from implementers; Task 8 is run by the controller on Jarvis.
+- `store_tokens` changes storage only: never in the protocol fingerprint, never in the replay buffer; with it off there is no sidecar, no `proj_out` capture and no extra transformer work.
 - Verify every task with `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py tests/test_lingbot_eval.py`, `.cache/eval-venv/bin/python -m script.lingbot_rl_config`, `.cache/eval-venv/bin/python -m compileall -q script/`, `bash -n brev/setup.sh brev/train.sh brev/sync.sh brev/pull.sh brev/eval.sh`.
 
 ## Review Focus
@@ -32,8 +33,8 @@
 
 ## Decisions the spec left open (binding for every task)
 
-- **Door calibration.** The spec says the door range is measured at startup; the brief proposed "closed = the limit nearer the initial value of stored state 0". Task 9's bddl initialises `(Open microwave_1)` (`libero_10/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.bddl` line 76) and `microwave.xml` gives `microjoint` the range `-2.094 0` with LIBERO's `default_close_ranges = [-0.005, 0.0]`, so the nearer-to-initial rule would label the open limit as closed. Decision: `closed` = the `jnt_range` limit nearer zero (the articulated object's rest pose), `open` = the other; the initial door value and `phi_initial` are recorded in `settings.json` under `progress_calibration`, and Task 7 checks on the box that `door_initial` lies nearer `door_open`.
-- **Interior target.** As the brief decided: `micro` = `microwave_1` body position, `inside` = ‖mug − micro‖ < 0.12 m (`INSIDE_RADIUS`). Geometry caveat (recorded again in Task 7): relative to the microwave body origin the cavity spans x ∈ [−0.1435, 0.0635], y ∈ [−0.088, 0.0805] with the floor at z = 0.024, so the 0.12 m ball from the mug origin misses about 2.5 cm of the far floor and includes about 3 cm beyond the door opening; the +2 success term carries the goal. A site-based target is a later refinement, not part of this plan.
+- **Door calibration.** The spec says the door range is measured at startup; the brief proposed "closed = the limit nearer the initial value of stored state 0". Task 9's bddl initialises `(Open microwave_1)` (`libero_10/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it.bddl` line 76) and `microwave.xml` gives `microjoint` the range `-2.094 0` with LIBERO's `default_close_ranges = [-0.005, 0.0]`, so the nearer-to-initial rule would label the open limit as closed. Decision: `closed` = the `jnt_range` limit nearer zero (the articulated object's rest pose), `open` = the other; the initial door value and `phi_initial` are recorded in `settings.json` under `progress_calibration`, and Task 8 checks on the box that `door_initial` lies nearer `door_open`.
+- **Interior target.** As the brief decided: `micro` = `microwave_1` body position, `inside` = ‖mug − micro‖ < 0.12 m (`INSIDE_RADIUS`). Geometry caveat (recorded again in Task 8): relative to the microwave body origin the cavity spans x ∈ [−0.1435, 0.0635], y ∈ [−0.088, 0.0805] with the floor at z = 0.024, so the 0.12 m ball from the mug origin misses about 2.5 cm of the far floor and includes about 3 cm beyond the door opening; the +2 success term carries the goal. A site-based target is a later refinement, not part of this plan.
 - **Progress signature.** `calibrate(task_id, inner, layout, initial) -> dict` (task-specific names, door limits, `door_initial`, `phi_initial`), `phi(calibration, layout, state, success) -> float`, `progress(calibration, layout, before, after, success) -> float` where `before` has `success=False`. The task is selected in `calibrate` through `TASKS`; unknown tasks raise `ValueError` at startup.
 - **Live snapshot and shadow sync.** The worker thread must never read the live environment while the main thread steps it, so the main thread captures `capture_live(live) -> {"state", "warmstart", "robots"}`: `sim.get_state()` (time, qpos, qvel), a copy of `data.qacc_warmstart`, and per robot copies of the OSC `goal_pos`, `goal_ori`, `initial_joint` (the nullspace reference, drawn with noise at reset) and the gripper's `current_action` (the Panda gripper ramps its command by 0.01 per substep, so it is real controller state). `sync_shadow(snapshot, twin)` writes them into the shadow (`set_state`, `qacc_warmstart`, `forward`, `controller.update(force=True)`, then the controller and gripper fields). The live goal is copied rather than `reset_goal` because OSC `set_goal` keeps `goal_ori` across steps when the rotation delta is zero. `use_delta` is already True on both after `reset`.
 - **Shadow stepping (physics only).** `label_plans` steps the shadow's robosuite environment directly, `inner.step(action)` on `shadow._env.env`, and reads success from `inner._check_success()`. This mirrors the LeRobot wrapper exactly: `LiberoEnv.step` (`.cache/lerobot/src/lerobot/envs/libero.py:366-391`) asserts `action.ndim == 1`, forwards the (7,) float32 action unchanged to `OffScreenRenderEnv.step`, which is `self.env.step(action)` on the robosuite env, then reports `terminated = done or self._env.check_success()` where `check_success` is `self.env._check_success()`; there is no scaling, clipping or gripper sign handling, and relative control is the `robot.controller.use_delta = True` set by `LiberoEnv.reset` (persisting until the next reset). Rendering is avoided by disabling the image-modality observables once in `make_shadow`: robosuite renders cameras inside `Observable.update` (called from `_update_observables` on every substep of `MujocoEnv.step`), and `use_camera_obs` is only read when observables are created, so setting it after reset would not stop rendering; `observable.set_enabled(False)` does (`utils/observables.py:214-224`), and the shadow is not reset again afterwards.
@@ -45,6 +46,7 @@
 - **Protocol.** Under rollout `protocol()` adds `"plan_target": "rollout"` and overrides `"plan_critic"` with `"regression_mean_k_rollout_progress"`; the default protocol is byte-identical.
 - **Validation.** `plan_target == "rollout"` requires `plan_candidates > 1` and `proprio` (object poses are read only when `proprio`).
 - **Sharpening blocks.** `replay_sharpening` and `_maybe_sharpen` keep calling `plan_critic` with the min readout; they are diagnostics, not ranking.
+- **Token sidecar (Task 7).** The stored pools and `state_tokens` come from the history-free critic pass, so the 128 history-conditioned tokens of each plan cannot be recomputed from the stored latents; under `store_tokens` `select_plan(return_tokens=True)` returns the conditional rows of the last batched denoising pass (`captured[0][:M]`, CFG batch 2M with conditional rows first) as `plan_tokens` (M, 128, 3072) bf16 on CPU. They never enter the replay buffer: the Task 6 worker thread writes them to `<run>/tokens/shard_<n>.npy` (a valid `.npy` of shape (256, M, 128, 3072) int16 bf16 bit patterns, created sparse by `open_memmap`, one slot per chunk) and appends one `index.jsonl` line (`chunk`, `episode`, `step`, `reset_kind`, `variant_index`, `plan_index`, `shard`, `offset`). `TokenStore(root, chunks)` at startup truncates the index to the replay's chunk count so `len(index) == chunks` always holds; `append` refuses a `chunk` that is not the next ordinal; write failures propagate through the future before the row is stored. About 3.1 MB per chunk, about 63 GB per 320k run on the 3.6 TB NVMe. `store_tokens` is not in the protocol, so a run can be resumed with or without it.
 
 ## File map
 
@@ -55,7 +57,9 @@
 | `script/lingbot_rl_buffer.py` | `plan_labels` (M, K) float32 with a zeros default |
 | `script/lingbot_rl_model.py` | `plan_target` on the model; rollout target and diagnostics; mean readout in `rank_plans`; `plan_target` in `layout` |
 | `script/lingbot_rl_train.py` | `make_shadow`, `capture_live`, `sync_shadow`, `label_plans`, `shadow_fidelity`, `_timed`; the probe calibration and fidelity gates; per-episode shadow and the labelling thread; labels stored and logged |
-| `brev/train.sh` | `--plan-target q|rollout` |
+| `script/lingbot_rl_tokens.py` | `TokenStore`: sharded `.npy` + `index.jsonl` sidecar for the plan tokens |
+| `script/lingbot_rl_policy.py` | `_video_pass_batched(capture=)`, `select_plan(return_tokens=)` returning `plan_tokens` |
+| `brev/train.sh` | `--plan-target q|rollout`, `--store-tokens` |
 
 ---
 
@@ -816,6 +820,8 @@ Before `while env_steps < budget:` (line 552):
     labeller = ThreadPoolExecutor(max_workers=1) if calibration is not None else None
 ```
 
+(Task 7 widens this condition to `calibration is not None or tokens is not None`.)
+
 Episode head (lines 557–563) becomes:
 
 ```python
@@ -910,16 +916,288 @@ git commit -m "Label every candidate plan in a physics-only shadow on a worker t
 
 ---
 
-### Task 7: GB10 checks, smoke, stop run A, launch (controller)
+### Task 7: Token sidecar for the offline encoder study
 
-**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`) reproduces bit-for-bit, with no thread pool creation and no shadow construction. Nothing in this task changes code; a failure here is reported, not patched on the box.
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`, `store_tokens` False) reproduces bit-for-bit, with no thread pool creation, no shadow construction, no sidecar, no extra `proj_out` capture and no extra transformer work.
+
+**Files:**
+- Create: `script/lingbot_rl_tokens.py`
+- Modify: `script/lingbot_rl_config.py` (field after `plan_target`, `validate()`), `script/lingbot_rl_policy.py` (`_video_pass_batched` line 416, `select_plan` lines 604–657), `script/lingbot_rl_train.py` (imports; `train()`: store construction after the resume load, the executor condition, the `select_plan` call, the token job after the label submit, the wait before `add_online`, the episode `finally`), `brev/train.sh`, `tests/test_lingbot_rl.py` (`_StubPolicy.select_plan`, three tests)
+
+**Interfaces:**
+- Consumes: Task 6's executor (`labeller`), `future` handling and episode `finally`; `select_plan`'s batched last pass (`_video_pass_batched`) and the `proj_out` capture pattern of `_video_pass`.
+- Produces: `RLConfig.store_tokens: bool = False` (storage only, never in `protocol()`; requires `plan_candidates > 1`); `ResidualLingBotPolicy._video_pass_batched(..., capture=None)`; `select_plan(..., return_tokens=False)` adding `out["plan_tokens"]` = the conditional rows of the last denoising pass's pre-`proj_out` video tokens, `(M, 128, 3072)` bf16 on CPU, only when `return_tokens` is True; `script/lingbot_rl_tokens.py`: `SHARD_CHUNKS = 256`, `TokenStore(root, ordinal)` (reopens `index.jsonl`, keeps its first `ordinal` lines, raises `RuntimeError("token index behind the replay")` when it has fewer), `TokenStore.append(tokens, chunk, episode, step, reset_kind, variant_index, plan_index) -> entry dict` (writes slot `offset` of `shard_<n>.npy`, appends the entry line, advances `ordinal`; raises `ValueError` when `chunk != ordinal`), `TokenStore.read(entry) -> bf16 tensor`; `train.sh --store-tokens`; `<run>/tokens/` exists only when `store_tokens`.
+
+- [ ] **Step 1: Fixture** in `tests/test_lingbot_rl.py`
+
+`_StubPolicy.select_plan` becomes `def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False, return_tokens=False):`, records `(plans, k, random_plan, decode_all, return_tokens)` in `plan_calls`, and its returned dict gains `**({"plan_tokens": torch.full((plans, 8, STATE_DIM), 0.5, dtype=torch.bfloat16)} if return_tokens else {})`. (The existing assertions index `call[2]` / `call[3]` and stay valid.)
+
+- [ ] **Step 2: Write the failing tests**
+
+After `test_select_plan_batched_matches_looped_decode_plans_and_keeps_winner_rows`:
+
+```python
+def test_select_plan_returns_last_pass_tokens_only_when_asked_without_extra_transformer_work():
+    pool = lambda latent: latent.float().mean(dim=(1, 2, 3, 4)).reshape(-1, 1).expand(-1, STATE_DIM)
+    policy = _mock_policy()
+    policy._begin_chunk, policy._features_from_latent = (lambda batch: (False, None, 4, torch.zeros(1, 48, 1, 2, 4))), _mock_features(pool)
+    torch.manual_seed(3)
+    plain = policy.select_plan({"task": ["t"]}, plans=2, k=3, rank_fn=lambda s, pools: 0)
+    calls = len(policy.transformer.calls)
+    torch.manual_seed(3)
+    out = policy.select_plan({"task": ["t"]}, plans=2, k=3, rank_fn=lambda s, pools: 0, return_tokens=True)
+    assert "plan_tokens" not in plain and set(out) == set(plain) | {"plan_tokens"} and len(policy.transformer.calls) == 2 * calls
+    tokens = out["plan_tokens"]
+    assert tokens.shape == (2, 8, STATE_DIM) and tokens.dtype == torch.bfloat16 and tokens.device.type == "cpu"
+    assert torch.equal(out["plan_pools"], plain["plan_pools"]) and not torch.equal(tokens[0], tokens[1])
+```
+
+After `test_plan_labels_default_to_zeros_and_sample_with_the_plan_shape`:
+
+```python
+def test_token_store_round_trips_chunks_rolls_shards_and_continues_ordinals_across_reopen(tmp_path, monkeypatch):
+    import script.lingbot_rl_tokens as tokens_module
+    from script.lingbot_rl_tokens import TokenStore
+    monkeypatch.setattr(tokens_module, "SHARD_CHUNKS", 2)
+    chunk = lambda value: torch.full((2, 3, 4), value, dtype=torch.bfloat16)
+    store = TokenStore(tmp_path / "tokens", 0)
+    first = store.append(chunk(1.5), chunk=0, episode=0, step=12, reset_kind=0, variant_index=9, plan_index=1)
+    store.append(chunk(-2.0), chunk=1, episode=0, step=28, reset_kind=0, variant_index=9, plan_index=0)
+    assert first == {"chunk": 0, "episode": 0, "step": 12, "reset_kind": 0, "variant_index": 9, "plan_index": 1, "shard": 0, "offset": 0}
+    with pytest.raises(ValueError):
+        store.append(chunk(0.0), chunk=5, episode=0, step=44, reset_kind=0, variant_index=9, plan_index=0)
+    reopened = TokenStore(tmp_path / "tokens", 2)
+    third = reopened.append(chunk(0.25), chunk=2, episode=1, step=44, reset_kind=1, variant_index=673, plan_index=1)
+    assert (third["shard"], third["offset"]) == (1, 0) and reopened.ordinal == 3
+    lines = [json.loads(line) for line in (tmp_path / "tokens" / "index.jsonl").read_text().splitlines()]
+    assert [line["chunk"] for line in lines] == [0, 1, 2] and lines[1] == {**lines[1], "shard": 0, "offset": 1}
+    assert torch.equal(reopened.read(lines[1]), chunk(-2.0)) and torch.equal(reopened.read(third), chunk(0.25))
+    assert np.load(tmp_path / "tokens" / "shard_0000.npy", mmap_mode="r").shape == (2, 2, 3, 4)
+    truncated = TokenStore(tmp_path / "tokens", 1)
+    assert truncated.ordinal == 1 and len((tmp_path / "tokens" / "index.jsonl").read_text().splitlines()) == 1
+    assert truncated.append(chunk(9.0), chunk=1, episode=0, step=28, reset_kind=0, variant_index=9, plan_index=0)["offset"] == 1
+    with pytest.raises(RuntimeError, match="behind"):
+        TokenStore(tmp_path / "tokens", 7)
+```
+
+After the Task 6 trainer test:
+
+```python
+def test_train_with_store_tokens_writes_the_sidecar_from_the_worker_and_the_default_recipe_writes_none(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import script.lingbot_rl_model as model_module
+    import script.lingbot_rl_train as train
+    from script.lingbot_rl_tokens import TokenStore
+    monkeypatch.setattr(model_module, "HIDDEN", (32, 32, 32))
+    pools = []
+    monkeypatch.setattr(train, "ThreadPoolExecutor", lambda **kwargs: pools.append(kwargs) or ThreadPoolExecutor(**kwargs))
+    _StubPolicy.plan_calls = []
+    config = RLConfig(task_ids=(9,), plan_candidates=2, plan_random_prob=0.0, selection_warmup_steps=0, residual_input="base", store_tokens=True)
+    out = _smoke_train(tmp_path, monkeypatch, 60, model_factory=lambda **kw: DiceResidualModel(**kw), config=config)
+    assert pools == [{"max_workers": 1}] and all(call[4] is True for call in _StubPolicy.plan_calls)
+    lines = [json.loads(line) for line in (tmp_path / "tokens" / "index.jsonl").read_text().splitlines()]
+    assert [line["chunk"] for line in lines] == [0, 1, 2, 3, 4] and [line["step"] for line in lines] == [0, 12, 24, 36, 48]
+    assert lines[0]["episode"] == 0 and lines[1]["episode"] == 1 and {line["plan_index"] for line in lines} <= {0, 1}
+    assert np.load(tmp_path / "tokens" / "shard_0000.npy", mmap_mode="r").shape == (256, 2, 8, STATE_DIM)
+    assert torch.equal(TokenStore(tmp_path / "tokens", 5).read(lines[4]), torch.full((2, 8, STATE_DIM), 0.5, dtype=torch.bfloat16))
+    assert not any("plan_tokens" in row for row in out["rows"])
+    assert out["resume"]["recipe"] == config_from_dict({**config.to_dict(), "store_tokens": False}).protocol()
+    _StubPolicy.plan_calls = []
+    _smoke_train(tmp_path / "plain", monkeypatch, 24, config=RLConfig(plan_candidates=2, selection_warmup_steps=0))
+    assert pools == [{"max_workers": 1}] and all(call[4] is False for call in _StubPolicy.plan_calls) and not (tmp_path / "plain" / "tokens").exists()
+    with pytest.raises(ValueError):
+        RLConfig(store_tokens=True).validate()
+```
+
+The stub env ends every episode after 12 steps, so five chunks are five episodes; the stub tokens are a constant 0.5 so the round trip is exact; the recipe equality pins that `store_tokens` never enters the fingerprint.
+
+- [ ] **Step 3: Run them**
+
+Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py -k "last_pass_tokens or token_store or store_tokens"`
+Expected: FAIL with `TypeError: select_plan() got an unexpected keyword argument 'return_tokens'` and `ModuleNotFoundError: No module named 'script.lingbot_rl_tokens'`.
+
+- [ ] **Step 4: Config** in `script/lingbot_rl_config.py`
+
+After `plan_target: str = "q"`:
+
+```python
+    store_tokens: bool = False
+```
+
+In `validate()` after the `plan_target` checks:
+
+```python
+        if type(self.store_tokens) is not bool or (self.store_tokens and self.plan_candidates < 2):
+            raise ValueError("store_tokens must be a bool and needs plan_candidates > 1")
+```
+
+`protocol()` is not touched: the sidecar changes storage only, so a run may be resumed with or without it.
+
+- [ ] **Step 5: Policy** in `script/lingbot_rl_policy.py`
+
+`_video_pass_batched` gains `capture=None` and wraps its transformer call exactly as `_video_pass` does:
+
+```python
+    def _video_pass_batched(self, latents, t, latent_cond, frame_st_id, write, advance, capture=None):
+        cfg = self.config
+        latent_h, latent_w = self._latent_hw
+        m = latents.shape[0]
+        cond = None if latent_cond is None else latent_cond.expand(m, -1, -1, -1, -1)
+        payload = self._prepare_latent_input(latents, None, t, t, cond, None, frame_st_id=frame_st_id)
+        payload = payload["latent_res_lst"]
+        payload["noisy_latents"] = payload["noisy_latents"].repeat(2, 1, 1, 1, 1)
+        payload["text_emb"] = torch.cat([
+            self._prompt_embeds.to(self.dtype).expand(m, -1, -1),
+            self._negative_prompt_embeds.to(self.dtype).expand(m, -1, -1)]).clone()
+        payload["grid_id"] = payload["grid_id"][None].repeat(2 * m, 1, 1)
+        payload["timesteps"] = payload["timesteps"][None].repeat(2 * m, 1)
+        handle = None
+        if capture is not None:
+            handle = self.transformer.proj_out.register_forward_hook(lambda module, inputs, output: capture.append(inputs[0]))
+        try:
+            pred = self.transformer(payload, update_cache=1 if write else 0, cache_name="pos", action_mode=False)
+        finally:
+            if handle is not None:
+                handle.remove()
+```
+
+(the rest of the method unchanged). `select_plan` signature becomes `def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False, rank_candidates=None, return_tokens=False):`; the denoising loop becomes
+
+```python
+        captured = []
+        for i, t in enumerate(timesteps):
+            last = i == len(timesteps) - 1
+            latents = self._video_pass_batched(
+                latents, t, latent_cond, frame_st_id, write=last, advance=not last or exec_step != -1,
+                capture=captured if last and return_tokens else None)
+```
+
+and right after the `out = {...}` dict is built:
+
+```python
+        if return_tokens:
+            out["plan_tokens"] = captured[0][:plans].to(device="cpu", dtype=torch.bfloat16)
+```
+
+The last batched pass runs the transformer at CFG batch 2M with the M conditional rows first (`text_emb` is `cat([prompt × M, negative × M])`), so `captured[0][:plans]` are the history-conditioned (KV cache `"pos"`) pre-`proj_out` video tokens of the M plans: 4 frames × 4 rows × 8 columns = 128 tokens of width 3072, the same grid `_features_from_latent` reads for the pool but from the history-free critic cache. Without `return_tokens` no hook is registered and the pass is byte-identical.
+
+- [ ] **Step 6: Sidecar** `script/lingbot_rl_tokens.py`
+
+```python
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+
+SHARD_CHUNKS = 256
+FIELDS = ("chunk", "episode", "step", "reset_kind", "variant_index", "plan_index")
+
+
+class TokenStore:
+    def __init__(self, root, ordinal):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.index = self.root / "index.jsonl"
+        lines = self.index.read_text().splitlines() if self.index.is_file() else []
+        if len(lines) < ordinal:
+            raise RuntimeError("token index behind the replay")
+        self.index.write_text("".join(line + "\n" for line in lines[:ordinal]))
+        self.ordinal = int(ordinal)
+
+    def shard_path(self, shard):
+        return self.root / f"shard_{shard:04d}.npy"
+
+    def append(self, tokens, **entry):
+        if entry["chunk"] != self.ordinal:
+            raise ValueError(f"token chunk {entry['chunk']} does not match ordinal {self.ordinal}")
+        shard, offset = divmod(self.ordinal, SHARD_CHUNKS)
+        array = tokens.detach().to(device="cpu", dtype=torch.bfloat16).contiguous().view(torch.int16).numpy()
+        path = self.shard_path(shard)
+        if offset == 0 and not path.is_file():
+            store = np.lib.format.open_memmap(path, mode="w+", dtype=np.int16, shape=(SHARD_CHUNKS, *array.shape))
+        else:
+            store = np.load(path, mmap_mode="r+")
+        store[offset] = array
+        store.flush()
+        del store
+        entry = {**{key: int(entry[key]) for key in FIELDS}, "shard": shard, "offset": offset}
+        with self.index.open("a") as handle:
+            handle.write(json.dumps(entry) + "\n")
+        self.ordinal += 1
+        return entry
+
+    def read(self, entry):
+        array = np.array(np.load(self.shard_path(entry["shard"]), mmap_mode="r")[entry["offset"]])
+        return torch.from_numpy(array).view(torch.bfloat16)
+```
+
+Each shard is a valid `.npy` of shape `(256, M, 128, 3072)` int16 (bf16 bit patterns, about 800 MB, created sparse by `open_memmap` and filled slot by slot); `index.jsonl` is the only source of truth for which slots are valid, so a crash between the slot write and the index line leaves an orphan slot that the next append overwrites. `TokenStore(root, chunks)` at resume truncates the index to the replay's chunk count (the resume file is written every ten episodes, the index every chunk), so `len(index) == chunks` always holds and later chunks overwrite their slots; an index shorter than the replay means tokens are missing and raises. `store[offset] = array` raises on a shape mismatch, and `flush()` raises on a write failure; both propagate through the future.
+
+- [ ] **Step 7: Trainer** in `script/lingbot_rl_train.py`
+
+Imports: `from script.lingbot_rl_tokens import TokenStore`. In `train()`, after the resume load (the `if resume:` block) and before the expert-rows check:
+
+```python
+    tokens = TokenStore(output_dir / "tokens", chunks) if config.store_tokens else None
+```
+
+The executor line from Task 6 becomes:
+
+```python
+    labeller = ThreadPoolExecutor(max_workers=1) if calibration is not None or tokens is not None else None
+```
+
+The episode head's `future = None` becomes `future = token_future = None`. The `select_plan` call gains `return_tokens=tokens is not None`:
+
+```python
+                    decoded = policy.select_plan(batch, plans, config.k_candidates, rank_fn=model.rank_plans,
+                                                 random_plan=random_plan, decode_all=True, return_tokens=tokens is not None)
+```
+
+Directly after the Task 6 label `submit` block (same indentation):
+
+```python
+                if tokens is not None:
+                    token_future = labeller.submit(tokens.append, decoded["plan_tokens"], chunk=chunks, episode=episodes, step=env_steps,
+                                                   reset_kind=kind, variant_index=env_task, plan_index=int(decoded["plan_index"]))
+```
+
+(`chunks`, `episodes` and `env_steps` are read before the live chunk executes, so `step` is the chunk's first env step and `chunk` equals the row's position in the replay.) After the Task 6 `future.result()` block, before `chunk_seconds += ...`:
+
+```python
+                if token_future is not None:
+                    token_future.result()
+                    token_future = None
+```
+
+The episode `finally` waits for both: `wait([f for f in (future, token_future) if f is not None])` replaces the `if future is not None: wait([future])` lines (keep the `env.close()` / shadow close after it). The replay row is unchanged (`plan_tokens` never enters the buffer). On the default path `tokens` is None, no executor is created unless rollout is on, `select_plan` receives `return_tokens=False` and `token_future` stays None.
+
+- [ ] **Step 8: `brev/train.sh`**
+
+Both usage strings append ` [--store-tokens]` after `[--plan-target q|rollout]`. After `PLAN_TARGET=q` add `STORE_TOKENS=0`; in the `case` after the `--plan-target` line add `--store-tokens) STORE_TOKENS=1; shift ;;`. The config JSON python gains `, "store_tokens": sys.argv[14] == "1"` before the closing `}` and the argument `"$STORE_TOKENS"` after `"$PLAN_TARGET"`.
+
+- [ ] **Step 9: Verify and commit**
+
+Run: `.cache/eval-venv/bin/python -m pytest -q tests/test_lingbot_rl.py tests/test_lingbot_eval.py && .cache/eval-venv/bin/python -m script.lingbot_rl_config && .cache/eval-venv/bin/python -m compileall -q script/ && bash -n brev/setup.sh brev/train.sh brev/sync.sh brev/pull.sh brev/eval.sh`
+
+```bash
+git add script/lingbot_rl_tokens.py script/lingbot_rl_config.py script/lingbot_rl_policy.py script/lingbot_rl_train.py brev/train.sh tests/test_lingbot_rl.py
+git commit -m "Store every plan's history-conditioned last-pass tokens in an on-disk sidecar under --store-tokens, written by the worker thread."
+```
+
+---
+
+### Task 8: GB10 checks, smoke, stop run A, launch (controller)
+
+**Standing constraints:** zero comments and docstrings in `script/lingbot_rl_*.py` and tests; lean code; only necessary tests; the default recipe (`plan_target` `"q"`, `store_tokens` False) reproduces bit-for-bit, with no thread pool creation, no shadow construction and no sidecar. Nothing in this task changes code; a failure here is reported, not patched on the box.
 
 Run on Jarvis from `~/Documents/dice-rl-wam` after `git pull`; `DICE_DATA=~/Documents/dice`; the plus install is activated by `brev/train.sh --plus` (`~/Documents/dice/libero-plus-config/activate.sh`). Nothing here is run by implementers. Run A keeps running until Step 4.
 
 - [ ] **Step 1: Smoke with the fidelity gates** (`DICE_NO_SYNC=1` in env.sh as for the previous runs):
 
 ```bash
-bash brev/train.sh smoke-pool-cf 9 --residual-input base --epsilon -0.3 --video-steps 5 --action-steps 10 --plan-candidates 4 --env-steps 320000 --plus --proprio --state-features pool --plan-target rollout --max-env-steps 2100 --no-tmux
+bash brev/train.sh smoke-pool-cf 9 --residual-input base --epsilon -0.3 --video-steps 5 --action-steps 10 --plan-candidates 4 --env-steps 320000 --plus --proprio --state-features pool --plan-target rollout --store-tokens --max-env-steps 2100 --no-tmux
 ```
 
 Copy `$DICE_DATA/runs/dice-t9-plus-m4-pool/expert_features.pt` into `$DICE_DATA/runs/smoke-pool-cf/` first to skip the v3 rebuild (same recipe fingerprint). The run starts with the probe: layout, calibration, the 20-chunk fidelity rollout of the prior on the base task (about 3 minutes), then 3 chunks on layout variant 1982. If either raises `shadow fidelity check failed: {...}`, stop and report the printed maxima; do not loosen `FIDELITY_POSITION_M` / `FIDELITY_ANGLE_RAD`. A `shadow state mismatch` from `label_plans` during collection means the variant's qpos layout or object identities differ between the two environments; report the episode's `variant_index`. Read:
@@ -927,6 +1205,22 @@ Copy `$DICE_DATA/runs/dice-t9-plus-m4-pool/expert_features.pt` into `$DICE_DATA/
 - `$DICE_DATA/runs/smoke-pool-cf/settings.json`: `recipe.plan_target` `rollout`, `recipe.plan_critic` `regression_mean_k_rollout_progress`; `progress_calibration` with `door_closed` 0.0, `door_open` −2.094, `door_initial` nearer `door_open` (task 9 starts with the microwave open; if `door_initial` is instead nearer 0.0, stop and report), `phi_initial` about −‖mug − micro‖ at reset; `shadow_fidelity.base.position_m` and `.plus.position_m` well under 1e-3 (a correct sync lands near 1e-12), `angle_rad` well under 0.01745, `base.chunks` 20 (fewer only if the prior succeeded within 20 chunks), `plus.chunks` 3, `plus.variant_index` 1982.
 - Confirm from the log that the shadow is unconstrained by LIBERO's horizon: the smoke's episodes run their full 520 steps without a `ValueError("executing action in terminated episode")`.
 - W&B run `smoke-pool-cf` (or `$DICE_REPO/wandb/latest-run/files/wandb-summary.json`): `label_seconds` (physics only; expect well under the roughly 1 s the spec budgeted with rendering), `label_wait_seconds` (expect near zero: the shadow's 16 × ≤16 steps overlap a live chunk of about 16 × 0.54 s), `seconds_per_env_step` against the run A smoke, `label_agreement_with_q`, `label_spread_within_plan`, `label_spread_across_plans` (logged as two values; the spec's within-over-across ratio is taken offline), `label_executed_minus_mean`, `plan_target_q_mean`, `plan_label_vs_q_agreement`, `peak_gpu_memory_gb`. If `label_wait_seconds` is a sizeable fraction of `label_seconds`, the overlap is not happening (the GIL is not released where expected); report it rather than tune.
+- Token sidecar: `wc -l $DICE_DATA/runs/smoke-pool-cf/tokens/index.jsonl` equals `chunks` in `$DICE_DATA/runs/smoke-pool-cf/summary.json` (about 130 for 2,100 steps); `ls -l` and `du -h` on `tokens/shard_0000.npy` (the header says `(256, 4, 128, 3072)` int16, about 805 MB apparent, with `du` growing by about 3.1 MB per chunk since the file is sparse); `df -h $DICE_DATA` leaves room for about 63 GB per 320k run. Then:
+
+```bash
+$PY - <<'EOF'
+import json, numpy as np, torch
+from script.lingbot_rl_tokens import TokenStore
+root = "/home/$USER/Documents/dice/runs/smoke-pool-cf/tokens"
+lines = [json.loads(line) for line in open(root + "/index.jsonl")]
+store = TokenStore(root, len(lines))
+tokens = store.read(lines[-1]).float()
+print(len(lines), lines[-1], tuple(tokens.shape), float(tokens.abs().mean()), bool(torch.isfinite(tokens).all()))
+print(np.load(root + "/shard_0000.npy", mmap_mode="r").shape)
+EOF
+```
+
+Expected: the last entry's `chunk` is `len(lines) - 1`, `step` its chunk's first env step, tokens `(4, 128, 3072)` finite with a non-zero mean magnitude (the stub-free real pass; all-zero tokens would mean the hook captured the wrong rows). Also read `label_wait_seconds` again with the sidecar on: the 3 MB write shares the worker with the labels and should not raise it.
 - Buffer rows from the resume file:
 
 ```bash
@@ -954,19 +1248,20 @@ tmux kill-session -t dice-dice-t9-plus-m4-pool
 - [ ] **Step 4: Launch** the replacement run on Jarvis with run A's flags plus `--plan-target rollout`:
 
 ```bash
-bash brev/train.sh dice-t9-plus-m4-pool-cf 9 --residual-input base --epsilon -0.3 --env-steps 320000 --video-steps 5 --action-steps 10 --plan-candidates 4 --plus --proprio --state-features pool --plan-target rollout
+bash brev/train.sh dice-t9-plus-m4-pool-cf 9 --residual-input base --epsilon -0.3 --env-steps 320000 --video-steps 5 --action-steps 10 --plan-candidates 4 --plus --proprio --state-features pool --plan-target rollout --store-tokens
 ```
 
 Copy `expert_features.pt` into `$DICE_DATA/runs/dice-t9-plus-m4-pool-cf/` first. Checkpoints every 80k; the offline measurements of spec section 5 run on the stored `plan_labels` at 80k and 320k.
 
 ## Self-review notes
 
-- Spec coverage: section 2 run / recipe → Task 7 launch command and Task 1 validation; label per chunk (shadow, 16 candidates, base actions, physics only, φ difference, mean over K, (M, K) float32 stored) → Tasks 5 (`label_plans` on the direct robosuite path with image observables disabled), 3 (buffer), 6 (storage, labelling thread) and 4 (mean over K as the target); φ for task 9 with startup calibration → Task 2 (door limits from the model, interior = microwave body position per the brief); critic unchanged architecture, label target, mean readout, Q target still logged → Task 4; what stays fixed → no task touches the actor, Q updates, sampler, reset draw or evaluation protocols; shadow per episode with the live kwargs, reset once, state-driven from a snapshot, live never restored → Tasks 5 and 6; logged diagnostics → Task 6 (`label_agreement_with_q`, the within and across spreads logged as two values rather than the spec's ratio, executed minus mean, `label_seconds`, `label_wait_seconds`; per-episode logs unchanged); cost measured in the smoke → Task 7; section 4 fidelity check (20 chunks, 1 mm, 1° on the body orientations and the door) → Tasks 5 and 6, plus the 3-chunk check on a layout variant, with the controller goal copied along with the state as section 4 anticipates; section 6 code list → Tasks 1–6 and `train.sh --plan-target`; section 6 tests (progress on hand-built poses, `label_plans` on a stub environment, the plan-critic update on stored labels, fingerprint, default recipe unchanged) → Tasks 2, 5, 4, 1 and the `plain` smoke assertions in Task 6. Not in this plan: the offline measurements and held-out evaluations of section 5, which the spec schedules after 80k / 320k; `script/lingbot_eval_modal.py` building its eval config without `plan_candidates` (pre-existing for M = 4 checkpoints).
+- Spec coverage: section 2 run / recipe → Task 8 launch command and Task 1 validation; label per chunk (shadow, 16 candidates, base actions, physics only, φ difference, mean over K, (M, K) float32 stored) → Tasks 5 (`label_plans` on the direct robosuite path with image observables disabled), 3 (buffer), 6 (storage, labelling thread) and 4 (mean over K as the target); φ for task 9 with startup calibration → Task 2 (door limits from the model, interior = microwave body position per the brief); critic unchanged architecture, label target, mean readout, Q target still logged → Task 4; what stays fixed → no task touches the actor, Q updates, sampler, reset draw or evaluation protocols; shadow per episode with the live kwargs, reset once, state-driven from a snapshot, live never restored → Tasks 5 and 6; logged diagnostics → Task 6 (`label_agreement_with_q`, the within and across spreads logged as two values rather than the spec's ratio, executed minus mean, `label_seconds`, `label_wait_seconds`; per-episode logs unchanged); cost measured in the smoke → Task 8; section 4 fidelity check (20 chunks, 1 mm, 1° on the body orientations and the door) → Tasks 5 and 6, plus the 3-chunk check on a layout variant, with the controller goal copied along with the state as section 4 anticipates; section 6 code list → Tasks 1–6 and `train.sh --plan-target`; the token sidecar for the later encoder study (not in the spec; coordinator-added) → Task 7 (`store_tokens`, `select_plan(return_tokens=True)`, `TokenStore`, `train.sh --store-tokens`), its three tests and the Task 8 sidecar readouts; section 6 tests (progress on hand-built poses, `label_plans` on a stub environment, the plan-critic update on stored labels, fingerprint, default recipe unchanged) → Tasks 2, 5, 4, 1 and the `plain` smoke assertions in Task 6. Not in this plan: the offline measurements and held-out evaluations of section 5, which the spec schedules after 80k / 320k; `script/lingbot_eval_modal.py` building its eval config without `plan_candidates` (pre-existing for M = 4 checkpoints).
 - Placeholder scan: every code step carries the code; nothing is deferred to the box except reading measurements.
+- Sidecar invariants: `plan_tokens` leaves `select_plan` only under `return_tokens`, with no hook and no extra transformer call otherwise (pinned by the equal call count); the row never carries `plan_tokens`; `store_tokens` is absent from `protocol()` (pinned by the recipe equality in the Task 7 trainer test); `TokenStore(root, chunks)` keeps the index aligned with the replay across resume; the token job runs on the same single worker as the labels, after the label job, and its `result()` precedes the next chunk so a write failure stops the run.
 - Type consistency: `label_plans(shadow, snapshot, before, candidates, first_chunk, norm, layout, calibration)` has the same signature in Task 5, the Task 6 `submit` (through `_timed`) and the Task 6 monkeypatch; `shadow_fidelity(env, shadow, layout, act, observation, chunks)` in Task 5, both Task 6 calls and the monkeypatch (which accepts `chunks`); `capture_live(live)` in Tasks 5, 6; `calibrate(task_id, inner, layout, initial)` in Tasks 2, 6; `progress(calibration, layout, before, after, success)` in Tasks 2, 5; `update_plan_critic(..., plan_labels=None)` in Tasks 4, 6; `make_shadow(task_id, suite, init_states, plus, seed)` in Tasks 5, 6; `plan_labels` is numpy (M, K) float32 from `label_plans`, in the row, and torch (B, M, K) from `sample`; the fidelity result keys are `position_m`, `angle_rad`, `chunks` in Tasks 5, 6, 7.
 - Bit-for-bit with `plan_target "q"`: the protocol and checkpoint `layout` are unchanged; `rank_plans` executes the same `plan_critic(state.expand, pools)` min readout; `update_plan_critic` computes the same target and returns the same keys; the loop's `q_all` is the same expression split over two names; `plan_labels` enters the row only under rollout and the buffer default is zeros that the `"q"` update ignores; the executor, shadow, snapshot, calibration and fidelity code run only when `calibration is not None`, which requires `plan_target == "rollout"` (pinned by the `pools == [{"max_workers": 1}]` assertion after the `plain` run); the probe block only binds the reset's return value.
 - Threading: the worker reads only the snapshot, the shadow and cpu tensors; the main thread never touches the shadow while a future is pending; `future.result()` precedes `buffer.add_online`, so rows and training order are unchanged; a pending future is waited for before the shadow is closed; the test's stub labeller is synchronous and joined before any assertion.
 - RNG: `make_shadow` resets inside `capture_rng()` / `restore_rng()`; both startup fidelity rollouts run inside the probe's RNG capture; `label_plans` draws nothing.
 - Fingerprint: `plan_target` enters `protocol()` whenever it is `"rollout"`, so `test_load_resume_rejects_recipe_mismatch` refuses a resume across the change; `test_config_plan_target_enters_the_fingerprint_only_for_rollout` pins the default protocol at 78 keys.
 - Verified from source: robosuite `MjSim.get_state` / `set_state` / `forward`, `MjSimState.from_flattened` (`na == 0`), `MjData` attribute delegation, `Controller.update(force=True)`, `initial_joint`, OSC `set_goal` goal_ori behaviour and `reset_goal`, `PandaGripper.format_action` ramp, `MujocoEnv.step` done check, `Observable.update` rendering and `modality` / `set_enabled`, `use_camera_obs` consulted only at observable creation (`~/.cache/uv/git-v0/checkouts/79abe6cb204f004b/c848ca8`); LIBERO `ControlEnv(horizon=1000, ignore_done=False)`, `OffScreenRenderEnv.step` forwarding, `check_success`, `regenerate_obs_from_state` pattern, task 9 bddl `(Open microwave_1)` init and `(In white_yellow_mug_1 microwave_1_heating_region) (Close microwave_1)` goal, `microwave.xml` joint range `-2.094 0` and heating-region site (LIBERO copy at `/Users/desmondzee/Hardware/ICL-so101/third_party/LIBERO`, not the pinned GB10 install); LeRobot `LiberoEnv.step` / `reset` / `_format_raw_obs` (`.cache/lerobot`).
-- Box-only checks (Task 7): the shadow's determinism against the live env (the fidelity maxima on the base task and the layout variant), the recorded door calibration direction, the LIBERO-Plus install's `horizon` / `ignore_done` values, the physics-only label cost and the overlap (`label_wait_seconds`).
+- Box-only checks (Task 8): the shadow's determinism against the live env (the fidelity maxima on the base task and the layout variant), the recorded door calibration direction, the LIBERO-Plus install's `horizon` / `ignore_done` values, the physics-only label cost and the overlap (`label_wait_seconds`), the sidecar's index length against `chunks` and the sparse shard growth, and that the real last-pass tokens are non-zero.
