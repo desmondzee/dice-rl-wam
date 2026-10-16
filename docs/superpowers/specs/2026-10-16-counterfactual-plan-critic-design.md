@@ -1,79 +1,75 @@
-# Trial: a plan critic trained on counterfactual simulator rollouts
+# Plan critic trained on counterfactual simulator rollouts (run A, online)
 
-Status: design for review. One change: V_plan's training signal. Everything else (prior, sampler, residual actor, Q
-ensemble, recipe, evaluation protocols) is fixed, so a held-out difference is attributable to the critic.
+Status: approved design (2026-10-16). Run A (`dice-t9-plus-m4-pool`, Jarvis) is replaced by a run with one change to
+its recipe: V_plan is trained on labels measured by executing every candidate plan in the simulator, instead of on a
+target derived from Q. Run B (`dice-t9-plus-m4-struct`, Watson) keeps running unchanged; the pooled-feature baseline
+with the Q target is re-run later if the result warrants it.
 
 ## 1. The problem this addresses
 
-V_plan regresses onto a target built from Q: the max over four candidates of the minimum over ten heads. Measured on
-the 320k task 9 and 240k task 0 buffers (docs/heldout-results.md, plan-critic studies): two halves of the Q ensemble
-agree on the best plan 0.63 / 0.44 of the time, the best Q ranker's link to outcomes is 0.42 / 0.39, V_plan's is 0.39 /
-0.13, and random-plan ablations put V_plan's contribution at 3–5 points on 100 episodes. Nothing in the pipeline ever
-observes what the three plans that were not executed would have done.
+V_plan regresses onto the max over four candidates of the minimum over ten Q heads. On the 320k task 9 and 240k task 0
+buffers two halves of the Q ensemble agree on the best plan 0.63 / 0.44 of the time, the best Q ranker's link to
+outcomes is 0.42 / 0.39, V_plan's is 0.39 / 0.13, and the random-plan ablations put V_plan's contribution at 3–5 points
+on 100 episodes. Nothing in the pipeline observes what the three plans that were not executed would have done.
 
 ## 2. The change
 
-Label every plan at a stored state by executing it in the simulator from that state, and train V_plan on those labels.
-
 | item | decision |
 |---|---|
-| label | for each of the M = 4 plans at a stored chunk start: restore the simulator state, execute each of the plan's K = 4 decoded base-action candidates for 16 steps with physics only (no policy call), read the object poses, score progress; the plan's label is the mean over its 4 candidates |
-| progress score (task 9) | φ(state) from the simulator poses the trainer already records: −‖mug − microwave target‖ while the mug is outside, a bonus once the mug is inside, −|door angle − closed| once inside, 1.0 on the task's success predicate; label = φ(after) − φ(before). One function per task in `script/lingbot_rl_progress.py`, task 9 for the trial |
-| critic | unchanged architecture: 10 heads on (s, p), the policy's own pooled features only; object poses and simulator state never enter the critic's inputs, so the trained critic deploys without privileged information |
-| loss | MSE onto the label, as today; readout = mean over heads (the aggregation study); a within-state pairwise ranking loss is reported offline as a secondary variant, not used live in this trial |
-| what stays fixed | the 320k task 9 checkpoint's residual actor and Q ensemble; the 5 / 10 sampler; M = 4, K = 4; the evaluation protocols and seeds |
-| no actor in this trial | the trial measures the critic; a noise-space pre-screen or noise actor trained against this critic is the next trial once the critic has a measured ceiling |
+| run | `dice-t9-plus-m4-pool-cf` on Jarvis: the run A recipe (task 9, prior frozen, thirds reset mix over the LIBERO-Plus training variants, pooled features + proprioception, M = 4, K = 4, 5 / 10 sampler, ε −0.3, 320k env steps, checkpoints every 80k) with `plan_target = "rollout"` |
+| label, per chunk | after the policy decodes its M × K candidates and before it executes: a shadow environment of the same task and variant is set to the live simulator's state; each of the 16 candidate chunks (base actions, no residual) is executed there for the chunk's length with physics only; the score is φ(after) − φ(before) from the object poses; the plan label is the mean over its 4 candidates; labels (M, K) float32 are stored with the chunk |
+| φ (task 9) | from the simulator poses the trainer records: −‖mug − interior target‖ while the mug is outside the microwave; +1 once inside; +(1 − door open fraction) once inside; +2 on the task's success predicate. One function per task in `script/lingbot_rl_progress.py`; interior target and door range measured once at startup from the base-task environment |
+| critic | unchanged architecture, 10 heads on (s, p); the training target is the stored plan label; readout for ranking = mean over heads; the Q-derived target is still computed and logged for comparison, not trained on |
+| what stays fixed | the residual actor, the Q ensemble and its targets, the sampler, M, K, the reset schedule, the buffer's other keys, both evaluation protocols |
+| shadow environment | one per episode, constructed with the live environment's kwargs (same task or variant, same reset kind), reset once, then driven only by state assignment; the live environment is never restored to, so the episode is unaffected; a fidelity check at startup gates the run (section 4) |
+| logged | per chunk: label agreement with the Q-mean ranking, label spread across the 4 candidates of a plan over the label spread across plans, label of the executed plan minus the mean; per episode as now |
+| cost | about 16 × 16 physics steps per chunk, about one second, roughly 10% on the current 0.54 s per env step |
 
-## 3. Data
+## 3. Why these choices
 
-The existing buffers do not store the simulator state, so the labels cannot be produced from them. Two routes:
+- Labels for every plan remove the two noise sources we measured: Q's estimation noise and the executed-only selection
+  bias. What remains is the stochasticity after the chunk.
+- Base actions without the residual make the label the plan's value under the prior's action noise, which is what
+  V_plan is defined to estimate, and keep the label independent of the actor being trained.
+- A shadow environment instead of restoring the live one: no fidelity risk to the episode and no controller state to
+  put back; the shadow's own controller state is reset before each candidate.
+- Object poses and simulator state enter the label only; the critic conditions on the policy's own features, so a
+  critic trained this way runs without privileged information.
+- Keeping the Q target computed but untrained gives a live comparison of the two signals at no cost.
 
-- A. **Labelling collection**: run the 320k task 9 policy (V_plan ranker) on the standard task and on the LIBERO-Plus
-  training variants with the thirds mix, storing per chunk `sim_state` (MuJoCo qpos, qvel and the controller goal, a
-  few hundred floats), `s`, `plan_pools_all`, `plan_a_base_all`, `object_state`, `reset_kind`. Target 4,000 chunks
-  (about 64k env steps, 10 h on one GB10 at full speed). No training during collection.
-- B. Add `sim_state` to the buffer keys now and label the next training run's buffer; no extra collection, but the
-  labels arrive only when that run exists.
+## 4. Fidelity check (gates the launch)
 
-Route A is the trial; B is the standing change so every later run can be labelled.
+Before collection: for 20 chunks of a warm-up episode, set the shadow to the live state, execute the live chunk's
+actions in both, compare object poses after the chunk; require agreement within 1 mm and 1°. If the OSC controller's
+internal state breaks this, the controller goal is copied along with the simulator state.
 
-Restore fidelity check (gates labelling): for 100 stored chunks, restore the state, replay the executed chunk's actions,
-compare the resulting object poses with the stored next-chunk `object_state`; require agreement within 1 mm and 1°.
-The OSC controller carries internal state; if the check fails, the controller goal is added to `sim_state`.
+## 5. Measurements
 
-Label cost: 16 physics rollouts of 16 steps per chunk, about 1 s on a CPU; 4,000 chunks in about an hour on one box.
+Online: the logged agreement and spreads. Offline at 80k and 320k, on the stored labels: split-half agreement of the
+new V_plan (reference 0.71 for the Q-mean ranker, 0.78 for V_plan's mean readout), correlation of the executed plan's
+relative label with the chunk's Monte Carlo return (0.39 today), and the within-plan label spread. Held-out at 320k:
+the standard 100 episodes with the V_plan ranker and with the random ranker, and the LIBERO-Plus 100, against the
+existing rows (80 / 75; 53 / 50) and run B.
 
-Continuation calibration (optional, 100 chunks): roll each plan out to termination with the prior to compare the
-short-horizon label with the true return; reports the horizon bias of the progress score.
+## 6. Code
 
-## 4. Measurements
+- `script/lingbot_rl_progress.py`: `progress(task_id, before, after, success)` and the startup calibration of the
+  interior target and door range.
+- `script/lingbot_rl_config.py`: `plan_target` ("q" | "rollout"), in the protocol fingerprint.
+- `script/lingbot_rl_train.py`: shadow environment per episode, `label_plans(shadow, state, candidates, norm, task_id)`,
+  `plan_labels` stored per chunk, the logged diagnostics, the fidelity check at startup; `brev/train.sh --plan-target`.
+- `script/lingbot_rl_buffer.py`: `plan_labels` (M, K) float32 with a legacy default of zeros.
+- `script/lingbot_rl_model.py`: `update_plan_critic` takes the target from `plan_labels` when `plan_target == "rollout"`;
+  `rank_plans` by the mean over heads.
+- Tests: progress on hand-built poses; label_plans on a stub environment; the plan-critic update on stored labels;
+  fingerprint; default recipe unchanged.
 
-Offline, on an 80 / 20 split by time of the labelled chunks: split-half agreement of the new V_plan (ceiling to beat:
-0.71 for the Q-mean ranker, 0.78 for V_plan's own mean readout); agreement with the Q-mean ranker; correlation of
-the executed plan's relative score with the chunk's Monte Carlo return (0.39 today); label consistency across the
-four candidates of a plan (how much of the label is plan, how much is action noise).
+## 7. Risks
 
-Held-out, the measurement that matters: the 320k task 9 checkpoint with the new V_plan as ranker, residual and Q
-unchanged, on the standard 100 episodes (V_plan 80, random plan 75) and the LIBERO-Plus 100 (53, 50). Four hours
-each. The LIBERO-Plus variants in the labelling collection are the training variants; the plus plan overlaps them,
-so the held-out plan from the earlier spec is the clean test when it exists.
-
-## 5. Code
-
-- `script/lingbot_rl_progress.py`: `progress(task_id, object_state_before, object_state_after, success)`; task 9.
-- `script/lingbot_rl_train.py`: `sim_state` read at each chunk start when `proprio` is set (both routes); the
-  labelling collection is `train.sh --collect-only` (no updates, no checkpoints, buffer saved).
-- `script/lingbot_rl_label.py`: offline labeller: loads a buffer, restores states, runs the rollouts, writes
-  `labels.pt` (chunk id → M × K progress); the fidelity check as a flag.
-- `script/lingbot_rl_plan_critic.py`: trains V_plan on labels, writes a residual checkpoint with the new plan critic
-  and the unchanged actor / Q, so `evaluate` and the plus driver load it as today.
-- Tests: progress score on hand-built poses; labeller on a stub environment; critic training on synthetic labels.
-
-## 6. Risks
-
-- Restore fidelity: controller state; gated by the check.
-- Progress score myopia: a chunk that scores well and leads somewhere bad; the continuation calibration measures it.
-- The label is a mean over four candidates, so it is a plan value under the prior's action noise, which is what V_plan
-  is defined as; the residual is not applied in the rollouts, a deliberate simplification for the trial.
-- Simulator-only labels: the deployment claim is "trained in simulation on counterfactual outcomes, conditioned only on
-  the policy's own features"; transfer to a real robot rests on the visual domain, not on the labels.
+- Progress myopia: a chunk that scores well and leads somewhere bad. The offline Monte Carlo correlation measures it;
+  a continuation calibration on 100 chunks is optional later.
+- Shadow-state mismatch for variants with sampled objects: the shadow is built for the same variant and set to the
+  live state, so object identities match; the fidelity check covers it.
+- Label cost under the plus package: measured in the smoke.
+- Simulator-only labels: the claim is "trained in simulation on counterfactual outcomes, conditioned only on the
+  policy's own features".
