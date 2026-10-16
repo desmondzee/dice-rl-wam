@@ -37,9 +37,9 @@ def episode_rows(rows):
             step = 0
 
 
-def analyse(resume_path, residual_path, batch=512, device="cpu", residual_input="z"):
+def analyse(resume_path, residual_path, batch=512, device="cpu", residual_input="z", plan_candidates=1):
     payload = torch.load(resume_path, map_location="cpu", weights_only=False)
-    model = DiceResidualModel(device=device, residual_input=residual_input)
+    model = DiceResidualModel(device=device, residual_input=residual_input, plan_candidates=plan_candidates)
     model.load_inference_state_dict(torch.load(residual_path, map_location="cpu", weights_only=True))
     items = list(episode_rows(payload["replay"]["data"]))
     out = []
@@ -51,9 +51,13 @@ def analyse(resume_path, residual_path, batch=512, device="cpu", residual_input=
             base_all = torch.from_numpy(np.stack([row["a_base_all"] for _, _, row in chunk])).float().to(device)
             n, k = z_all.shape[0], z_all.shape[1]
             state_k = state.unsqueeze(1).expand(n, k, -1).reshape(n * k, -1)
+            critic_k = state_k
+            if plan_candidates > 1:
+                pool = torch.from_numpy(np.stack([row["plan_pool"] for _, _, row in chunk])).float().to(device)
+                critic_k = model.critic_state(state_k, pool.unsqueeze(1).expand(n, k, -1).reshape(n * k, -1))
             base_flat = base_all.reshape(n * k, HORIZON, -1)
             action = apply_residual(base_flat, model.actor(state_k, z_all.reshape(n * k, HORIZON, -1), base_flat))
-            delta_v = (model.critic(state_k, action) - model.critic(state_k, base_flat)).reshape(n, k).mean(dim=1).cpu().numpy()
+            delta_v = (model.critic(critic_k, action) - model.critic(critic_k, base_flat)).reshape(n, k).mean(dim=1).cpu().numpy()
             after = action.reshape(n, k, HORIZON, -1).cpu().numpy()
             before = base_flat.reshape(n, k, HORIZON, -1).cpu().numpy()
             delta_h = bin_entropy(after) - bin_entropy(before)
@@ -99,7 +103,8 @@ def plot(rows, episodes, title, path):
         ax.scatter(x, y, s=4, alpha=0.25, color="#4a7c59")
         slope, intercept = np.polyfit(x, y, 1)
         grid = np.linspace(x.min(), x.max(), 2)
-        ax.plot(grid, slope * grid + intercept, color="#5b4ea6", linewidth=2, label=f"trend (r={np.corrcoef(x, y)[0, 1]:.3f})")
+        r = np.corrcoef(x, y)[0, 1]
+        ax.plot(grid, slope * grid + intercept, color="#5b4ea6", linewidth=2, label=f"fit: r={r:.3f}, r²={r * r:.3f}, slope={slope:.2f}")
         ax.axhline(0, color="grey", linewidth=0.6, linestyle="--"); ax.axvline(0, color="grey", linewidth=0.6, linestyle="--")
         ax.set_xlabel("change in value (ΔV)"); ax.set_ylabel("change in action entropy (ΔH)"); ax.set_title(f"{title}, {label}"); ax.legend()
     fig.tight_layout()
@@ -113,8 +118,9 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--title", default="")
     parser.add_argument("--residual-input", default="z")
+    parser.add_argument("--plan-candidates", type=int, default=1)
     args = parser.parse_args()
-    rows = analyse(args.resume, args.residual, residual_input=args.residual_input)
+    rows = analyse(args.resume, args.residual, residual_input=args.residual_input, plan_candidates=args.plan_candidates)
     summary, episodes = summarise(rows)
     args.out.mkdir(parents=True, exist_ok=True)
     for name, data in (("rows.csv", rows), ("episodes.csv", episodes)):
