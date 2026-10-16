@@ -240,4 +240,14 @@ Protocol: `docs/libero-plus/task9-plan.json` (LIBERO-Plus at 4976dc3, 5 / 10 sam
 | object layout | 48 | 25 (0.52) | 27 (0.56) | 11 / 9 | 414 / 398 |
 | both | 100 | 37 | 53 | 29 / 13 | 446 / 400 |
 
+Same 100 episodes with the 320k checkpoint choosing its plan at random (`--plan-ranker random`; Q still picks among the chosen plan's 4 residual candidates), 2026-10-16:
+
+| axis | episodes | random plan | paired vs V_plan: gained / lost | paired vs SFT: gained / lost | mean steps |
+|---|---|---|---|---|---|
+| robot initial state | 52 | 22 (0.42) | 8 / 12 | 16 / 6 | — |
+| object layout | 48 | 28 (0.58) | 9 / 8 | 12 / 9 | — |
+| both | 100 | 50 | 17 / 20 | 28 / 15 | 412 |
+
+By difficulty level (random-plan / V_plan successes of n): robot initial state 1: 6 / 4 of 7, 2: 12 / 14 of 20, 3: 2 / 3 of 6, 4: 1 / 3 of 10, 5: 1 / 2 of 9; layout 1: 17 / 14 of 26, 2: 7 / 5 of 12, 3: 4 / 8 of 10. Episode wall time 160 s.
+
 By LIBERO-Plus difficulty level (SFT / RL successes of n): robot initial state 1: 3 / 4 of 7, 2: 5 / 14 of 20, 3: 2 / 3 of 6, 4: 1 / 3 of 10, 5: 1 / 2 of 9; layout 1: 16 / 14 of 26, 2: 5 / 5 of 12, 3: 4 / 8 of 10. Episode wall time 155 s at M = 4. Raw results under `result/heldout-plus/<policy>/task_09/`.
