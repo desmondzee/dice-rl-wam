@@ -178,6 +178,8 @@ Sampler: 5 video denoising steps (plus the cache write pass) and 10 action steps
 | 8 | SFT step 600, best-of-1 | 12 | 0.12 | 512 | — (2 / 20 on the 20-rollout eval at 20 / 50) | 1 · 10 · 39 |
 | 9 | SFT step 600, best-of-1 | 60 | 0.60 | 400 | 33 / 15 vs SFT at 20 / 50 (42) | 15 · 30 · 5 |
 | 9 | SFT step 600, 5 steps stopped after pass 4 (cache at σ = 0.77) | 39 | 0.39 | 449 | 25 / 28 vs SFT at 20 / 50 (42) | 8 · 23 · 19 |
+| 9 | SFT step 600, video guidance 1 (no unconditional row), shard 0 of 2 (50 episodes) | 25 / 50 | 0.50 | 420 | 10 / 16 vs guidance 5 on the same 50 (31 / 50) | — |
+| 9 | SFT step 600, video guidance 3, shard 0 of 2 (50 episodes) | 34 / 50 | 0.68 | 383 | 16 / 13 vs guidance 5 on the same 50 (31 / 50); 17 / 8 vs guidance 1 | — |
 | 9 | plan selection + residual, 160k (`dice-t9-plan-m4`) | 79 | 0.79 | 338 | 30 / 11 | 30 · 19 · 1 |
 | 9 | same 160k checkpoint, plan chosen by Q over all 16 residual candidates (`--plan-ranker q`) | 74 | 0.74 | 340 | 30 / 16; 14 / 19 vs the V_plan-ranked run | 28 · 18 · 4 |
 | 9 | plan selection + residual, 320k (`dice-t9-plan-m4`) | 80 | 0.80 | 335 | 32 / 12; 13 / 12 vs its own 160k | 33 · 14 · 3 |
