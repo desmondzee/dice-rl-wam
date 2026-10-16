@@ -413,7 +413,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             latents[:, :, 0:1] = latent_cond
         return latents
 
-    def _video_pass_batched(self, latents, t, latent_cond, frame_st_id, write, advance):
+    def _video_pass_batched(self, latents, t, latent_cond, frame_st_id, write, advance, capture=None):
         cfg = self.config
         latent_h, latent_w = self._latent_hw
         m = latents.shape[0]
@@ -426,7 +426,14 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             self._negative_prompt_embeds.to(self.dtype).expand(m, -1, -1)]).clone()
         payload["grid_id"] = payload["grid_id"][None].repeat(2 * m, 1, 1)
         payload["timesteps"] = payload["timesteps"][None].repeat(2 * m, 1)
-        pred = self.transformer(payload, update_cache=1 if write else 0, cache_name="pos", action_mode=False)
+        handle = None
+        if capture is not None:
+            handle = self.transformer.proj_out.register_forward_hook(lambda module, inputs, output: capture.append(inputs[0]))
+        try:
+            pred = self.transformer(payload, update_cache=1 if write else 0, cache_name="pos", action_mode=False)
+        finally:
+            if handle is not None:
+                handle.remove()
         if advance:
             pred = data_seq_to_patch(cfg.patch_size, pred, cfg.frame_chunk_size, latent_h, latent_w, batch_size=2 * m)
             pred = pred[m:] + cfg.guidance_scale * (pred[:m] - pred[m:]) if cfg.guidance_scale > 1 else pred[:m]
@@ -601,7 +608,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             self._restore_chunk_state(saved)
 
     @torch.no_grad()
-    def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False, rank_candidates=None):
+    def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False, rank_candidates=None, return_tokens=False):
         self.eval()
         self._ensure_frozen_modules()
         self._maybe_init_prompt(batch)
@@ -619,16 +626,20 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         latent_cond = init_latent[:, :, 0:1].to(self.dtype) if frame_st_id == 0 and init_latent is not None else None
         expand_kv_rows(self.transformer, plans)
         latents = video_noise.clone()
+        captured = []
         for i, t in enumerate(timesteps):
             last = i == len(timesteps) - 1
             latents = self._video_pass_batched(
-                latents, t, latent_cond, frame_st_id, write=last, advance=not last or exec_step != -1)
+                latents, t, latent_cond, frame_st_id, write=last, advance=not last or exec_step != -1,
+                capture=captured if last and return_tokens else None)
         plan_feats = self._features_from_latent(latents)
         pools = plan_feats["pool"].float()
         out = {"s": state.float(), "state_struct": feats["struct"][:, 0], "state_tokens": feats["tokens"], "state_latent": critic_latent,
                "z": model_to_mlp(action_noise).float(), "plan_pools": pools,
                "plan_struct_all": plan_feats["struct"].reshape(plans, -1, STATE_DIM), "plan_latent_all": latents,
                "video_noise": video_noise, "first_chunk": first}
+        if return_tokens:
+            out["plan_tokens"] = captured[0][:plans].to(device="cpu", dtype=torch.bfloat16)
         decode_all = decode_all or rank_candidates is not None
         if decode_all:
             decoded = self._decode_actions(action_noise.repeat(plans, 1, 1, 1, 1), frame_st_id, k, plans)

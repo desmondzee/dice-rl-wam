@@ -705,6 +705,31 @@ def test_plan_labels_default_to_zeros_and_sample_with_the_plan_shape():
     assert legacy.sample(2, 0.0)["plan_labels"].shape == (2, 2, K_CANDIDATES) and not legacy.rows()[0]["plan_labels"].any()
 
 
+def test_token_store_round_trips_chunks_rolls_shards_and_continues_ordinals_across_reopen(tmp_path, monkeypatch):
+    import script.lingbot_rl_tokens as tokens_module
+    from script.lingbot_rl_tokens import TokenStore
+    monkeypatch.setattr(tokens_module, "SHARD_CHUNKS", 2)
+    chunk = lambda value: torch.full((2, 3, 4), value, dtype=torch.bfloat16)
+    store = TokenStore(tmp_path / "tokens", 0)
+    first = store.append(chunk(1.5), chunk=0, episode=0, step=12, reset_kind=0, variant_index=9, plan_index=1)
+    store.append(chunk(-2.0), chunk=1, episode=0, step=28, reset_kind=0, variant_index=9, plan_index=0)
+    assert first == {"chunk": 0, "episode": 0, "step": 12, "reset_kind": 0, "variant_index": 9, "plan_index": 1, "shard": 0, "offset": 0}
+    with pytest.raises(ValueError):
+        store.append(chunk(0.0), chunk=5, episode=0, step=44, reset_kind=0, variant_index=9, plan_index=0)
+    reopened = TokenStore(tmp_path / "tokens", 2)
+    third = reopened.append(chunk(0.25), chunk=2, episode=1, step=44, reset_kind=1, variant_index=673, plan_index=1)
+    assert (third["shard"], third["offset"]) == (1, 0) and reopened.ordinal == 3
+    lines = [json.loads(line) for line in (tmp_path / "tokens" / "index.jsonl").read_text().splitlines()]
+    assert [line["chunk"] for line in lines] == [0, 1, 2] and lines[1] == {**lines[1], "shard": 0, "offset": 1}
+    assert torch.equal(reopened.read(lines[1]), chunk(-2.0)) and torch.equal(reopened.read(third), chunk(0.25))
+    assert np.load(tmp_path / "tokens" / "shard_0000.npy", mmap_mode="r").shape == (2, 2, 3, 4)
+    truncated = TokenStore(tmp_path / "tokens", 1)
+    assert truncated.ordinal == 1 and len((tmp_path / "tokens" / "index.jsonl").read_text().splitlines()) == 1
+    assert truncated.append(chunk(9.0), chunk=1, episode=0, step=28, reset_kind=0, variant_index=9, plan_index=0)["offset"] == 1
+    with pytest.raises(RuntimeError, match="behind"):
+        TokenStore(tmp_path / "tokens", 7)
+
+
 def _eval_normalization():
     return {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
 
@@ -1452,8 +1477,8 @@ class _StubPolicy:
             "state_latent": torch.zeros(1, 48, 1, 8, 16),
         }
 
-    def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False):
-        type(self).plan_calls.append((plans, k, random_plan, decode_all))
+    def select_plan(self, batch, plans, k, rank_fn=None, random_plan=False, decode_all=False, return_tokens=False):
+        type(self).plan_calls.append((plans, k, random_plan, decode_all, return_tokens))
         base = self.decode_candidates(batch, k)
         pools = torch.stack([torch.full((STATE_DIM,), float(m)) for m in range(plans)])
         struct_all = pools[:, None].expand(plans, 8, STATE_DIM)
@@ -1463,7 +1488,8 @@ class _StubPolicy:
             model.state_input(base["s"], base["state_struct"], batch.get("proprio")), model.plan_input(pools, struct_all)))
         return {**base, "plan_pools": pools, "plan_struct_all": struct_all, "plan_latent_all": torch.zeros(plans, 48, 4, 8, 16),
                 "plan_pool": pools[index:index + 1], "plan_struct": struct_all[index:index + 1], "plan_index": index,
-                "plan_a_base_all": all_base, "a_base": all_base[index]}
+                "plan_a_base_all": all_base, "a_base": all_base[index],
+                **({"plan_tokens": torch.full((plans, 8, STATE_DIM), 0.5, dtype=torch.bfloat16)} if return_tokens else {})}
 
     def commit_executed(self, chunk, first_chunk=False):
         self._executed_actions = chunk
@@ -1752,6 +1778,32 @@ def test_train_with_rollout_labels_overlaps_the_live_chunk_stores_them_and_recor
     plain = _smoke_train(tmp_path / "plain", monkeypatch, 24)
     assert pools == [{"max_workers": 1}] and not any("label_seconds" in entry for entry in plain["logs"])
     assert json.loads((tmp_path / "plain" / "settings.json").read_text())["shadow_fidelity"] is None
+
+
+def test_train_with_store_tokens_writes_the_sidecar_from_the_worker_and_the_default_recipe_writes_none(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import script.lingbot_rl_model as model_module
+    import script.lingbot_rl_train as train
+    from script.lingbot_rl_tokens import TokenStore
+    monkeypatch.setattr(model_module, "HIDDEN", (32, 32, 32))
+    pools = []
+    monkeypatch.setattr(train, "ThreadPoolExecutor", lambda **kwargs: pools.append(kwargs) or ThreadPoolExecutor(**kwargs))
+    _StubPolicy.plan_calls = []
+    config = RLConfig(task_ids=(9,), plan_candidates=2, plan_random_prob=0.0, selection_warmup_steps=0, residual_input="base", store_tokens=True)
+    out = _smoke_train(tmp_path, monkeypatch, 60, model_factory=lambda **kw: DiceResidualModel(**kw), config=config)
+    assert pools == [{"max_workers": 1}] and all(call[4] is True for call in _StubPolicy.plan_calls)
+    lines = [json.loads(line) for line in (tmp_path / "tokens" / "index.jsonl").read_text().splitlines()]
+    assert [line["chunk"] for line in lines] == [0, 1, 2, 3, 4] and [line["step"] for line in lines] == [0, 12, 24, 36, 48]
+    assert lines[0]["episode"] == 0 and lines[1]["episode"] == 1 and {line["plan_index"] for line in lines} <= {0, 1}
+    assert np.load(tmp_path / "tokens" / "shard_0000.npy", mmap_mode="r").shape == (256, 2, 8, STATE_DIM)
+    assert torch.equal(TokenStore(tmp_path / "tokens", 5).read(lines[4]), torch.full((2, 8, STATE_DIM), 0.5, dtype=torch.bfloat16))
+    assert not any("plan_tokens" in row for row in out["rows"])
+    assert out["resume"]["recipe"] == config_from_dict({**config.to_dict(), "store_tokens": False}).protocol()
+    _StubPolicy.plan_calls = []
+    _smoke_train(tmp_path / "plain", monkeypatch, 24, config=RLConfig(plan_candidates=2, selection_warmup_steps=0))
+    assert pools == [{"max_workers": 1}] and all(call[4] is False for call in _StubPolicy.plan_calls) and not (tmp_path / "plain" / "tokens").exists()
+    with pytest.raises(ValueError):
+        RLConfig(store_tokens=True).validate()
 
 
 _GB10 = bool(os.environ.get("DICE_DATA")) and importlib.util.find_spec("libero") is not None
@@ -2335,6 +2387,22 @@ def test_select_plan_batched_matches_looped_decode_plans_and_keeps_winner_rows()
     torch.testing.assert_close(cache, winner.transformer.blocks[0].attn1.attn_caches["pos"]["k"], rtol=1e-5, atol=1e-6)
     out = policy.select_plan({"task": ["t"]}, plans=2, k=3, rank_fn=lambda s, pools: 0)
     assert "plan_a_base_all" not in out and out["a_base"].shape == (3, HORIZON, ACTION_DIM)
+
+
+def test_select_plan_returns_last_pass_tokens_only_when_asked_without_extra_transformer_work():
+    pool = lambda latent: latent.float().mean(dim=(1, 2, 3, 4)).reshape(-1, 1).expand(-1, STATE_DIM)
+    begin = lambda batch: (False, None, 4, torch.zeros(1, 48, 1, 2, 4))
+    policy, hooked = _mock_policy(), _mock_policy()
+    policy._begin_chunk, policy._features_from_latent = begin, _mock_features(pool)
+    hooked._begin_chunk, hooked._features_from_latent = begin, _mock_features(pool)
+    torch.manual_seed(3)
+    plain = policy.select_plan({"task": ["t"]}, plans=2, k=3, rank_fn=lambda s, pools: 0)
+    torch.manual_seed(3)
+    out = hooked.select_plan({"task": ["t"]}, plans=2, k=3, rank_fn=lambda s, pools: 0, return_tokens=True)
+    assert "plan_tokens" not in plain and set(out) == set(plain) | {"plan_tokens"} and hooked.transformer.calls == policy.transformer.calls
+    tokens = out["plan_tokens"]
+    assert tokens.shape == (2, 8, STATE_DIM) and tokens.dtype == torch.bfloat16 and tokens.device.type == "cpu"
+    assert torch.equal(out["plan_pools"], plain["plan_pools"]) and not torch.equal(tokens[0], tokens[1])
 
 
 def test_predict_action_chunk_ranks_plans_with_the_plan_critic():

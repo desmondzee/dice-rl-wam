@@ -24,6 +24,7 @@ from script.lingbot_rl_policy import (
 )
 from script.lingbot_rl_progress import calibrate, progress
 from script.lingbot_rl_sharpen import bin_entropy, log_std
+from script.lingbot_rl_tokens import TokenStore
 
 LiberoEnv = None
 SHARPEN_EVERY_STEPS = 5_000
@@ -606,6 +607,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     resume_path = output_dir / "resume" / "latest.pt"
     if resume:
         env_steps, chunks, checkpointed, wandb_id, episodes = load_resume(resume_path, model, buffer, recipe)
+    tokens = TokenStore(output_dir / "tokens", chunks) if config.store_tokens else None
     if max_env_steps is None and env_steps == 0:
         if not any(float(row["is_expert"]) == 1.0 for row in buffer.rows()):
             raise RuntimeError("Expert features missing; RLPD requires the SFT demos")
@@ -662,7 +664,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
 
     maybe_checkpoint()
     features = config.proprio or bool(config.plus_train) or config.state_features == "struct"
-    labeller = ThreadPoolExecutor(max_workers=1) if calibration is not None else None
+    labeller = ThreadPoolExecutor(max_workers=1) if calibration is not None or tokens is not None else None
     while env_steps < budget:
         task = tasks[int(np.random.randint(len(tasks)))]
         task_id = task["task_id"]
@@ -676,7 +678,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         policy.reset()
         observation, _ = env.reset(seed=config.seed + env_steps)
         shadow = make_shadow(sim_task, suite, stored, bool(config.plus_train), config.seed + env_steps) if calibration is not None else None
-        future = None
+        future = token_future = None
         episode_return = 0.0
         episode_success = 0.0
         episode_length = 0
@@ -690,12 +692,15 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 if plans > 1:
                     random_plan = env_steps < config.selection_warmup_steps or np.random.random() < config.plan_random_prob
                     decoded = policy.select_plan(batch, plans, config.k_candidates, rank_fn=model.rank_plans,
-                                                 random_plan=random_plan, decode_all=True)
+                                                 random_plan=random_plan, decode_all=True, return_tokens=tokens is not None)
                 else:
                     decoded = policy.decode_candidates(batch, k=config.k_candidates)
                 if shadow is not None:
                     future = labeller.submit(_timed, label_plans, shadow, capture_live(env._env.env), sim_state,
                                              decoded["plan_a_base_all"].detach().float().cpu(), decoded["first_chunk"], norm, layout, calibration)
+                if tokens is not None:
+                    token_future = labeller.submit(tokens.append, decoded["plan_tokens"], chunk=chunks, episode=episodes, step=env_steps,
+                                                   reset_kind=kind, variant_index=env_task, plan_index=int(decoded["plan_index"]))
                 state = model.state_input(decoded["s"].to(device), decoded.get("state_struct"), batch.get("proprio"))
                 noise = decoded["z"].to(device=device, dtype=torch.float32)
                 a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
@@ -761,6 +766,9 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         "label_spread_across_plans": float(plan_mean.std()),
                         "label_executed_minus_mean": float(plan_mean[decoded["plan_index"]] - plan_mean.mean()),
                         "label_seconds": label_seconds, "label_wait_seconds": label_wait_seconds})
+                if token_future is not None:
+                    token_future.result()
+                    token_future = None
                 chunk_seconds += time.perf_counter() - started
                 chunk_actions += executed_n
                 episode_return += chunk_reward
@@ -809,8 +817,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     break
             buffer.finalize_episode()
         finally:
-            if future is not None:
-                wait([future])
+            wait([f for f in (future, token_future) if f is not None])
             env.close()
             if shadow is not None:
                 shadow.close()
