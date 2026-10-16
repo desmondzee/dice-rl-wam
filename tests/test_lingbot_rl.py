@@ -634,7 +634,7 @@ def test_frozen_prior_kwargs_match_sft_eval_protocol():
 def test_policy_class_exposes_collection_api():
     from script.lingbot_rl_policy import ResidualLingBotPolicy
 
-    for name in ("decode_candidates", "extract_critic_state", "extract_critic_state_from_latent",
+    for name in ("decode_candidates", "extract_critic_state", "extract_features_from_latent",
                  "commit_executed", "select_action"):
         assert callable(getattr(ResidualLingBotPolicy, name))
 
@@ -817,9 +817,11 @@ def test_featurize_experts_pools_published_latents(tmp_path):
         def extract_critic_state(self, batch):
             raise AssertionError("RGB path should not run when published latents exist")
 
-        def extract_critic_state_from_latent(self, latent, batch):
+        def extract_features_from_latent(self, latent, batch):
             assert latent.shape[2] in (1, 4)
-            return torch.full((1, 3072), float(latent[0, 0, 0, 0, 0]))
+            value, frames = float(latent[0, 0, 0, 0, 0]), latent.shape[2]
+            return {"pool": torch.full((1, 3072), value), "struct": torch.full((1, frames, 2, 3072), value),
+                    "tokens": torch.full((1, 32 * frames, 3072), value)}
 
     latents = torch.zeros(1, 48, 8, 8, 16)
     latents[0, 0, 3] = 7
@@ -842,16 +844,25 @@ def test_expert_rows_pool_the_true_plan_frames(tmp_path):
         def reset(self):
             return None
 
-        def extract_critic_state_from_latent(self, latent, batch):
+        def extract_features_from_latent(self, latent, batch):
             calls.append(tuple(latent.shape))
-            return torch.full((1, STATE_DIM), float(latent[0, 0, 0, 0, 0]))
+            value, frames = float(latent[0, 0, 0, 0, 0]), latent.shape[2]
+            return {"pool": torch.full((1, STATE_DIM), value), "struct": torch.full((1, frames, 2, STATE_DIM), value),
+                    "tokens": torch.full((1, 32 * frames, STATE_DIM), value)}
 
     latents = torch.arange(10, dtype=torch.float32).reshape(1, 1, 10, 1, 1).expand(1, 48, 10, 2, 2).clone()
-    episode = {"actions": np.zeros((36, USED_DOF), np.float32), "task": "t", "task_id": 9, "latents": latents, "success": True}
+    episode = {"actions": np.zeros((36, USED_DOF), np.float32), "task": "t", "task_id": 9, "latents": latents, "success": True,
+               "states": np.arange(36 * 8, dtype=np.float32).reshape(36, 8)}
     rows = featurize_experts(StubPolicy(), [episode], None, _eval_normalization(), tmp_path / "cache.pt")
     assert [row["s"][0] for row in rows] == [0.0, 3.0, 7.0]
     assert [row["plan_pool"][0] for row in rows] == [0.0, 4.0, 8.0]
     assert (1, 48, 4, 2, 2) in calls
+    assert [float(row["proprio"][0]) for row in rows] == [0.0, 96.0, 224.0]
+    assert [float(row["proprio_next"][0]) for row in rows] == [96.0, 224.0, 224.0]
+    assert rows[1]["plan_struct"].shape == (8, STATE_DIM) and rows[1]["plan_struct"].dtype == torch.bfloat16 and float(rows[1]["plan_struct"][0, 0]) == 4.0
+    assert rows[0]["state_struct"].shape == (2, STATE_DIM) and rows[0]["state_tokens"].shape == (32, STATE_DIM)
+    assert rows[1]["state_latent"].shape == (48, 1, 2, 2) and float(rows[1]["state_latent"][0, 0, 0, 0]) == 3.0
+    assert rows[1]["plan_latent"].shape == (48, 4, 2, 2) and float(rows[1]["plan_latent"][0, 0, 0, 0]) == 4.0
 
 
 def _rewrite_numpy_core_pickle_global(path):

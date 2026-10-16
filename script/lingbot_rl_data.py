@@ -7,10 +7,10 @@ import numpy as np
 import torch
 
 from script.lingbot_rl_config import RLConfig
-from script.lingbot_rl_model import ACTION_DIM, HORIZON, USED_DOF, mask_unused_dof
+from script.lingbot_rl_model import ACTION_DIM, HORIZON, STATE_DIM, USED_DOF, mask_unused_dof
 from script.lingbot_rl_policy import env_action_count
 
-EXPERT_RECIPE = "dice-rl-expert-v2"
+EXPERT_RECIPE = "dice-rl-expert-v3"
 EPS = 1e-6
 
 
@@ -82,26 +82,31 @@ def _episode_rows(policy, episode, norm):
     offset = 0
     first = True
     success = bool(episode.get("success", True))
+    states = episode.get("states")
     while offset < len(actions):
         n_env = min(env_action_count(first), len(actions) - offset)
         raw = actions[offset:offset + n_env]
         chunk = _chunk_actions(raw, first, norm)
+        proprio = np.asarray(states[offset], np.float32) if states is not None else np.zeros(8, np.float32)
+        extras = {}
         if episode.get("latents") is not None:
             latents = episode["latents"]
             if latents.ndim != 5:
                 raise ValueError("Published expert latents must be shaped (B, C, T, H, W)")
             frame_count = latents.shape[2]
             index = min(offset // 4, max(frame_count - 1, 0))
-            if not hasattr(policy, "extract_critic_state_from_latent"):
+            if not hasattr(policy, "extract_features_from_latent"):
                 raise TypeError("Policy must pool critic state from published latents")
-            state = _tensor_state(
-                policy.extract_critic_state_from_latent(
-                    latents[:, :, index:index + 1], {"task": [episode["task"]]})
-            )
+            task_batch = {"task": [episode["task"]]}
+            feats = policy.extract_features_from_latent(latents[:, :, index:index + 1], task_batch)
+            state = _tensor_state(feats["pool"])
             start = index if first else index + 1
             plan_frames = torch.clamp(torch.arange(start, start + 4), max=max(frame_count - 1, 0))
-            plan_pool = _tensor_state(policy.extract_critic_state_from_latent(
-                latents[:, :, plan_frames], {"task": [episode["task"]]}))
+            plan = policy.extract_features_from_latent(latents[:, :, plan_frames], task_batch)
+            plan_pool = _tensor_state(plan["pool"])
+            extras = {"state_struct": feats["struct"][0, 0], "state_tokens": feats["tokens"][0],
+                      "state_latent": latents[0, :, index:index + 1], "plan_struct": plan["struct"][0].reshape(-1, STATE_DIM),
+                      "plan_latent": latents[0, :, plan_frames]}
         else:
             state = _tensor_state(policy.extract_critic_state(_critic_batch(episode, offset, device)))
             plan_pool = state.copy()
@@ -114,9 +119,12 @@ def _episode_rows(policy, episode, norm):
             "reward": np.float32(0.0),
             "done": np.float32(0.0),
             "s_next": state.copy(),
+            "proprio": proprio,
+            "proprio_next": proprio.copy(),
             "task_id": int(episode.get("task_id", 0)),
             "n_env_actions": int(n_env),
             "is_expert": np.float32(1.0),
+            **{key: value.detach().to(device="cpu", dtype=torch.bfloat16) for key, value in extras.items()},
         })
         offset += n_env
         first = False
@@ -124,6 +132,7 @@ def _episode_rows(policy, episode, norm):
         return rows
     for index in range(len(rows) - 1):
         rows[index]["s_next"] = rows[index + 1]["s"].copy()
+        rows[index]["proprio_next"] = rows[index + 1]["proprio"].copy()
     rows[-1]["done"] = np.float32(1.0)
     rows[-1]["reward"] = np.float32(1.0 if success else 0.0)
     return rows
@@ -175,12 +184,15 @@ def load_manifest_episodes(dataset_root, manifest, task_to_id=None, norm=None):
         rel = info["data_path"].format(episode_chunk=chunk, episode_index=idx)
         parquet_path = root / rel
         try:
-            table = pq.read_table(parquet_path, columns=["action", "episode_index", "frame_index"])
+            table = pq.read_table(parquet_path, columns=["action", "episode_index", "frame_index", "observation.state"])
         except Exception as exc:
             raise RuntimeError(f"Failed to read episode {idx} parquet {parquet_path}: {exc}") from exc
         actions = np.asarray(table["action"].to_pylist(), dtype=np.float32)
         if actions.shape[-1] != USED_DOF or not np.isfinite(actions).all():
             raise ValueError(f"Expected finite seven-dimensional LIBERO actions in {parquet_path}")
+        states = np.asarray(table["observation.state"].to_pylist(), dtype=np.float32)
+        if states.shape != (len(actions), 8) or not np.isfinite(states).all():
+            raise ValueError(f"Expected finite eight-dimensional observation.state in {parquet_path}")
         latents = _try_load_latents(root, info, episode, actions, norm)
         frames = [] if latents is not None else _load_episode_frames(root, info, episode, table)
         if latents is None and (not frames or frames[0] is None):
@@ -190,6 +202,7 @@ def load_manifest_episodes(dataset_root, manifest, task_to_id=None, norm=None):
             )
         loaded.append({
             "actions": actions,
+            "states": states,
             "task": episode["tasks"][0],
             "task_id": task_to_id[episode["tasks"][0]],
             "frames": frames,

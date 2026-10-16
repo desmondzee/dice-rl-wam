@@ -218,10 +218,6 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
         return self._features_from_latent(latent.to(device=self.config.device, dtype=self.dtype))
 
     @torch.no_grad()
-    def extract_critic_state_from_latent(self, latent, batch):
-        return self.extract_features_from_latent(latent, batch)["pool"]
-
-    @torch.no_grad()
     def _features_from_latent(self, latent):
         b = latent.shape[0]
         name = self._ensure_critic_cache(b)
