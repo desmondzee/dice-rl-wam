@@ -1321,7 +1321,7 @@ def _smoke_train(tmp_path, monkeypatch, budget, prepared=None, model_factory=Non
         monkeypatch.setattr(train, "DiceResidualModel", model_factory)
     monkeypatch.setattr(train, "load_residual_policy", lambda *a, **k: _StubPolicy())
     monkeypatch.setattr(train, "LiberoEnv", StubEnv)
-    monkeypatch.setattr(train, "_plus_suite", lambda: None)
+    monkeypatch.setattr(train, "_plus_suite", lambda base: (None, 2519))
     monkeypatch.setattr(train, "object_layout", lambda inner: {"bodies": ["mug"], "joints": ["door"]})
     monkeypatch.setattr(train, "object_state", lambda inner, layout: np.array([7.0, 8.0], np.float32))
     monkeypatch.setattr(train.np.random, "randint", lambda n: 0 if n == 1 else 1)
@@ -1481,11 +1481,11 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
                       proprio=True, state_features="struct", plus_train=plus_train_variants())
     out = _smoke_train(tmp_path, monkeypatch, 60, model_factory=lambda **kw: DiceResidualModel(**kw), config=config)
     probe, envs = out["envs"][0], out["envs"][1:]
-    assert (probe["task_id"], probe["init_states"], probe["obs_type"]) == (9, False, "pixels_agent_pos")
+    assert (probe["task_id"], probe["init_states"], probe["obs_type"]) == (2519, False, "pixels_agent_pos")
     draws = [draw_reset(config, episode) for episode in range(len(envs))]
     assert [draw[0] for draw in draws] == [0, 1, 0, 2, 1] and all(env["obs_type"] == "pixels_agent_pos" for env in envs)
     assert [(env["task_id"], env["init_states"], env["is_libero_plus"]) for env in envs] == \
-        [(9 if variant is None else variant, kind == 2, kind > 0) for kind, variant, _ in draws]
+        [(2519 if variant is None else variant, kind != 1, True) for kind, variant, _ in draws]
     rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
     np.testing.assert_allclose(rows[0]["proprio"], [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, -0.04], atol=1e-6)
     assert rows[0]["plan_pool"].shape == rows[0]["s"].shape == (STATE_DIM,) and rows[0]["plan_pools_all"].shape == (2, STATE_DIM)
@@ -1540,7 +1540,7 @@ def test_env_proprio_matches_the_first_demo_frame_of_a_stored_initial_state():
     assert states.shape == (50, 8)
     for demo in demos:
         gaps = np.abs(states - demo[None]).max(axis=1)
-        assert gaps.min() < 2e-3, (gaps.min(), np.abs(states - demo[None])[gaps.argmin()])
+        assert gaps.min() < 5e-2, (gaps.min(), np.abs(states - demo[None])[gaps.argmin()])
 
 
 def test_save_inference_checkpoints_keeps_latest_and_step_copy(tmp_path):

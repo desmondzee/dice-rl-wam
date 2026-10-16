@@ -50,9 +50,14 @@ def make_env(task_id, suite=None, init_states=True, plus=False, proprio=False):
     )
 
 
-def _plus_suite():
+def _plus_suite(base):
     from lerobot.envs.libero import _get_suite
-    return _get_suite("libero_10")
+    from libero.libero.benchmark import Task
+    suite = _get_suite("libero_10")
+    suite.tasks.append(Task(name=base["name"], language=base["instruction"], problem="Libero", problem_folder="libero_10",
+                            bddl_file=f"{base['name']}.bddl", init_states_file=f"{base['name']}.pruned_init"))
+    suite.n_tasks = len(suite.tasks)
+    return suite, suite.n_tasks - 1
 
 
 RESET_KINDS = ("standard", "robot_init", "layout")
@@ -374,7 +379,7 @@ def _train_eval(policy, tasks, norm, device, suite, env_steps, output_dir, episo
     rows = []
     for task in tasks:
         plan = episode_plan(plan_cfg, task["task_id"], plan_cfg.episodes_per_task)[:episodes]
-        env = make_env(task["task_id"], suite, init_states=False, proprio=proprio)
+        env = make_env(task["env_task"], suite, init_states=False, proprio=proprio)
         try:
             for entry in plan:
                 row = run_rl_episode(policy, env, entry, task["instruction"], norm, device, proprio)
@@ -464,17 +469,17 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         if episodes or cache_path.is_file():
             _ingest_experts(buffer, featurize_experts(policy, episodes, manifest, norm, cache_path), config.task_ids)
     suite = None
-    if config.plus_train:
-        suite = _plus_suite()
-    elif prepared.get("assets_path"):
+    if prepared.get("assets_path") and not config.plus_train:
         from script.lingbot_eval import describe_suite
         suite, suite_tasks = describe_suite(prepared["assets_path"])
         tasks = suite_tasks
-    tasks = [task for task in tasks if task["task_id"] in config.task_ids]
+    tasks = [{**task, "env_task": task["task_id"]} for task in tasks if task["task_id"] in config.task_ids]
+    if config.plus_train:
+        suite, tasks[0]["env_task"] = _plus_suite(tasks[0])
     layout = None
     if config.proprio:
         rng = capture_rng()
-        env = make_env(tasks[0]["task_id"], suite, init_states=False, proprio=True)
+        env = make_env(tasks[0]["env_task"], suite, init_states=False, proprio=True)
         try:
             env.reset(seed=config.seed)
             layout = object_layout(env._env.env)
@@ -528,7 +533,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             logged = {"train_eval/macro_success_rate": summary["macro_success_rate"], "env_steps": env_steps}
             for task_id, success in summary["per_task_success"].items():
                 logged[f"train_eval/task_{task_id}_success"] = success
-            env = make_env(tasks[0]["task_id"], suite, init_states=False, proprio=config.proprio)
+            env = make_env(tasks[0]["env_task"], suite, init_states=False, proprio=config.proprio)
             try:
                 observation, _ = env.reset(seed=0)
                 policy.reset()
@@ -549,8 +554,10 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         task_id = task["task_id"]
         kind, variant, draw = draw_reset(config, episodes)
         env_task = task_id if variant is None else variant
-        env = make_env(env_task, suite, init_states=kind == 2, plus=kind > 0, proprio=config.proprio)
-        if kind == 2:
+        stored = bool(config.plus_train) and kind != 1
+        env = make_env(task["env_task"] if variant is None else variant, suite, init_states=stored,
+                       plus=bool(config.plus_train), proprio=config.proprio)
+        if stored:
             env.init_state_id = int(draw * len(env._init_states))
         policy.reset()
         observation, _ = env.reset(seed=config.seed + env_steps)
