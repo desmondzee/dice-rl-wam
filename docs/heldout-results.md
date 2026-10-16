@@ -238,6 +238,15 @@ Aggregation of the live critic for ranking (320k task 9 buffer, 20,581 online ro
 
 Mean head spread (std across heads of one candidate's Q): 0.046 (task 9), 0.052 (task 0).
 
+The same for V_plan's own ten heads (its target unchanged: max over candidates of min over Q heads):
+
+| V_plan readout | task 9: split-half agreement / captured | task 9: agreement with Q mean-max / captured under it | task 9: outcome correlation | task 0: split-half | task 0: agreement with Q mean-max / captured | task 0: outcome correlation |
+|---|---|---|---|---|---|---|
+| min over heads (the recipe) | 0.68 / 0.94 | 0.52 / 0.81 | 0.39 | 0.64 / 0.87 | 0.43 / 0.51 | 0.13 |
+| mean over heads | 0.78 / 0.97 | 0.55 / 0.84 | 0.37 | 0.77 / 0.94 | 0.48 / 0.65 | 0.13 |
+
+V_plan's head spread is half of Q's (0.024 vs 0.046 on task 9; 0.032 vs 0.052 on task 0).
+
 ### Implementation checks (Jarvis, 2026-10-13)
 
 1,100-step smoke: plan-critic loss 4.6 → 0.21 and TD loss 1.86 → 0.05 over nine update logs. On real weights, across-plan base-action spread 0.05–0.06 vs within-plan 0.013–0.019 on the first chunk of three starts; plan pools differ across plans by about 10% of their magnitude. Batched sampling equals the single-plan pass bit for bit at M = 1 and differs from the looped reference at M = 2 by 2 bf16 ulps after the first pass, 0.35 in the final latent. One video pass: 175 ms at CFG batch 2 (78 ms GEMM), 606 ms at batch 8 (392 ms GEMM); batching four plans is 10% faster than looping (6.7 vs 7.4 s per chunk; 1.9 s at M = 1).
