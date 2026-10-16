@@ -257,7 +257,7 @@ Fresh V_plan refits on each target (same buffers, 80 / 20 split by time, ten hea
 |---|---|---|
 | min over heads, max over candidates (recipe) | 0.79 / 0.40 / +0.08 | 0.77 / 0.45 / 0.64 / −0.06 |
 | mean over heads, max over candidates | 0.73 / 0.39 / +0.05 | 0.79 / 0.45 / 0.60 / −0.17 |
-| mean over heads, mean over candidates | (task 9 pending) | 0.79 / 0.45 / 0.61 / −0.16 |
+| mean over heads, mean over candidates | 0.76 / 0.39 / +0.04 | 0.79 / 0.45 / 0.61 / −0.16 |
 
 The live V_plan on the same rows: agreement with Q-mean 0.55 (task 9) / 0.48 (task 0). Chance is 0.25.
 
