@@ -19,9 +19,9 @@ docs/research-video-branch-ideas.md, docs/libero-plus/.
 | proprioception | 8 floats in the published dataset's `observation.state` convention: end-effector position (3), orientation as axis-angle (3), gripper joint positions (2); from the environment with `obs_type="pixels_agent_pos"` (quaternion converted), from the parquet for expert rows; appended to the state of the Q ensemble, the plan critic and the residual actor in both runs |
 | run A inputs | state pool (3072) + proprio; plan pool (3072) |
 | run B inputs | state per-camera means (2 × 3072) + proprio; plan per-camera, per-latent-frame means (8 × 3072); text tokens excluded from the structured means |
-| features stored in both runs | bf16, alongside the existing pools: `plan_struct_all` (M, 8, 3072); `state_struct` (2, 3072); `state_tokens` (32, 3072); `plan_latent_all` (M, 48, 4, 8, 16); `state_latent` (48, 1, 8, 16); `proprio` and `proprio_next` (8, float32); `reset_kind` (0 standard, 1 robot-init, 2 layout) and `variant_index`. About 0.6 MB per chunk, 12 GB over a run; expert rows get the same keys from the published latents and parquet |
+| features stored in both runs | bf16, alongside the existing pools: `plan_struct_all` (M, 8, 3072); `state_struct` (2, 3072); `state_tokens` (32, 3072); `plan_latent_all` (M, 48, 4, 8, 16); `state_latent` (48, 1, 8, 16); `proprio` and `proprio_next` (8, float32); `object_state` (float32: position 3 and quaternion 4 for each of the base task's objects in a fixed order recorded in the run settings, plus the joint positions of articulated objects, read from the simulator; distractors ignored; offline use only, never a model input); `reset_kind` (0 standard, 1 robot-init, 2 layout) and `variant_index`. About 0.6 MB per chunk, 12 GB over a run; expert rows get the same keys from the published latents and parquet |
 | W&B | project and entity as the previous runs; config records every new field; new per-episode metrics: collection success and length per reset kind, the reset draw, plan metrics per reset kind at the existing cadence |
-| offline study | at the 80k checkpoints: refit V_plan and Q on pooled, structured, structured + proprio and attention-pooled state tokens, on both buffers; split-half agreement, replica agreement, MC-return fit |
+| offline study | at the 80k checkpoints: refit V_plan and Q on pooled, structured, structured + proprio, attention-pooled state tokens, and an oracle with `object_state` + proprio as the upper bound, on both buffers; split-half agreement, replica agreement, MC-return fit |
 | evaluation | deferred: the held-out LIBERO-Plus plan (section 4) and the standard 100-episode protocol, after the runs; GPUs are not shared with training |
 
 The random-plan ablations already running (standard protocol and the existing LIBERO-Plus plan) are unaffected.
@@ -41,6 +41,8 @@ The random-plan ablations already running (standard protocol and the existing LI
   come from, and mapping episodes back to demos is plumbing with a mismatch risk. Alignment of expert and online rows
   is checked by resetting to a stored initial state and comparing against that demonstration's first-frame state.
 - Attention pooling over stored tokens stays offline: untested, and the buffer holds the tokens for it.
+- Object poses are stored for the oracle only: the critics rank plans and candidates at deployment, so a privileged
+  input cannot be trained on and dropped; the oracle says whether the image features are the bottleneck.
 
 ## 3. Code changes
 
