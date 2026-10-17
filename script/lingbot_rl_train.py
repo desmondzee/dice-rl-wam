@@ -15,6 +15,7 @@ from script.lingbot_eval_config import TASK_IDS, EvalConfig, episode_plan
 from script.lingbot_rl_buffer import ChunkReplay, host_bf16
 from script.lingbot_rl_config import RLConfig, config_from_dict
 from script.lingbot_rl_data import featurize_experts, load_manifest_episodes
+from script.lingbot_rl_label import LabelPool
 from script.lingbot_rl_model import (
     ACTION_DIM, ACTOR_EVERY, BATCH, GRADIENT_STEPS, HORIZON, UPDATE_EVERY_CHUNKS, DiceResidualModel, apply_residual,
     mlp_float,
@@ -669,176 +670,184 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
 
     maybe_checkpoint()
     features = config.proprio or bool(config.plus_train) or config.state_features == "struct"
-    labeller = ThreadPoolExecutor(max_workers=1) if calibration is not None or tokens is not None else None
-    while env_steps < budget:
-        task = tasks[int(np.random.randint(len(tasks)))]
-        task_id = task["task_id"]
-        kind, variant, draw = draw_reset(config, episodes)
-        env_task = task_id if variant is None else variant
-        stored = bool(config.plus_train) and kind != 1
-        sim_task = task["env_task"] if variant is None else variant
-        env = make_env(sim_task, suite, init_states=stored, plus=bool(config.plus_train), proprio=config.proprio)
-        if stored:
-            env.init_state_id = int(draw * len(env._init_states))
-        policy.reset()
-        observation, _ = env.reset(seed=config.seed + env_steps)
-        shadow = make_shadow(sim_task, suite, stored, bool(config.plus_train), config.seed + env_steps) if calibration is not None else None
-        future = token_future = None
-        episode_return = 0.0
-        episode_success = 0.0
-        episode_length = 0
-        saw_success = False
-        try:
-            while env_steps < budget and episode_length < 520:
-                batch = rl_observation_batch(observation, task["instruction"], device, config.proprio)
-                sim_state = object_state(env._env.env, layout) if layout is not None else None
-                started = time.perf_counter()
-                plans = config.plan_candidates
-                if plans > 1:
-                    random_plan = env_steps < config.selection_warmup_steps or np.random.random() < config.plan_random_prob
-                    decoded = policy.select_plan(batch, plans, config.k_candidates, rank_fn=model.rank_plans,
-                                                 random_plan=random_plan, decode_all=True, return_tokens=tokens is not None)
-                else:
-                    decoded = policy.decode_candidates(batch, k=config.k_candidates)
-                if shadow is not None:
-                    future = labeller.submit(_timed, label_plans, shadow, capture_live(env._env.env), sim_state,
-                                             decoded["plan_a_base_all"].detach().float().cpu(), decoded["first_chunk"], norm, layout, calibration)
-                if tokens is not None:
-                    token_future = labeller.submit(tokens.append, decoded["plan_tokens"], chunk=chunks, episode=episodes, step=env_steps,
-                                                   reset_kind=kind, variant_index=env_task, plan_index=int(decoded["plan_index"]))
-                state = model.state_input(decoded["s"].to(device), decoded.get("state_struct"), batch.get("proprio"))
-                noise = decoded["z"].to(device=device, dtype=torch.float32)
-                a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
-                plan_in = model.plan_input(decoded["plan_pool"].to(device), decoded.get("plan_struct")) if plans > 1 else None
-                k = a_base.shape[0]
-                if k != config.k_candidates:
-                    raise RuntimeError("action candidate batching failed")
-                with torch.no_grad():
-                    state_k = state.expand(k, -1)
-                    executed = apply_residual(a_base, model.actor(state_k, noise, a_base))
-                    if env_steps < config.selection_warmup_steps:
-                        star = int(np.random.randint(k))
-                    else:
-                        critic_k = model.critic_state(state_k, None if plan_in is None else plan_in.expand(k, -1))
-                        star = int(model.critic(critic_k, executed).reshape(-1).argmax())
+    labeller = ThreadPoolExecutor(max_workers=1) if tokens is not None else None
+    pool = None
+    if calibration is not None:
+        spec = None if suite is None else {"plus": bool(config.plus_train), "base": tasks[0], "assets_path": prepared.get("assets_path")}
+        pool = LabelPool(config.label_workers, spec, norm, layout, calibration)
+    try:
+        while env_steps < budget:
+            task = tasks[int(np.random.randint(len(tasks)))]
+            task_id = task["task_id"]
+            kind, variant, draw = draw_reset(config, episodes)
+            env_task = task_id if variant is None else variant
+            stored = bool(config.plus_train) and kind != 1
+            sim_task = task["env_task"] if variant is None else variant
+            env = make_env(sim_task, suite, init_states=stored, plus=bool(config.plus_train), proprio=config.proprio)
+            if stored:
+                env.init_state_id = int(draw * len(env._init_states))
+            policy.reset()
+            observation, _ = env.reset(seed=config.seed + env_steps)
+            future = token_future = None
+            episode_return = 0.0
+            episode_success = 0.0
+            episode_length = 0
+            saw_success = False
+            try:
+                while env_steps < budget and episode_length < 520:
+                    batch = rl_observation_batch(observation, task["instruction"], device, config.proprio)
+                    sim_state = object_state(env._env.env, layout) if layout is not None else None
+                    started = time.perf_counter()
+                    plans = config.plan_candidates
                     if plans > 1:
-                        plans_in = model.plan_input(decoded["plan_pools"].to(device), decoded.get("plan_struct_all"))
-                        all_base = decoded["plan_a_base_all"].to(device=device, dtype=torch.float32)
-                        flat_state = state.expand(plans * k, -1)
-                        flat_base = all_base.reshape(plans * k, HORIZON, ACTION_DIM)
-                        critic_all = model.critic_state(flat_state, plans_in.repeat_interleave(k, dim=0))
-                        action_all = apply_residual(flat_base, model.actor(flat_state, noise.repeat(plans, 1, 1), flat_base))
-                        q_all = model.critic(critic_all, action_all).reshape(plans, k).max(dim=1).values
-                        v_all = model.plan_critic(state.expand(plans, -1), plans_in).reshape(-1)
-                        plan_info = {"plan_agreement": float(int(v_all.argmax()) == int(q_all.argmax())),
-                                     "plan_regret": float(q_all.max() - q_all[decoded["plan_index"]]),
-                                     "plan_value_spread": float(v_all.max() - v_all.min()),
-                                     "plan_random_rate": float(random_plan)}
-                        if future is not None:
-                            q_mean = torch.stack(model.critic(critic_all, action_all, return_all=True)).mean(dim=0).reshape(plans, k).max(dim=1).values
-                chosen = executed[star:star + 1]
-                policy.commit_executed(chosen.cpu(), first_chunk=decoded["first_chunk"])
-                env_actions = slice_env_actions(chosen.cpu(), decoded["first_chunk"])
-                n_env = env_actions.shape[1]
-                chunk_reward = 0.0
-                done = 0.0
-                executed_n = 0
-                for index in range(n_env):
-                    action = decode_action(env_actions[:, index, :].reshape(1, 7), norm)
-                    observation, _, terminated, truncated, info = env.step(action)
-                    policy.observe_env_step(observation_batch(observation, task["instruction"], device))
-                    executed_n += 1
-                    episode_length += 1
-                    env_steps += 1
-                    if env_success(info):
-                        chunk_reward = 1.0
-                        saw_success = True
-                        episode_success = 1.0
-                    if saw_success or terminated or truncated or episode_length >= 520:
-                        done = 1.0
-                        break
-                    if env_steps >= budget:
-                        break
-                plan_labels = None
-                if future is not None:
-                    wait_started = time.perf_counter()
-                    plan_labels, label_seconds = future.result()
-                    label_wait_seconds, future = time.perf_counter() - wait_started, None
-                    plan_mean = plan_labels.mean(axis=1)
-                    plan_info.update({
-                        "label_agreement_with_q": float(int(plan_mean.argmax()) == int(q_mean.argmax())),
-                        "label_spread_within_plan": float(plan_labels.std(axis=1).mean()),
-                        "label_spread_across_plans": float(plan_mean.std()),
-                        "label_executed_minus_mean": float(plan_mean[decoded["plan_index"]] - plan_mean.mean()),
-                        "label_seconds": label_seconds, "label_wait_seconds": label_wait_seconds})
-                if token_future is not None:
-                    token_future.result()
-                    token_future = None
-                chunk_seconds += time.perf_counter() - started
-                chunk_actions += executed_n
-                episode_return += chunk_reward
-                s_cpu = _host_array(decoded["s"])[0]
-                buffer.add_online({
-                    "s": s_cpu,
-                    "z": _host_array(noise[star]),
-                    "a_base": _host_array(a_base[star]),
-                    "z_all": _host_array(noise),
-                    "a_base_all": _host_array(a_base),
-                    "a": _host_array(chosen)[0],
-                    "reward": np.float32(chunk_reward),
-                    "done": np.float32(done),
-                    "s_next": s_cpu.copy(),
-                    "task_id": task_id,
-                    "n_env_actions": executed_n,
-                    "is_expert": np.float32(0.0),
-                    "reset_kind": kind,
-                    "variant_index": env_task,
-                    **({"plan_labels": plan_labels} if plan_labels is not None else {}),
-                    **({"proprio": _host_array(batch["proprio"])[0], "object_state": sim_state} if config.proprio else {}),
-                    **({key: host_bf16(decoded[key][0]) for key in ("state_struct", "state_tokens", "state_latent") if key in decoded} if features else {}),
-                    **({"plan_pool": _host_array(decoded["plan_pool"].to(device))[0], "plan_pools_all": _host_array(decoded["plan_pools"].to(device)),
-                        "plan_index": int(decoded["plan_index"]), "plan_a_base_all": _host_array(all_base)} if plans > 1 else {}),
-                    **({"plan_struct": host_bf16(decoded["plan_struct"][0]), "plan_struct_all": host_bf16(decoded["plan_struct_all"]),
-                        "plan_latent_all": host_bf16(decoded["plan_latent_all"])} if features and plans > 1 and "plan_struct_all" in decoded else {}),
-                })
-                chunks += 1
-                expert_ratio = config.rlpd_expert_ratio(env_steps)
-                if chunks % UPDATE_EVERY_CHUNKS == 0 and buffer.ready_online_count() >= min_online_rows:
-                    update_info = _update_from_buffer(
-                        model, buffer, expert_ratio, device, env_steps >= config.bc_filter_warmup_steps)
-                    if env_steps >= next_sharpen:
-                        update_info.update(replay_sharpening(model, _sample_batch(buffer, expert_ratio, device)))
-                        next_sharpen = env_steps - env_steps % SHARPEN_EVERY_STEPS + SHARPEN_EVERY_STEPS
-                    run.log({
-                        **update_info, **plan_info, **({f"{key}/{RESET_KINDS[kind]}": value for key, value in plan_info.items()} if config.plus_train else {}),
-                        "env_steps": env_steps, "chunks": chunks, "expert_ratio": expert_ratio,
-                        "buffer_online_rows": buffer.ready_online_count(),
-                        "selection_active": float(env_steps >= config.selection_warmup_steps),
-                        "seconds_per_env_step": chunk_seconds / max(chunk_actions, 1),
-                        "peak_gpu_memory_gb": torch.cuda.max_memory_allocated() / 1e9 if device == "cuda" else 0.0,
+                        random_plan = env_steps < config.selection_warmup_steps or np.random.random() < config.plan_random_prob
+                        decoded = policy.select_plan(batch, plans, config.k_candidates, rank_fn=model.rank_plans,
+                                                     random_plan=random_plan, decode_all=True, return_tokens=tokens is not None)
+                    else:
+                        decoded = policy.decode_candidates(batch, k=config.k_candidates)
+                    if pool is not None:
+                        future = pool.submit(capture_live(env._env.env), sim_state, decoded["plan_a_base_all"].detach().float().cpu().numpy(),
+                                             decoded["first_chunk"], sim_task, stored, bool(config.plus_train), config.seed + env_steps)
+                    if tokens is not None:
+                        token_future = labeller.submit(tokens.append, decoded["plan_tokens"], chunk=chunks, episode=episodes, step=env_steps,
+                                                       reset_kind=kind, variant_index=env_task, plan_index=int(decoded["plan_index"]))
+                    state = model.state_input(decoded["s"].to(device), decoded.get("state_struct"), batch.get("proprio"))
+                    noise = decoded["z"].to(device=device, dtype=torch.float32)
+                    a_base = decoded["a_base"].to(device=device, dtype=torch.float32)
+                    plan_in = model.plan_input(decoded["plan_pool"].to(device), decoded.get("plan_struct")) if plans > 1 else None
+                    k = a_base.shape[0]
+                    if k != config.k_candidates:
+                        raise RuntimeError("action candidate batching failed")
+                    with torch.no_grad():
+                        state_k = state.expand(k, -1)
+                        executed = apply_residual(a_base, model.actor(state_k, noise, a_base))
+                        if env_steps < config.selection_warmup_steps:
+                            star = int(np.random.randint(k))
+                        else:
+                            critic_k = model.critic_state(state_k, None if plan_in is None else plan_in.expand(k, -1))
+                            star = int(model.critic(critic_k, executed).reshape(-1).argmax())
+                        if plans > 1:
+                            plans_in = model.plan_input(decoded["plan_pools"].to(device), decoded.get("plan_struct_all"))
+                            all_base = decoded["plan_a_base_all"].to(device=device, dtype=torch.float32)
+                            flat_state = state.expand(plans * k, -1)
+                            flat_base = all_base.reshape(plans * k, HORIZON, ACTION_DIM)
+                            critic_all = model.critic_state(flat_state, plans_in.repeat_interleave(k, dim=0))
+                            action_all = apply_residual(flat_base, model.actor(flat_state, noise.repeat(plans, 1, 1), flat_base))
+                            q_all = model.critic(critic_all, action_all).reshape(plans, k).max(dim=1).values
+                            v_all = model.plan_critic(state.expand(plans, -1), plans_in).reshape(-1)
+                            plan_info = {"plan_agreement": float(int(v_all.argmax()) == int(q_all.argmax())),
+                                         "plan_regret": float(q_all.max() - q_all[decoded["plan_index"]]),
+                                         "plan_value_spread": float(v_all.max() - v_all.min()),
+                                         "plan_random_rate": float(random_plan)}
+                            if future is not None:
+                                q_mean = torch.stack(model.critic(critic_all, action_all, return_all=True)).mean(dim=0).reshape(plans, k).max(dim=1).values
+                    chosen = executed[star:star + 1]
+                    policy.commit_executed(chosen.cpu(), first_chunk=decoded["first_chunk"])
+                    env_actions = slice_env_actions(chosen.cpu(), decoded["first_chunk"])
+                    n_env = env_actions.shape[1]
+                    chunk_reward = 0.0
+                    done = 0.0
+                    executed_n = 0
+                    for index in range(n_env):
+                        action = decode_action(env_actions[:, index, :].reshape(1, 7), norm)
+                        observation, _, terminated, truncated, info = env.step(action)
+                        policy.observe_env_step(observation_batch(observation, task["instruction"], device))
+                        executed_n += 1
+                        episode_length += 1
+                        env_steps += 1
+                        if env_success(info):
+                            chunk_reward = 1.0
+                            saw_success = True
+                            episode_success = 1.0
+                        if saw_success or terminated or truncated or episode_length >= 520:
+                            done = 1.0
+                            break
+                        if env_steps >= budget:
+                            break
+                    plan_labels = None
+                    if future is not None:
+                        wait_started = time.perf_counter()
+                        plan_labels, label_seconds = future.result()
+                        label_wait_seconds, future = time.perf_counter() - wait_started, None
+                        plan_mean = plan_labels.mean(axis=1)
+                        plan_info.update({
+                            "label_agreement_with_q": float(int(plan_mean.argmax()) == int(q_mean.argmax())),
+                            "label_spread_within_plan": float(plan_labels.std(axis=1).mean()),
+                            "label_spread_across_plans": float(plan_mean.std()),
+                            "label_executed_minus_mean": float(plan_mean[decoded["plan_index"]] - plan_mean.mean()),
+                            "label_seconds": label_seconds, "label_wait_seconds": label_wait_seconds})
+                    if token_future is not None:
+                        token_future.result()
+                        token_future = None
+                    chunk_seconds += time.perf_counter() - started
+                    chunk_actions += executed_n
+                    episode_return += chunk_reward
+                    s_cpu = _host_array(decoded["s"])[0]
+                    buffer.add_online({
+                        "s": s_cpu,
+                        "z": _host_array(noise[star]),
+                        "a_base": _host_array(a_base[star]),
+                        "z_all": _host_array(noise),
+                        "a_base_all": _host_array(a_base),
+                        "a": _host_array(chosen)[0],
+                        "reward": np.float32(chunk_reward),
+                        "done": np.float32(done),
+                        "s_next": s_cpu.copy(),
+                        "task_id": task_id,
+                        "n_env_actions": executed_n,
+                        "is_expert": np.float32(0.0),
+                        "reset_kind": kind,
+                        "variant_index": env_task,
+                        **({"plan_labels": plan_labels} if plan_labels is not None else {}),
+                        **({"proprio": _host_array(batch["proprio"])[0], "object_state": sim_state} if config.proprio else {}),
+                        **({key: host_bf16(decoded[key][0]) for key in ("state_struct", "state_tokens", "state_latent") if key in decoded} if features else {}),
+                        **({"plan_pool": _host_array(decoded["plan_pool"].to(device))[0], "plan_pools_all": _host_array(decoded["plan_pools"].to(device)),
+                            "plan_index": int(decoded["plan_index"]), "plan_a_base_all": _host_array(all_base)} if plans > 1 else {}),
+                        **({"plan_struct": host_bf16(decoded["plan_struct"][0]), "plan_struct_all": host_bf16(decoded["plan_struct_all"]),
+                            "plan_latent_all": host_bf16(decoded["plan_latent_all"])} if features and plans > 1 and "plan_struct_all" in decoded else {}),
                     })
-                    chunk_seconds, chunk_actions = 0.0, 0
-                if done:
-                    break
-            buffer.finalize_episode()
-        finally:
-            wait([f for f in (future, token_future) if f is not None])
-            env.close()
-            if shadow is not None:
-                shadow.close()
-        name = RESET_KINDS[kind]
-        run.log({
-            "env_steps": env_steps, "episode_return": episode_return,
-            "episode_success": episode_success, "episode_length": episode_length,
-            "reset_kind": kind, "variant_index": env_task,
-            **({f"episode_success_{name}": episode_success, f"episode_length_{name}": episode_length} if config.plus_train else {}),
-        })
-        episodes += 1
-        maybe_checkpoint()
-        if episodes % 10 == 0:
-            save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id, episodes)
-    if labeller is not None:
-        labeller.shutdown()
+                    chunks += 1
+                    expert_ratio = config.rlpd_expert_ratio(env_steps)
+                    if chunks % UPDATE_EVERY_CHUNKS == 0 and buffer.ready_online_count() >= min_online_rows:
+                        update_info = _update_from_buffer(
+                            model, buffer, expert_ratio, device, env_steps >= config.bc_filter_warmup_steps)
+                        if env_steps >= next_sharpen:
+                            update_info.update(replay_sharpening(model, _sample_batch(buffer, expert_ratio, device)))
+                            next_sharpen = env_steps - env_steps % SHARPEN_EVERY_STEPS + SHARPEN_EVERY_STEPS
+                        run.log({
+                            **update_info, **plan_info, **({f"{key}/{RESET_KINDS[kind]}": value for key, value in plan_info.items()} if config.plus_train else {}),
+                            "env_steps": env_steps, "chunks": chunks, "expert_ratio": expert_ratio,
+                            "buffer_online_rows": buffer.ready_online_count(),
+                            "selection_active": float(env_steps >= config.selection_warmup_steps),
+                            "seconds_per_env_step": chunk_seconds / max(chunk_actions, 1),
+                            "peak_gpu_memory_gb": torch.cuda.max_memory_allocated() / 1e9 if device == "cuda" else 0.0,
+                        })
+                        chunk_seconds, chunk_actions = 0.0, 0
+                    if done:
+                        break
+                buffer.finalize_episode()
+            finally:
+                if future is not None:
+                    future.wait()
+                if token_future is not None:
+                    wait([token_future])
+                env.close()
+            name = RESET_KINDS[kind]
+            run.log({
+                "env_steps": env_steps, "episode_return": episode_return,
+                "episode_success": episode_success, "episode_length": episode_length,
+                "reset_kind": kind, "variant_index": env_task,
+                **({f"episode_success_{name}": episode_success, f"episode_length_{name}": episode_length} if config.plus_train else {}),
+            })
+            episodes += 1
+            maybe_checkpoint()
+            if episodes % 10 == 0:
+                save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id, episodes)
+    finally:
+        if pool is not None:
+            pool.close()
+        if labeller is not None:
+            labeller.shutdown()
     save_inference(output_dir / "residual.pt", model)
     save_resume(resume_path, model, buffer, env_steps, chunks, recipe, checkpointed, wandb_id, episodes)
     _write_json(output_dir / "summary.json", {"env_steps": env_steps, "chunks": chunks})

@@ -49,6 +49,7 @@ class RLConfig:
     plus_train: dict = field(default_factory=dict)
     plan_target: str = "q"
     store_tokens: bool = False
+    label_workers: int = 4
 
     def validate(self):
         validate_name(self.source_run)
@@ -94,6 +95,8 @@ class RLConfig:
             raise ValueError("rollout plan labels need plan_candidates > 1 and proprio")
         if type(self.store_tokens) is not bool or (self.store_tokens and self.plan_candidates < 2):
             raise ValueError("store_tokens must be a bool and needs plan_candidates > 1")
+        if type(self.label_workers) is not int or self.label_workers < 1:
+            raise ValueError("label_workers must be a positive integer")
         return self
 
     @property

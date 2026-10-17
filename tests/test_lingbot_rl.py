@@ -1448,6 +1448,39 @@ def test_label_plans_scores_every_candidate_from_the_live_snapshot_with_the_chun
         label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
 
 
+def _twin_shadow(task_id, suite, init_states, plus, seed):
+    import script.lingbot_rl_train as train
+    train.LiberoEnv = lambda **kwargs: _TwinEnv()
+    shadow = train.make_shadow(task_id, suite, init_states, plus, seed)
+    shadow._env.env.sim.data.qpos[:] = 9.0
+    return shadow
+
+
+def test_label_pool_matches_label_plans_across_two_workers_and_propagates_the_mismatch():
+    from script.lingbot_rl_label import LabelPool
+    from script.lingbot_rl_train import capture_live, label_plans, object_state
+    live, shadow = _TwinEnv(), _TwinEnv()
+    shadow._env.env.sim.data.qpos[:] = 9.0
+    live._env.env.robots[0].controller.initial_joint[:] = 0.5
+    candidates = torch.rand(2, 3, HORIZON, ACTION_DIM, generator=torch.Generator().manual_seed(0)) * 2.0 - 1.0
+    norm = _eval_normalization()
+    snapshot, before = capture_live(live._env.env), object_state(live._env.env, _TWIN_LAYOUT)
+    pool = LabelPool(2, None, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION, shadow_factory=_twin_shadow)
+    try:
+        labels, seconds = pool.submit(snapshot, before, candidates.numpy(), True, 9, False, False, 0).result()
+        expected = label_plans(shadow, snapshot, before, candidates, True, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION)
+        assert labels.shape == (2, 3) and labels.dtype == np.float32 and np.array_equal(labels, expected) and seconds >= 0.0
+        assert len(set(labels.reshape(-1).tolist())) > 1
+        later = pool.submit(snapshot, before, candidates[:, :1].numpy(), False, 9, False, False, 0).result()[0]
+        assert np.array_equal(later, label_plans(shadow, snapshot, before, candidates[:, :1], False, norm, _TWIN_LAYOUT, _TWIN_CALIBRATION))
+        with pytest.raises(RuntimeError, match="shadow state mismatch"):
+            pool.submit(snapshot, before + 1.0, candidates.numpy(), True, 9, False, False, 0).result()
+        assert np.array_equal(pool.submit(snapshot, before, candidates.numpy(), True, 9, False, False, 0).result()[0], expected)
+    finally:
+        pool.close()
+    assert all(not process.is_alive() for process in pool.processes)
+
+
 def test_shadow_fidelity_measures_object_pose_gaps_per_chunk_and_gates_on_them(monkeypatch):
     import script.lingbot_rl_train as train
     from script.lingbot_rl_train import make_shadow, shadow_fidelity
@@ -1746,29 +1779,41 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
 
 
 def test_train_with_rollout_labels_overlaps_the_live_chunk_stores_them_and_records_both_fidelity_gates(tmp_path, monkeypatch):
-    from concurrent.futures import ThreadPoolExecutor
     import script.lingbot_rl_model as model_module
     import script.lingbot_rl_train as train
     from script.lingbot_rl_config import plus_train_variants
     monkeypatch.setattr(model_module, "HIDDEN", (32, 32, 32))
-    labelled, pools = [], []
-    monkeypatch.setattr(train, "ThreadPoolExecutor", lambda **kwargs: pools.append(kwargs) or ThreadPoolExecutor(**kwargs))
+    labelled, pools, closed = [], [], []
     monkeypatch.setattr(train, "calibrate", lambda task_id, inner, layout, initial: {"task_id": task_id, "door_closed": 0.0, "door_open": -2.094})
     monkeypatch.setattr(train, "capture_live", lambda live: {"stub": True})
     monkeypatch.setattr(train, "shadow_fidelity", lambda env, shadow, layout, act, observation, chunks=20: {
         "position_m": 2e-4, "angle_rad": 1e-3, "chunks": chunks})
-    monkeypatch.setattr(train, "label_plans", lambda shadow, snapshot, before, candidates, first_chunk, norm, layout, calibration: labelled.append(
-        (snapshot, before.tolist(), tuple(candidates.shape), first_chunk, calibration["task_id"]))
-        or np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], np.float32))
+
+    class StubPool:
+        def __init__(self, workers, spec, norm, layout, calibration, shadow_factory=None):
+            pools.append((workers, spec, layout, calibration["task_id"]))
+
+        def submit(self, snapshot, before, candidates, first_chunk, env_task, init_states, plus, seed):
+            labelled.append((snapshot, before.tolist(), type(candidates), candidates.dtype, tuple(candidates.shape), first_chunk, env_task, init_states, plus, seed))
+            labels = np.array([[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]], np.float32)
+            return SimpleNamespace(result=lambda: (labels, 0.0), wait=lambda: None)
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(train, "LabelPool", StubPool)
     config = RLConfig(task_ids=(9,), plan_candidates=2, plan_random_prob=0.0, selection_warmup_steps=0, residual_input="base",
                       proprio=True, plus_train=plus_train_variants(), plan_target="rollout")
     out = _smoke_train(tmp_path, monkeypatch, 60, model_factory=lambda **kw: DiceResidualModel(**kw), config=config)
     envs = out["envs"]
     strip = lambda env: {key: value for key, value in env.items() if key != "obs_type"}
-    assert len(envs) == 4 + 2 * 5 and all(envs[i]["obs_type"] == "pixels" and strip(envs[i]) == strip(envs[i - 1]) for i in range(1, 14, 2))
+    assert len(envs) == 4 + 5 and all(envs[i]["obs_type"] == "pixels" and strip(envs[i]) == strip(envs[i - 1]) for i in (1, 3))
     assert (envs[2]["task_id"], envs[2]["init_states"], envs[2]["is_libero_plus"], envs[2]["obs_type"]) == (1982, True, True, "pixels_agent_pos")
-    assert pools == [{"max_workers": 1}]
-    assert labelled and labelled[0] == ({"stub": True}, [7.0, 8.0], (2, K_CANDIDATES, HORIZON, ACTION_DIM), True, 9) and len(labelled) == 5
+    assert all(env["obs_type"] == "pixels_agent_pos" for env in envs[4:])
+    assert pools == [(4, None, {"bodies": ["mug"], "joints": ["door"]}, 9)] and closed == [True]
+    assert labelled and len(labelled) == 5 and labelled[0][:6] == ({"stub": True}, [7.0, 8.0], np.ndarray, np.float32, (2, K_CANDIDATES, HORIZON, ACTION_DIM), True)
+    assert [(entry[6], entry[7], entry[8]) for entry in labelled] == [(env["task_id"], env["init_states"], True) for env in envs[4:]]
+    assert labelled[0][9] == 42 and labelled[1][9] == 42 + 12
     rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
     assert rows[0]["plan_labels"].dtype == np.float32 and rows[0]["plan_labels"].tolist() == [[0.0, 1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0]]
     updates = [entry for entry in out["logs"] if "plan_critic_loss" in entry]
@@ -1784,7 +1829,7 @@ def test_train_with_rollout_labels_overlaps_the_live_chunk_stores_them_and_recor
     assert settings["progress_calibration"]["door_open"] == -2.094
     assert out["resume"]["recipe"]["plan_target"] == "rollout" and out["resume"]["layout"]["plan_target"] == "rollout"
     plain = _smoke_train(tmp_path / "plain", monkeypatch, 24)
-    assert pools == [{"max_workers": 1}] and not any("label_seconds" in entry for entry in plain["logs"])
+    assert len(pools) == 1 and not any("label_seconds" in entry for entry in plain["logs"])
     assert json.loads((tmp_path / "plain" / "settings.json").read_text())["shadow_fidelity"] is None
 
 
