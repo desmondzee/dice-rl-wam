@@ -37,7 +37,7 @@ def _serve(connection, spec, norm, layout, calibration, shadow_factory):
             break
         try:
             snapshot, before, candidates, first_chunk, env_task, init_states, plus, seed = message
-            key = (env_task, init_states, plus)
+            key = (env_task, init_states, plus, seed)
             if key != cached:
                 if shadow is not None:
                     shadow.close()
