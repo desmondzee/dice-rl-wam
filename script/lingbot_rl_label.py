@@ -26,6 +26,7 @@ def unpack_snapshot(packed, sim):
 
 
 def _serve(connection, spec, norm, layout, calibration, shadow_factory):
+    os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", "0")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     import torch
     from script.lingbot_rl_train import _timed, label_plans, make_shadow
