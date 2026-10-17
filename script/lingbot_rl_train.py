@@ -687,7 +687,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             if stored:
                 env.init_state_id = int(draw * len(env._init_states))
             policy.reset()
-            observation, _ = env.reset(seed=config.seed + env_steps)
+            episode_seed = config.seed + env_steps
+            observation, _ = env.reset(seed=episode_seed)
             future = token_future = None
             episode_return = 0.0
             episode_success = 0.0
@@ -707,7 +708,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                         decoded = policy.decode_candidates(batch, k=config.k_candidates)
                     if pool is not None:
                         future = pool.submit(capture_live(env._env.env), sim_state, decoded["plan_a_base_all"].detach().float().cpu().numpy(),
-                                             decoded["first_chunk"], sim_task, stored, bool(config.plus_train), config.seed + env_steps)
+                                             decoded["first_chunk"], sim_task, stored, bool(config.plus_train), episode_seed)
                     if tokens is not None:
                         token_future = labeller.submit(tokens.append, decoded["plan_tokens"], chunk=chunks, episode=episodes, step=env_steps,
                                                        reset_kind=kind, variant_index=env_task, plan_index=int(decoded["plan_index"]))
