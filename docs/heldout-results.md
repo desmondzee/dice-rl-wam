@@ -269,6 +269,19 @@ Fresh V_plan refits on each target (same buffers, 80 / 20 split by time, ten hea
 
 The live V_plan on the same rows: agreement with Q-mean 0.55 (task 9) / 0.48 (task 0). Chance is 0.25.
 
+Feature study on run B's 80k buffer (`dice-t9-plus-m4-struct`, 5,087 online chunks under the thirds reset mix; Watson CPU, 2026-10-17; `result/analysis/feature_study_b80k.log`). Target: run B's own critic (structured inputs + proprioception) ranking plans by the mean over heads and the max over candidates; its halves agree 0.72. Fresh five-head V_plans on each input set, 3,000 steps, two replicas, last fifth held out by time; agreement and captured value are against the live ranking on the held-out rows; outcome link as above.
+
+| V_plan inputs (state ‖ plan) | replica agreement | agreement with the live ranking | captured | outcome link |
+|---|---|---|---|---|
+| pooled s ‖ pooled p | 0.75 | 0.45 | 0.51 | 0.11 |
+| per-camera per-frame means for both | 0.81 | 0.57 | 0.77 | 0.23 |
+| structured s + proprio ‖ structured p | 0.85 | 0.57 | 0.78 | 0.19 |
+| attention over the 32 state tokens + proprio ‖ structured p | 0.84 | 0.58 | 0.77 | 0.20 |
+| object poses + proprio (oracle) ‖ structured p | 0.81 | 0.56 | 0.78 | 0.23 |
+| object poses + proprio (oracle) ‖ pooled p | 0.73 | 0.41 | 0.48 | 0.13 |
+
+The live ranking was produced by a critic trained on structured inputs, which favours the structured refits in the agreement columns; the outcome column does not depend on the critic.
+
 ΔV against ΔH for the two V_plan runs (2026-10-16; figures `result/analysis/dvdh/dvdh_offline.png`, `dvdh_online.png`). Definitions as in the trainer's replay metrics: plan ΔV = V_plan(executed plan) − mean over the 4 plans; plan ΔH = mean over pool dimensions of log-std over all 4 plans' pools minus log-std over the executed pools; action ΔV = Q(a_base + residual) − Q(a_base) over the 4 candidates; action ΔH = binned-entropy(base candidates) − binned-entropy(residual actions). Online (live critic, logged every 5k env steps) and recomputed per window of 1,000 chunks with the final critic.
 
 | run | plan ΔV online, first → last | plan ΔV with the Q-mean ranker as judge (offline, last windows) | plan ΔH, online and offline | action ΔV online | action ΔH online | action Δlog-std online |
