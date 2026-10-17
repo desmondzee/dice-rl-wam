@@ -26,7 +26,7 @@ def unpack_snapshot(packed, sim):
 def _serve(connection, spec, norm, layout, calibration, shadow_factory):
     import torch
     from script.lingbot_rl_train import _timed, label_plans, make_shadow
-    suite, shadows = None, {}
+    suite, cached, shadow = None, None, None
     while True:
         message = connection.recv()
         if message is None:
@@ -34,11 +34,14 @@ def _serve(connection, spec, norm, layout, calibration, shadow_factory):
         try:
             snapshot, before, candidates, first_chunk, env_task, init_states, plus, seed = message
             key = (env_task, init_states, plus)
-            if key not in shadows:
+            if key != cached:
+                if shadow is not None:
+                    shadow.close()
                 if suite is None:
                     suite = build_suite(spec)
-                shadows[key] = (shadow_factory or make_shadow)(env_task, suite, init_states, plus, seed)
-            shadow = shadows[key]
+                shadow, cached = None, None
+                shadow = (shadow_factory or make_shadow)(env_task, suite, init_states, plus, seed)
+                cached = key
             reply = _timed(label_plans, shadow, unpack_snapshot(snapshot, shadow._env.env.sim), before, torch.from_numpy(candidates),
                            first_chunk, norm, layout, calibration)
             connection.send((True, reply))
@@ -47,7 +50,7 @@ def _serve(connection, spec, norm, layout, calibration, shadow_factory):
                 connection.send((False, exc))
             except Exception:
                 connection.send((False, RuntimeError(f"{type(exc).__name__}: {exc}")))
-    for shadow in shadows.values():
+    if shadow is not None:
         shadow.close()
 
 
