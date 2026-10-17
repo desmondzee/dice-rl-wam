@@ -1,4 +1,6 @@
 import multiprocessing
+import os
+import traceback
 
 import numpy as np
 
@@ -24,6 +26,7 @@ def unpack_snapshot(packed, sim):
 
 
 def _serve(connection, spec, norm, layout, calibration, shadow_factory):
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
     import torch
     from script.lingbot_rl_train import _timed, label_plans, make_shadow
     suite, cached, shadow = None, None, None
@@ -47,9 +50,10 @@ def _serve(connection, spec, norm, layout, calibration, shadow_factory):
             connection.send((True, reply))
         except Exception as exc:
             try:
-                connection.send((False, exc))
+                error = type(exc)(f"{exc}\n{traceback.format_exc()}")
             except Exception:
-                connection.send((False, RuntimeError(f"{type(exc).__name__}: {exc}")))
+                error = RuntimeError(traceback.format_exc())
+            connection.send((False, error))
     if shadow is not None:
         shadow.close()
 
