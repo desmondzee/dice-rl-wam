@@ -39,6 +39,10 @@ One line per measurement: what was run, the number, what it decided. Details and
 - Short-horizon label vs episode return: 0.05–0.08 correlation.
 - Fresh five-head refits on the labels (3,000 steps, held out by time): pooled plan features agreement 0.30 / captured 0.18 / correlation 0.71; structured plan features 0.28 / 0.30 / 0.71. Both below the live critic (0.33 / 0.60 / 0.94), which has had 140k steps of online updates; the refit is too weak a proxy to settle the feature question on these labels, and the within-state ordering is the hard part (plan-to-plan label differences of 0.014 against level variation an order of magnitude larger).
 
+## LIBERO-Plus at 240k, both runs stopped (2026-10-18)
+
+- Same 100-episode LIBERO-Plus plan as the baselines: counterfactual 240k 44 (robot-init 21 / 52, layout 23 / 48), run B 240k 48 (23 / 52, 25 / 48), against SFT 37, the in-distribution 320k plan policy 53, random plan 50. Training variants (67): 26 and 34 against 37; held-out variants (33): 18 and 14 against 16 and 17. Paired vs the 320k policy: 15 / 24 and 18 / 23. Decision: training on the perturbation mix, with either critic, did not improve LIBERO-Plus over the in-distribution policy, not even on the variants it trained on; the measured plan critic's per-chunk advantage (0.001–0.006 against a spread of about 0.01) is too small to move success.
+
 ## Structured features in the live model (run B, 240k)
 
 - Run B's actor is inert: `residual_rms` 0.0015, `q_advantage` 0.0002, `actor_grad_norm` 0.017 at 240k against 0.02 / 0.03–0.05 / 0.5–0.7 in every pooled run. The structured state input has row norm 39 against 1.5 for the pooled vector (plan input 138 against 8.4); the critic's dQ/da median is 8× smaller (0.0028 vs 0.0235) and the first-layer action columns never left initialisation. Decision: any structured-feature recipe standardises the inputs to the pooled scale before the critic; run B measures structured features for the plan critic and Q selection only, not for the residual.
