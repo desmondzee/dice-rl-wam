@@ -29,6 +29,7 @@ BATCH = 256
 REPLAY_CAPACITY = 100_000
 K_CANDIDATES = 4
 PROPRIO_DIM = 8
+OBJECT_STATE_DIM = 22
 
 
 def mlp_float(tensor):
@@ -71,9 +72,10 @@ RESIDUAL_INPUTS = {"z": ("z",), "base": ("base",), "z_base": ("z", "base")}
 
 
 class ResidualActor(nn.Module):
-    def __init__(self, residual_input="z", state_dim=STATE_DIM):
+    def __init__(self, residual_input="z", state_dim=STATE_DIM, bound=0.0):
         super().__init__()
         self.inputs = RESIDUAL_INPUTS[residual_input]
+        self.bound = float(bound)
         self.net = _mlp(state_dim + len(self.inputs) * HORIZON * ACTION_DIM, HORIZON * ACTION_DIM)
         final = self.net[-1]
         nn.init.zeros_(final.weight)
@@ -84,6 +86,8 @@ class ResidualActor(nn.Module):
         batch = state.shape[0]
         parts = [state] + [mlp_float(noise if name == "z" else a_base).reshape(batch, -1) for name in self.inputs]
         residual = self.net(torch.cat(parts, dim=-1))
+        if self.bound > 0:
+            residual = self.bound * torch.tanh(residual)
         return mask_unused_dof(residual.reshape(batch, HORIZON, ACTION_DIM))
 
 
@@ -117,17 +121,23 @@ class PlanCritic(nn.Module):
 
 class DiceResidualModel:
     def __init__(self, device="cpu", residual_input="z", epsilon=EPSILON, plan_candidates=1, state_features="pool", proprio=False,
-                 plan_target="q"):
+                 plan_target="q", residual_bound=0.0, bc_weight=BETA, privileged_critic=False, standardize=None):
         self.device = device
         self.epsilon = epsilon
         self.plans = int(plan_candidates)
         self.plan_target = plan_target
         self.features = state_features
         self.proprio = bool(proprio)
+        self.bc_weight = float(bc_weight)
+        self.privileged = bool(privileged_critic)
+        self.standardize = None if standardize is None else {
+            "struct_mean": float(standardize["struct_mean"]), "struct_std": float(standardize["struct_std"]),
+            "object_mean": mlp_float(standardize["object_mean"]).to(device), "object_std": mlp_float(standardize["object_std"]).to(device)}
         self.state_dim = STATE_DIM * (2 if state_features == "struct" else 1) + (PROPRIO_DIM if self.proprio else 0)
         self.plan_dim = STATE_DIM * (8 if state_features == "struct" else 1) if self.plans > 1 else 0
-        self.actor = ResidualActor(residual_input, self.state_dim).to(device)
-        self.critic = CriticEnsemble(self.state_dim + self.plan_dim).to(device)
+        self.critic_dim = self.state_dim + self.plan_dim + (OBJECT_STATE_DIM if self.privileged else 0)
+        self.actor = ResidualActor(residual_input, self.state_dim, residual_bound).to(device)
+        self.critic = CriticEnsemble(self.critic_dim).to(device)
         self.target_critic = copy.deepcopy(self.critic).to(device)
         for parameter in self.target_critic.parameters():
             parameter.requires_grad_(False)
@@ -135,6 +145,11 @@ class DiceResidualModel:
         self.critic_opt = torch.optim.Adam(self.critic.parameters(), lr=ADAM_LR, weight_decay=WEIGHT_DECAY)
         self.actor_lr = torch.optim.lr_scheduler.LambdaLR(self.actor_opt, cosine_restart_lr)
         self.critic_lr = torch.optim.lr_scheduler.LambdaLR(self.critic_opt, cosine_restart_lr)
+        self.select_critic, self.select_opt, self.select_lr = self.critic, None, None
+        if self.privileged:
+            self.select_critic = CriticEnsemble(self.state_dim + self.plan_dim).to(device)
+            self.select_opt = torch.optim.Adam(self.select_critic.parameters(), lr=ADAM_LR, weight_decay=WEIGHT_DECAY)
+            self.select_lr = torch.optim.lr_scheduler.LambdaLR(self.select_opt, cosine_restart_lr)
         self.plan_critic = self.plan_opt = self.plan_lr = None
         if self.plans > 1:
             self.plan_critic = PlanCritic(self.state_dim, self.plan_dim).to(device)
@@ -147,6 +162,8 @@ class DiceResidualModel:
         else:
             struct = mlp_float(struct)
             state = struct.reshape(struct.shape[0], -1)
+            if self.standardize is not None:
+                state = (state - self.standardize["struct_mean"]) / self.standardize["struct_std"]
         if not self.proprio:
             return state
         if proprio is None:
@@ -167,12 +184,24 @@ class DiceResidualModel:
         out = {"state_features": layout.get("state_features", "pool"), "proprio": bool(layout.get("proprio", False))}
         if "plan_target" in layout:
             out["plan_target"] = layout["plan_target"]
+        for key in ("residual_bound", "privileged_critic", "standardize"):
+            if key in layout:
+                out[key] = layout[key]
         return out
 
-    def critic_state(self, state, pool):
-        if self.plans == 1:
-            return mlp_float(state)
-        return torch.cat([mlp_float(state), mlp_float(pool)], dim=-1)
+    def critic_state(self, state, pool, object_state=None):
+        out = mlp_float(state) if self.plans == 1 else torch.cat([mlp_float(state), mlp_float(pool)], dim=-1)
+        if not self.privileged or object_state is None:
+            return out
+        object_state = mlp_float(object_state).to(out.device)
+        if self.standardize is not None:
+            object_state = (object_state - self.standardize["object_mean"]) / self.standardize["object_std"]
+        return torch.cat([out, object_state], dim=-1)
+
+    def standardize_layout(self):
+        if self.standardize is None:
+            return None
+        return {key: value if isinstance(value, float) else value.tolist() for key, value in self.standardize.items()}
 
     def rank_candidates(self, state, pools, a_base_all, z_all):
         with torch.no_grad():
@@ -182,7 +211,7 @@ class DiceResidualModel:
             flat_pool = mlp_float(pools).repeat_interleave(k, dim=0)
             flat_base = a_base_all.reshape(plans * k, HORIZON, ACTION_DIM)
             action = apply_residual(flat_base, self.actor(flat_state, z_all.repeat(plans, 1, 1), flat_base))
-            return int(self.critic(self.critic_state(flat_state, flat_pool), action).reshape(-1).argmax()) // k
+            return int(self.select_critic(self.critic_state(flat_state, flat_pool), action).reshape(-1).argmax()) // k
 
     def rank_plans(self, state, pools):
         with torch.no_grad():
@@ -206,7 +235,7 @@ class DiceResidualModel:
             backup = self.target_critic(critic_k, a_next).reshape(batch, k, 1).mean(dim=1)
             return reward + (GAMMA ** n_steps) * (1.0 - done) * backup
 
-    def update_critic(self, critic_state, action, target_q):
+    def update_critic(self, critic_state, action, target_q, select_state=None):
         preds = self.critic(critic_state, action, return_all=True)
         loss = torch.stack([F.mse_loss(pred, target_q) for pred in preds]).sum()
         self.critic_opt.zero_grad(set_to_none=True)
@@ -214,11 +243,23 @@ class DiceResidualModel:
         grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), MAX_GRAD_NORM)
         self.critic_opt.step()
         self.critic_lr.step()
-        return {
+        info = {
             "critic_loss": float(loss.detach()),
             "critic_grad_norm": float(grad_norm),
             "critic_q_mean": float(torch.stack(preds).mean().detach()),
         }
+        if self.select_opt is not None:
+            if select_state is None:
+                select_state = mlp_float(critic_state)[:, :self.state_dim + self.plan_dim]
+            select_preds = self.select_critic(select_state, action, return_all=True)
+            select_loss = torch.stack([F.mse_loss(pred, target_q) for pred in select_preds]).sum()
+            self.select_opt.zero_grad(set_to_none=True)
+            select_loss.backward()
+            nn.utils.clip_grad_norm_(self.select_critic.parameters(), MAX_GRAD_NORM)
+            self.select_opt.step()
+            self.select_lr.step()
+            info["select_critic_loss"] = float(select_loss.detach())
+        return info
 
     def update_actor(self, state, critic_state, action_stored, z_all, a_base_all, is_expert, mc_return, filter_active):
         state = mlp_float(state)
@@ -238,7 +279,7 @@ class DiceResidualModel:
             overestimation = self.critic(critic_state, action_stored) - mlp_float(mc_return)
             better = (q_a > q_base).float()
             keep = torch.ones_like(better)
-            if filter_active:
+            if filter_active and self.bc_weight != 0:
                 keep = 1.0 - better * (overestimation < self.epsilon).float()
             keep = torch.maximum(keep, 1.0 - online)
             q_scale = (q_a.abs() * online).sum() / (online.sum() * k).clamp(min=1.0)
@@ -246,14 +287,14 @@ class DiceResidualModel:
         if q_scale > 1e-8:
             q_term = q_term / q_scale
         mse = ((action - base_flat) ** 2).sum(dim=(1, 2)).reshape(batch, k) / (HORIZON * USED_DOF)
-        bc = (keep * mse).mean()
-        loss = q_term + BETA * bc
+        bc = (keep * mse).mean() if self.bc_weight != 0 else mse.new_zeros(())
+        loss = q_term + self.bc_weight * bc
         self.actor_opt.zero_grad(set_to_none=True)
         loss.backward()
         grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), MAX_GRAD_NORM)
         self.actor_opt.step()
         self.actor_lr.step()
-        return {
+        info = {
             "actor_loss": float(loss.detach()),
             "actor_q_loss": float(q_term.detach()),
             "actor_bc_loss": float(bc.detach()),
@@ -268,6 +309,10 @@ class DiceResidualModel:
             "q_overestimation": float(overestimation.mean()),
             "q_overestimation_online": float((overestimation * online).sum() / online.sum().clamp(min=1.0)),
         }
+        if self.actor.bound > 0:
+            residual = (action - base_flat).detach()[..., :USED_DOF]
+            info["residual_saturation"] = float((residual.abs() > 0.95 * self.actor.bound).float().mean())
+        return info
 
     def update_plan_critic(self, state, pools_all, z_all, plan_a_base_all, plan_labels=None, is_expert=None):
         if self.plan_target == "rollout":
@@ -286,7 +331,7 @@ class DiceResidualModel:
             flat_z = z_all[:, None].expand(batch, plans, k, HORIZON, ACTION_DIM).reshape(-1, HORIZON, ACTION_DIM)
             flat_base = plan_a_base_all.reshape(-1, HORIZON, ACTION_DIM)
             action = apply_residual(flat_base, self.actor(flat_state, flat_z, flat_base))
-            target = self.critic(self.critic_state(flat_state, flat_pool), action).reshape(batch, plans, k).max(dim=2).values
+            target = self.select_critic(self.critic_state(flat_state, flat_pool), action).reshape(batch, plans, k).max(dim=2).values
         extra = {}
         if self.plan_target == "rollout":
             labels = plan_labels.mean(dim=-1)
@@ -318,6 +363,13 @@ class DiceResidualModel:
         payload["layout"] = {"state_features": self.features, "proprio": self.proprio, "plan_candidates": self.plans}
         if self.plan_target != "q":
             payload["layout"]["plan_target"] = self.plan_target
+        if self.actor.bound > 0:
+            payload["layout"]["residual_bound"] = self.actor.bound
+        if self.privileged:
+            payload["layout"]["privileged_critic"] = True
+            payload["select_critic"] = self.select_critic.state_dict()
+        if self.standardize is not None:
+            payload["layout"]["standardize"] = self.standardize_layout()
         if self.plan_critic is not None:
             payload["plan_critic"] = self.plan_critic.state_dict()
         return payload
@@ -325,11 +377,17 @@ class DiceResidualModel:
     def load_inference_state_dict(self, payload):
         layout = payload.get("layout")
         if layout is not None and (layout["state_features"], bool(layout["proprio"]), int(layout.get("plan_candidates", self.plans)),
-                                   layout.get("plan_target", "q")) != (self.features, self.proprio, self.plans, self.plan_target):
+                                   layout.get("plan_target", "q"), float(layout.get("residual_bound", 0.0)),
+                                   bool(layout.get("privileged_critic", False)), layout.get("standardize")) != (
+                self.features, self.proprio, self.plans, self.plan_target, self.actor.bound, self.privileged, self.standardize_layout()):
             raise ValueError("residual checkpoint layout mismatch")
         self.actor.load_state_dict(payload["actor"])
         self.critic.load_state_dict(payload["critic"])
         self.target_critic.load_state_dict(payload["target_critic"])
+        if self.privileged:
+            if "select_critic" not in payload:
+                raise ValueError("select critic weights missing")
+            self.select_critic.load_state_dict(payload["select_critic"])
         if self.plan_critic is not None:
             if "plan_critic" not in payload:
                 raise ValueError("plan critic weights missing")
@@ -346,6 +404,9 @@ class DiceResidualModel:
         if self.plan_opt is not None:
             payload["plan_opt"] = self.plan_opt.state_dict()
             payload["plan_lr"] = self.plan_lr.state_dict()
+        if self.select_opt is not None:
+            payload["select_opt"] = self.select_opt.state_dict()
+            payload["select_lr"] = self.select_lr.state_dict()
         return payload
 
     def load_resume_state_dict(self, payload):
@@ -357,3 +418,6 @@ class DiceResidualModel:
         if self.plan_opt is not None:
             self.plan_opt.load_state_dict(payload["plan_opt"])
             self.plan_lr.load_state_dict(payload["plan_lr"])
+        if self.select_opt is not None:
+            self.select_opt.load_state_dict(payload["select_opt"])
+            self.select_lr.load_state_dict(payload["select_lr"])

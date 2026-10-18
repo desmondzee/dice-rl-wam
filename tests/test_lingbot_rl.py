@@ -19,7 +19,7 @@ from script.lingbot_rl_config import RLConfig, config_from_dict, plus_train_vari
 from script.lingbot_rl_model import (
     ACTION_DIM, ACTOR_EVERY, ADAM_LR, BATCH, BETA, ENSEMBLE, EPSILON, GAMMA, GRADIENT_STEPS,
     HIDDEN, HORIZON, K_CANDIDATES, LR_MIN, MAX_GRAD_NORM, N_STEP_CHUNKS, STATE_DIM, TAU,
-    UPDATE_EVERY_CHUNKS, USED_DOF, WEIGHT_DECAY, DiceResidualModel, apply_residual,
+    UPDATE_EVERY_CHUNKS, USED_DOF, WEIGHT_DECAY, DiceResidualModel, ResidualActor, apply_residual,
     cosine_restart_lr, mask_unused_dof,
 )
 from script.lingbot_rl_policy import (
@@ -590,6 +590,52 @@ def test_model_input_layout_follows_state_features_and_proprio():
     torch.manual_seed(0)
     b = DiceResidualModel(device="cpu", plan_candidates=2, state_features="pool", proprio=False)
     assert all(torch.equal(x, y) for x, y in zip(a.critic.parameters(), b.critic.parameters()))
+
+
+def test_bounded_actor_saturates_at_the_bound_and_zero_init_starts_at_the_prior():
+    actor = ResidualActor("base", STATE_DIM, bound=0.3)
+    state, noise, base = torch.randn(2, STATE_DIM), torch.randn(2, HORIZON, ACTION_DIM), torch.rand(2, HORIZON, ACTION_DIM)
+    with torch.no_grad():
+        assert float(actor(state, noise, base).abs().max()) == 0.0
+        actor.net[-1].weight.fill_(50.0); actor.net[-1].bias.fill_(50.0)
+        out = actor(state, noise, base)
+    assert torch.allclose(out[..., :USED_DOF].abs(), torch.full_like(out[..., :USED_DOF], 0.3), atol=1e-4) and float(out[..., USED_DOF:].abs().max()) == 0.0
+
+
+def test_privileged_critic_input_standardises_struct_and_object_state_and_layout_roundtrips():
+    standardize = {"struct_mean": 0.01, "struct_std": 0.5, "object_mean": torch.zeros(22), "object_std": torch.full((22,), 2.0)}
+    model = DiceResidualModel(device="cpu", residual_input="base", state_features="struct", proprio=True, residual_bound=0.3, bc_weight=0.0,
+                              privileged_critic=True, standardize=standardize)
+    struct = torch.full((3, 2, STATE_DIM), 0.51); proprio = torch.ones(3, 8); obj = torch.full((3, 22), 4.0)
+    state = model.state_input(None, struct, proprio)
+    assert torch.allclose(state[:, :2 * STATE_DIM], torch.ones(3, 2 * STATE_DIM)) and torch.allclose(state[:, -8:], proprio)
+    critic_state = model.critic_state(state, None, obj)
+    assert critic_state.shape == (3, 2 * STATE_DIM + 8 + 22) and torch.allclose(critic_state[:, -22:], torch.full((3, 22), 2.0))
+    assert model.critic.heads[0][0].weight.shape[1] == 2 * STATE_DIM + 8 + 22 + HORIZON * ACTION_DIM
+    assert model.select_critic is not model.critic and model.select_critic.heads[0][0].weight.shape[1] == 2 * STATE_DIM + 8 + HORIZON * ACTION_DIM
+    assert model.critic_state(state, None).shape == (3, 2 * STATE_DIM + 8)
+    target = torch.zeros(3, 1)
+    info = model.update_critic(critic_state, torch.zeros(3, HORIZON, ACTION_DIM), target, select_state=model.critic_state(state, None))
+    assert "select_critic_loss" in info
+    m = DiceResidualModel(device="cpu")
+    assert m.select_critic is m.critic
+    payload = model.inference_state_dict()
+    layout = DiceResidualModel.layout_of(payload)
+    assert layout["residual_bound"] == 0.3 and layout["privileged_critic"] is True and layout["standardize"]["struct_std"] == 0.5
+    assert "select_critic" in payload
+    DiceResidualModel(device="cpu", residual_input="base", **layout).load_inference_state_dict(payload)
+    legacy = DiceResidualModel.layout_of(DiceResidualModel(device="cpu").inference_state_dict())
+    assert "residual_bound" not in legacy and "privileged_critic" not in legacy
+
+
+def test_actor_update_without_bc_weight_skips_the_filter_and_reports_saturation():
+    model = DiceResidualModel(device="cpu", residual_input="base", residual_bound=0.3, bc_weight=0.0)
+    torch.manual_seed(0)
+    batch = {"state": torch.randn(4, STATE_DIM), "a": torch.rand(4, HORIZON, ACTION_DIM), "z_all": torch.randn(4, 4, HORIZON, ACTION_DIM),
+             "a_base_all": torch.rand(4, 4, HORIZON, ACTION_DIM), "is_expert": torch.zeros(4), "mc_return": torch.zeros(4)}
+    info = model.update_actor(batch["state"], batch["state"], batch["a"], batch["z_all"], batch["a_base_all"], batch["is_expert"], batch["mc_return"], True)
+    assert info["actor_bc_loss"] == 0.0 and info["bc_filter_rate"] == 1.0 and 0.0 <= info["residual_saturation"] <= 1.0
+    assert info["actor_loss"] == pytest.approx(info["actor_q_loss"])
 
 
 def test_update_runs_actor_and_polyak_on_every_second_gradient_step():
