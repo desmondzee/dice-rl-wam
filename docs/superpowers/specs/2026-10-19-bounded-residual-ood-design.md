@@ -55,10 +55,9 @@ Unchanged: frozen prior, instruction conditioning, guidance 5, 10-head critic wi
 
 ## Evaluation
 
-1. Held-out LIBERO-Plus plan `docs/libero-plus/task9-heldout-plan.json`: the 14 robot-init test variants and 13 layout test variants, each 3 times with the standard seed formula (81 episodes) plus the first 10 robot-init and first 9 layout test variants a fourth time (100 episodes); seed 43. Baselines on it before the runs finish: SFT step 600 and the in-distribution 320k plan policy (`dice-t9-plan-m4-step320000`, V_plan ranker).
-2. Standard protocol, 100 episodes, for both checkpoints at 160k and 240k.
-3. The all-variant LIBERO-Plus plan on the 240k checkpoints only if the held-out result is positive, for continuity with the 53 / 50 / 37 numbers.
-4. Decisions: at 160k, continue if training success on perturbed episodes is above the cf run's 0.45 window mean or the residual label gain is positive; the 240k held-out comparison is the result.
+1. The existing 100-episode LIBERO-Plus plan (`docs/libero-plus/task9-plan.json`), with its baselines SFT 37, in-distribution 320k plan policy 53, random plan 50. Box 1 trains on no robot-init variant (its poses are procedural), so all 52 robot-init episodes are unseen poses; the layout axis is reported split into the 32 episodes on the 26 training variants and the 16 on the 13 unseen variants. No new baselines.
+2. Standard protocol, 100 episodes, for both boxes at 160k and 240k, against 79 / 80 and SFT 60.
+3. Decisions: at 160k, continue if training success on perturbed episodes exceeds the cf run's 0.45 window mean or the residual's measured label gain is positive; the 240k LIBERO-Plus comparison of box 1 against box 2 and against 53 is the result.
 
 ## Smoke gates (2,100 env steps per box, on the box)
 
