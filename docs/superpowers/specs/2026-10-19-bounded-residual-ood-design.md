@@ -1,6 +1,6 @@
 # Bounded residual for out-of-distribution performance: design
 
-Status: draft for review, 2026-10-19. Evidence: `docs/research-residual-ood-survey.md` (literature), `docs/probe-outcomes.md` (our measurements).
+Status: reviewed 2026-10-19 (bound alone, α = 0.3, box 2 is the data control). Evidence: `docs/research-residual-ood-survey.md` (literature), `docs/probe-outcomes.md` (our measurements).
 
 ## Goal
 
@@ -13,7 +13,7 @@ Make the residual actor, not plan selection, the object of the method, and measu
 | plans | M = 4, V_plan ranker | M = 1, no plan critic | measured plan leverage 0.01 per chunk; random plan within noise |
 | candidates | K = 4 noise samples, Q best-of-4 over residual actions | unchanged | DICE-RL core; the part of the gain that survived ablation |
 | sampler | 5 / 10 | unchanged | 20 / 50 → 5 / 10 gave +18 / +12 |
-| residual | unbounded, BC weight 100, DICE filter at ε = −0.3; settles at 8% of action rms | α·tanh(net), α = 0.25 in normalised action units (one action rms), BC weight 0, filter off | Policy Decorator ablation (bound essential, set near demo action scale), PLD (clip 0.5, no BC term, 97 on LIBERO), fixed-bound sweeps insensitive over 0.1–0.5 |
+| residual | unbounded, BC weight 100, DICE filter at ε = −0.3; settles at 8% of action rms | α·tanh(net), α = 0.3 in normalised action units (1.2 action rms), BC weight 0, filter off | Policy Decorator ablation (bound essential, set near demo action scale), PLD (clip 0.5, no BC term, 97 on LIBERO), fixed-bound sweeps insensitive over 0.1–0.5 |
 | residual schedule | none | actor frozen and residual off for the first 50 episodes; then applied per chunk with probability min((steps − warm-up) / 50k, 1) | Silver critic burn-in, PLD 100-episode warm-up, Policy Decorator ramp (collapse when too short) |
 | actor inputs | pooled 3072 + proprio 8 + base chunk | structured means (2 × 3072) standardised + proprio 8 + base chunk | pooled vector per-element spread 0.028; run B's actor died on unstandardised inputs (norm 39 vs 1.5) |
 | critic inputs | same as actor + action | actor's standardised features + proprio + object state (22 floats) + action | asymmetric critic (ReCoVLA, ResiP, Scaffolder); critic sees the actor's observation too (Baisero & Amato) |
@@ -29,7 +29,7 @@ Unchanged: frozen prior, instruction conditioning, guidance 5, 10-head critic wi
 ## Policy
 
 - Plans: `plan_candidates = 1`. The plan critic, its buffer keys and the token sidecar are not built. K = 4 noise candidates per chunk; each gets the residual; Q (mean over heads at selection, as now) picks the executed candidate.
-- Residual: `a = a_base + α · tanh(net(x))`, masked to the 7 used dof, α = `residual_bound` = 0.25. The final layer stays zero-initialised, so the residual starts at 0. `bc_weight` = 0 and `bc_filter` off; the DICE overestimation statistics stay logged.
+- Residual: `a = a_base + α · tanh(net(x))`, masked to the 7 used dof, α = `residual_bound` = 0.3. The final layer stays zero-initialised, so the residual starts at 0. `bc_weight` = 0 and `bc_filter` off; the DICE overestimation statistics stay logged.
 - Actor input x: standardised structured features (per-camera, per-frame means of the last latent frame, 2 × 3072), proprioception (8), base chunk (16 × 30). Standardisation: subtract the global mean and divide by the global standard deviation of the expert features' structured means, computed once at run start and stored in `settings.json`; the same constants apply to the critic's copy of the features. Proprioception is not scaled (entries already of order 1).
 - Schedule: `actor_warmup_episodes` = 50 (about 20k env steps) during which the actor is neither applied nor updated and the critic trains on base rollouts plus expert rows; then `residual_ramp_steps` = 50,000 over which the residual is applied per chunk with probability p = min((env_steps − warm-up end) / 50k, 1), drawn once per chunk for all K candidates. Rows store whether the residual was applied. Actor updates run every other critic update from the end of the warm-up, as now.
 
@@ -69,11 +69,12 @@ Unchanged: frozen prior, instruction conditioning, guidance 5, 10-head critic wi
 - Labeller: diagnostic labels present for every 10th chunk; shadow fidelity gates as before.
 - Throughput ≤ 0.5 s per env step; peak GPU memory below 60 GB.
 
-## Open decisions for review
+## Decisions taken at review
 
-1. Dropping the BC term and the DICE filter entirely (as Policy Decorator and PLD do) versus keeping a small BC weight (1–10) beside the bound. The literature uses the bound alone; RL Token, which has no bound, found β = 0 its largest ablation drop. Proposal: bound alone.
-2. α = 0.25 (one action rms) versus 0.5 (PLD's LIBERO value, two action rms). Fixed-bound sweeps are insensitive across this range; proposal 0.25, since the larger value is where PLD reports early degradation.
-3. Whether box 2 should instead be the privileged-critic ablation on the mix. Proposal: keep the data control; the critic's action signal is checked online by the labeller.
+1. Bound alone: the BC term and the DICE overestimation filter are dropped, as in Policy Decorator and PLD. What stays of DICE-RL: the frozen generative base, K noise candidates per chunk with the residual applied to each and Q choosing the executed one, the 10-head critic with the min target, n-step TD on a replay mixed with expert rows, and the actor maximising Q over the candidates. The hard bound replaces the BC penalty and filter as the constraint that keeps the residual near the base.
+2. α = 0.3 (1.2 action rms), inside the range the fixed-bound sweeps found insensitive.
+3. Box 2 is the data control, not an ablation. It is watched for the same signals as box 1: the labeller's Q agreement with measured outcomes and residual label gain on standard resets, residual rms and saturation, and training success against the in-distribution plan run's curve (0.8 window mean); its 160k standard-protocol result is compared with that run's 79 at 160k. Its held-out LIBERO-Plus number against box 1's is the result.
+4. Layout perturbations are trained on box 1 through the 26 stored training variants (a third of episodes) and evaluated on both boxes through the 13 held-out layout variants; procedural layout generation stays out of scope because the distractor variants need new scene objects and every policy already sits within 23–28 of 48 on this axis, against SFT's 25.
 
 ## Out of scope
 
