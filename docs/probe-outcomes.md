@@ -36,7 +36,8 @@ One line per measurement: what was run, the number, what it decided. Details and
 - Labels over 9,142 chunks: across-plan spread 0.014, within-plan 0.008, mean 0.07, success jumps in 2%; the same on all three reset kinds. The executed plan sits 0.003 above the plan mean; it is the label's best plan 28.5% of the time (chance 25).
 - Live V_plan vs labels, held out: correlation 0.94 with the label value, agreement 0.33 with the label's best plan, captured 0.60; split-half 0.70; agreement flat 0.32–0.36 across the run.
 - Live Q vs the same labels: agreement 0.28, captured −0.10. The Q-derived plan ranking is unrelated to measured plan outcomes.
-- Short-horizon label vs episode return: 0.05–0.08 correlation. Refits on labels from pooled vs structured plan features: pending.
+- Short-horizon label vs episode return: 0.05–0.08 correlation.
+- Fresh five-head refits on the labels (3,000 steps, held out by time): pooled plan features agreement 0.30 / captured 0.18 / correlation 0.71; structured plan features 0.28 / 0.30 / 0.71. Both below the live critic (0.33 / 0.60 / 0.94), which has had 140k steps of online updates; the refit is too weak a proxy to settle the feature question on these labels, and the within-state ordering is the hard part (plan-to-plan label differences of 0.014 against level variation an order of magnitude larger).
 
 ## Throughput and engineering facts
 
