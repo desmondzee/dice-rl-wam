@@ -42,3 +42,12 @@ Three focused surveys run before designing the post-V_plan recipe. Numbers were 
 4. Train on the perturbed distribution with online rollouts from varied poses, with a difficulty curriculum; training on other axes does not transfer to arm pose.
 5. Keep sparse success as the terminal term; potential-based shaping on object-state potentials is policy-invariant and cheap; avoid raw distance rewards.
 6. Critic hygiene: LayerNorm, 5–10 critics, UTD 5–20, 50/50 batches, critic warm-up on base rollouts before the actor moves.
+
+## 4. Scheduling the residual bound (follow-up search, 2026-10-19)
+
+- No residual-RL paper reports a fixed-versus-growing bound ablation. Policy Decorator (2412.13630) fixes α per task and schedules only the probability of applying the residual (linear 0 → 1 over H steps); its α sweeps give similar success over 0.1–0.5 (PushChair) and 0.03–0.1 (StackCube) with sample efficiency varying; advice: set α near the demonstration action scale. ResiP (2407.16677): fixed 0.1, sweep 0.01–1.0 "very similar", 0.2 slightly better. DAWN (2602.10539): fixed λ 0.05–0.3, and Appendix F.2 shows the probability ramp becomes unnecessary once value learning is stabilised (LayerNorm critics): DAWN without a schedule beats Policy Decorator with its tuned one. PLD (2511.00091) says ξ is "tuned by a scheduler" but never gives the schedule; its only finding is qualitative (large ξ early hurts, small ξ caps the asymptote).
+- Gating schedules with ablations: uncertainty-gated residual (2506.17564) decays the gate threshold exponentially and a constant threshold "restricts the residual from escaping the base"; DexFlyWheel (2509.23829) ramps the probability after 1,500 steps.
+- The closest analogue with numbers is the decaying BC weight in offline-to-online TD3+BC (Beeson & Montana, 2211.11802): relaxing the constraint beats a fixed one on sub-optimal data (hopper-medium 100.1 vs 56.6) but relaxing from step 0 collapses learning; Zhao et al. (2210.13846) adapt the BC weight by a controller on returns because no fixed weight suits every task.
+- Exploration-noise curricula (2206.03787) decrease noise over training; growing noise was not tested.
+
+Verdict: a growing magnitude bound is unsupported; fixed bounds are insensitive over a broad range; the evidenced schedules are on the probability or gate of applying the residual, and a base-only warm-up before the actor moves. Decision: fixed α at the demonstration action scale, a probability ramp as insurance, critic warm-up first.
