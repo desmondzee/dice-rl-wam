@@ -136,6 +136,35 @@ def test_config_feature_fields_enter_the_fingerprint_for_both_runs():
             RLConfig(**bad).validate()
 
 
+def test_config_bounded_recipe_fields_enter_the_fingerprint_only_when_set():
+    base = RLConfig().validate().protocol()
+    config = RLConfig(task_ids=(9,), residual_input="base", proprio=True, state_features="struct", residual_bound=0.3, bc_weight=0.0,
+                      actor_warmup_episodes=50, residual_ramp_steps=50_000, shaping=True, privileged_critic=True, standardize_features=True,
+                      update_every_chunks=1, rlpd_start=0.5, rlpd_end=0.5, diagnostic_label_every=10,
+                      procedural_robot_init={"cap_start": 0.3}).validate()
+    protocol = config.protocol()
+    assert len(base) == 78 and "residual_bound" not in base and base["beta"] == 100.0 and base["update_every_chunks"] == 4
+    assert protocol["residual_bound"] == 0.3 and protocol["beta"] == 0.0 and protocol["bc_filter"] == "off"
+    assert (protocol["actor_warmup_episodes"], protocol["residual_ramp_steps"]) == (50, 50_000)
+    assert protocol["reward"] == "success_plus_potential_shaping" and protocol["critic_input"] == "features_proprio_object_state"
+    assert protocol["feature_standardization"] == "expert_global_struct_per_dim_object_state"
+    assert protocol["update_every_chunks"] == 1 and protocol["diagnostic_label_every"] == 10
+    assert protocol["procedural_robot_init"] == {"magnitude_lo": 0.1, "cap_start": 0.3, "cap_end": 0.5, "trigger_success": 0.5, "trigger_window": 20}
+    assert protocol["collection_mix"] == "thirds_standard_procedural_robot_init_layout"
+    assert config.procedural()["cap_end"] == 0.5 and RLConfig().procedural() is None
+
+
+@pytest.mark.parametrize("changes", [
+    {"residual_bound": -0.1}, {"bc_weight": -1.0}, {"actor_warmup_episodes": -1}, {"residual_ramp_steps": -1},
+    {"update_every_chunks": 0}, {"diagnostic_label_every": -1}, {"procedural_robot_init": {"cap_start": 0.6}},
+    {"procedural_robot_init": {"bogus": 1}}, {"shaping": True, "proprio": False}, {"privileged_critic": True, "proprio": False},
+    {"diagnostic_label_every": 10, "proprio": False}, {"procedural_robot_init": {"cap_start": 0.3}, "task_ids": (0,)},
+])
+def test_config_rejects_invalid_bounded_recipe_values(changes):
+    with pytest.raises(ValueError):
+        RLConfig(**{"task_ids": (9,), "proprio": True, **changes}).validate()
+
+
 def test_default_protocol_is_unchanged_by_the_feature_fields():
     base = RLConfig().protocol()
     assert not {"state_features", "proprio", "plus_train", "collection_mix"} & set(base) and len(base) == 78

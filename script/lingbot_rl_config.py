@@ -6,6 +6,7 @@ from script.lingbot_eval_config import (
 )
 from script.lingbot_sft_config import MODEL_REPO, MODEL_REVISION
 
+PROCEDURAL_DEFAULTS = {"magnitude_lo": 0.1, "cap_start": 0.3, "cap_end": 0.5, "trigger_success": 0.5, "trigger_window": 20}
 PLUS_VARIANTS = {"robot_init": tuple(range(640, 682)), "layout": tuple(range(1982, 2021))}
 
 
@@ -50,6 +51,16 @@ class RLConfig:
     plan_target: str = "q"
     store_tokens: bool = False
     label_workers: int = 4
+    residual_bound: float = 0.0
+    bc_weight: float = 100.0
+    actor_warmup_episodes: int = 0
+    residual_ramp_steps: int = 0
+    shaping: bool = False
+    privileged_critic: bool = False
+    standardize_features: bool = False
+    procedural_robot_init: dict = field(default_factory=dict)
+    update_every_chunks: int = 4
+    diagnostic_label_every: int = 0
 
     def validate(self):
         validate_name(self.source_run)
@@ -97,7 +108,30 @@ class RLConfig:
             raise ValueError("store_tokens must be a bool and needs plan_candidates > 1")
         if type(self.label_workers) is not int or self.label_workers < 1:
             raise ValueError("label_workers must be a positive integer")
+        if self.residual_bound < 0 or self.bc_weight < 0:
+            raise ValueError("residual_bound and bc_weight must be non-negative")
+        if self.actor_warmup_episodes < 0 or self.residual_ramp_steps < 0 or self.diagnostic_label_every < 0:
+            raise ValueError("Warm-up, ramp, and diagnostic cadence must be non-negative")
+        if type(self.update_every_chunks) is not int or self.update_every_chunks < 1:
+            raise ValueError("update_every_chunks must be a positive integer")
+        if type(self.shaping) is not bool or type(self.privileged_critic) is not bool or type(self.standardize_features) is not bool:
+            raise ValueError("shaping, privileged_critic, and standardize_features must be bools")
+        if self.procedural_robot_init:
+            if not set(self.procedural_robot_init) <= set(PROCEDURAL_DEFAULTS):
+                raise ValueError("procedural_robot_init has unknown keys")
+            merged = self.procedural()
+            if not (0 < merged["magnitude_lo"] <= merged["cap_start"] <= merged["cap_end"] <= 0.5):
+                raise ValueError("procedural_robot_init needs 0 < magnitude_lo <= cap_start <= cap_end <= 0.5")
+            if not 0 <= merged["trigger_success"] <= 1 or merged["trigger_window"] < 1:
+                raise ValueError("procedural_robot_init trigger_success must lie in [0, 1] and trigger_window must be positive")
+            if tuple(self.task_ids) != (9,):
+                raise ValueError("procedural_robot_init is defined for task 9 only")
+        if (self.shaping or self.privileged_critic or self.diagnostic_label_every > 0 or self.procedural_robot_init) and not self.proprio:
+            raise ValueError("shaping, privileged_critic, diagnostic labels, and procedural_robot_init need proprio")
         return self
+
+    def procedural(self):
+        return {**PROCEDURAL_DEFAULTS, **self.procedural_robot_init} if self.procedural_robot_init else None
 
     @property
     def default_run_name(self):
@@ -163,7 +197,7 @@ class RLConfig:
             "eval_best_of_n": self.k_candidates,
             "mlp_hidden": [1024, 1024, 1024],
             "critic_ensemble": 10,
-            "beta": 100.0,
+            "beta": self.bc_weight,
             "epsilon": self.epsilon,
             "plan_candidates": self.plan_candidates,
             "plan_random_prob": self.plan_random_prob,
@@ -172,7 +206,7 @@ class RLConfig:
             "n_step_chunks": 3,
             "gamma": 0.99,
             "gradient_steps": 10,
-            "update_every_chunks": 4,
+            "update_every_chunks": self.update_every_chunks,
             "actor_every": 2,
             "min_online_rows": 256,
             "tau": 0.01,
@@ -196,12 +230,32 @@ class RLConfig:
             "libero_assets_repo": LIBERO_ASSETS_REPO,
             "libero_assets_revision": LIBERO_ASSETS_REVISION,
         }
-        if (self.state_features, self.proprio, bool(self.plus_train)) != ("pool", False, False):
+        if (self.state_features, self.proprio, bool(self.plus_train)) != ("pool", False, False) or self.procedural_robot_init:
             protocol.update({
                 "state_features": self.state_features,
                 "proprio": self.proprio,
                 "plus_train": {axis: [int(v) for v in variants] for axis, variants in sorted(self.plus_train.items())},
-                "collection_mix": "thirds_standard_robot_init_layout" if self.plus_train else "standard",
+                "collection_mix": (
+                    "thirds_standard_procedural_robot_init_layout" if self.procedural_robot_init
+                    else "thirds_standard_robot_init_layout" if self.plus_train else "standard"
+                ),
+            })
+        bounded = (
+            self.residual_bound, self.bc_weight, self.actor_warmup_episodes, self.residual_ramp_steps, self.shaping,
+            self.privileged_critic, self.standardize_features, bool(self.procedural_robot_init), self.update_every_chunks,
+            self.diagnostic_label_every,
+        )
+        if bounded != (0.0, 100.0, 0, 0, False, False, False, False, 4, 0):
+            protocol.update({
+                "residual_bound": self.residual_bound,
+                "bc_filter": "off" if self.bc_weight == 0 else "q_stored_minus_mc_return",
+                "actor_warmup_episodes": self.actor_warmup_episodes,
+                "residual_ramp_steps": self.residual_ramp_steps,
+                "reward": "success_plus_potential_shaping" if self.shaping else "success",
+                "critic_input": "features_proprio_object_state" if self.privileged_critic else "features",
+                "feature_standardization": "expert_global_struct_per_dim_object_state" if self.standardize_features else "none",
+                "diagnostic_label_every": self.diagnostic_label_every,
+                "procedural_robot_init": self.procedural() or {},
             })
         if self.plan_target != "q":
             protocol.update({"plan_target": self.plan_target, "plan_critic": "regression_mean_k_rollout_progress"})
