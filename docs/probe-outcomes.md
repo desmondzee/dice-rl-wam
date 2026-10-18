@@ -50,6 +50,7 @@ One line per measurement: what was run, the number, what it decided. Details and
 
 ## Throughput and engineering facts
 
+- Procedural arm poses: overriding the Panda model's `init_qpos` before a fresh environment build places the arm at the override exactly (joint error 0.0 at an l2 offset of 0.4 rad; end-effector moves 2–17 cm); the base task on the LIBERO-Plus package uses the same `MountedPanda` class. LIBERO-Plus robot-init variants are random joint offsets with l2 norm 0.1–0.3 rad at levels 1–2 and 0.2–0.5 at levels 3–5 (per-joint std 0.10–0.14).
 - GB10 is GEMM-bound (cutlass kernels about 70% of 100 TFLOPS); batching 4 plans saves 10% over looping; 0.54 s per env step (pooled run), 0.56 (structured), peak memory 38.7 / 47.8 GB; evaluation 65 s per episode SFT, 120–130 s at M = 4, 155 s on LIBERO-Plus.
 - Labelling: thread worker 0.72 s per step (interpreter lock defeats the overlap and slows the main loop); four worker processes 0.61 s per step with 0.35 s label time and 0.02 s wait per chunk.
 - A second model process beside a rollout run with its workers exceeds the 121 GB unified memory and the kernel kills the run.
