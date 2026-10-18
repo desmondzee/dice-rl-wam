@@ -569,7 +569,7 @@ git commit -m "Evaluation rebuilds the bounded actor and the deployable critic f
 - Test: `bash -n brev/train.sh`; `tests/test_lingbot_rl.py` test that both presets validate through `config_from_dict` and produce the spec's protocol values
 
 **Interfaces:**
-- Produces: `brev/recipes/bounded-ood.json` = `{"residual_input": "base", "proprio": true, "state_features": "struct", "plan_candidates": 1, "online_env_steps": 240000, "selection_warmup_steps": 20000, "residual_bound": 0.3, "bc_weight": 0.0, "actor_warmup_episodes": 50, "residual_ramp_steps": 50000, "shaping": true, "privileged_critic": true, "standardize_features": true, "update_every_chunks": 1, "rlpd_start": 0.5, "rlpd_end": 0.5, "diagnostic_label_every": 10, "label_workers": 4, "procedural_robot_init": {}}` with `plus_train` filled by the launcher from `plus_train_variants()`; `bounded-std.json` identical minus `plus_train`, `procedural_robot_init`; `train.sh ... --recipe bounded-ood` (`--plus` implied by the preset carrying `procedural_robot_init`).
+- Produces: `brev/recipes/bounded-ood.json` = `{"residual_input": "base", "proprio": true, "state_features": "struct", "plan_candidates": 1, "online_env_steps": 320000, "checkpoint_every": 80000, "selection_warmup_steps": 20000, "residual_bound": 0.3, "bc_weight": 0.0, "actor_warmup_episodes": 50, "residual_ramp_steps": 50000, "shaping": true, "privileged_critic": true, "standardize_features": true, "update_every_chunks": 1, "rlpd_start": 0.5, "rlpd_end": 0.5, "diagnostic_label_every": 10, "label_workers": 4, "procedural_robot_init": {}}` with `plus_train` filled by the launcher from `plus_train_variants()`; `bounded-std.json` identical minus `plus_train`, `procedural_robot_init`; `train.sh ... --recipe bounded-ood` (`--plus` implied by the preset carrying `procedural_robot_init`).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -584,7 +584,7 @@ def test_recipe_presets_validate_and_pin_the_spec_values(name, mix):
     assert (protocol["residual_bound"], protocol["beta"], protocol["bc_filter"]) == (0.3, 0.0, "off")
     assert (protocol["actor_warmup_episodes"], protocol["residual_ramp_steps"], protocol["update_every_chunks"]) == (50, 50_000, 1)
     assert protocol["reward"] == "success_plus_potential_shaping" and protocol["critic_input"] == "features_proprio_object_state"
-    assert protocol["plan_candidates"] == 1 and protocol["online_env_steps"] == 240_000 and protocol["collection_mix"] == mix
+    assert protocol["plan_candidates"] == 1 and (protocol["online_env_steps"], protocol["checkpoint_every"]) == (320_000, 80_000) and protocol["collection_mix"] == mix
     assert (protocol["rlpd_start"], protocol["rlpd_end"], protocol["diagnostic_label_every"]) == (0.5, 0.5, 10)
 ```
 
@@ -631,7 +631,8 @@ Gates (read from `train.log`, `settings.json`, the resume buffer):
 - kind-1 episodes: logged `pose_offset_l2` in [0.1, 0.3] and the environment's joints after reset equal base + offset to 1e-6 (one assertion in the smoke script using the override's current offset);
 - `standardize` present in `settings.json`; the privileged critic's first-layer width 6144 + 8 + 22 + 480 and the deployable critic's 6144 + 8 + 480; `select_agreement` logged every chunk;
 - diagnostic labels on every 10th chunk; shadow fidelity gates as before;
-- seconds per env step ≤ 0.5; peak GPU memory < 60 GB.
+- seconds per env step ≤ 0.5; peak GPU memory < 60 GB;
+- the smoke's W&B run (project `dice-lingbot-va-rl`) shows the new keys and the config carries the preset values.
 
 - [ ] **Step 3: Record the smoke numbers in `docs/heldout-results.md` (new subsection) and commit**
 
@@ -642,7 +643,7 @@ git commit -m "Smoke results for the bounded residual recipe on both boxes."
 
 - [ ] **Step 4: Launch (user's go required)**
 
-`brev/train.sh dice-t9-ood-bounded 9 --recipe bounded-ood` on Jarvis, `brev/train.sh dice-t9-std-bounded 9 --recipe bounded-std` on Watson; start a 30-minute watcher for crashes, checkpoints, `residual_saturation`, `q_label_agreement` and `pose_cap`.
+`brev/train.sh dice-t9-ood-bounded 9 --recipe bounded-ood --max-env-steps 240000` on Jarvis, `brev/train.sh dice-t9-std-bounded 9 --recipe bounded-std --max-env-steps 240000` on Watson (resume with `--resume`, extend to 320k by raising `--max-env-steps` on a resume); confirm in the W&B run that `residual_saturation`, `select_agreement`, `q_label_agreement`, `residual_label_gain`, `shaping_reward`, `pose_cap` and the per-kind keys are present; start a 30-minute watcher for crashes, checkpoints, `residual_saturation`, `q_label_agreement` and `pose_cap`.
 
 ---
 

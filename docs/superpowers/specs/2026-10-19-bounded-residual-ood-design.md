@@ -45,7 +45,7 @@ Unchanged: frozen prior, instruction conditioning, guidance 5, 10-head critic wi
 
 - Box 1 (`dice-t9-ood-bounded`): per episode draw from `np.random.default_rng([seed, episode])`: kind 0 standard reset (base task on the plus package, `init_states = False`), kind 1 procedural arm pose, kind 2 one of the 26 layout training variants with a uniform stored state. Procedural arm pose: offset d = m · u with u uniform on the unit sphere in joint space (7 dof) and m uniform in [0.1, cap]; the Panda model's `init_qpos` is overridden with base + d before the environment is built for that episode (verified: zero joint error, fresh environment per episode). Objects are sampled by the simulator under the episode seed, as for the LIBERO-Plus robot-init variants. Curriculum: cap starts at 0.3 rad (the l2 range of LIBERO-Plus levels 1–2) and rises to 0.5 rad (levels 3–5) when the trailing success over the last 20 procedural episodes reaches 0.5; it never decreases. The cap and every episode's offset are logged.
 - Box 2 (`dice-t9-std-bounded`): standard resets only, same recipe, same seed.
-- Budget 240k env steps each, checkpoints every 80k, resume every 10 episodes. Expected rate about 0.45 s per env step at M = 1 (the four-plan runs cost 0.54–0.58), so about 30 h per run.
+- Budget 320k env steps in the recipe so that a resume or an extension past 240k keeps the protocol fingerprint; launched with a 240k step cap; checkpoints every 80k; resume every 10 episodes. Expected rate about 0.45 s per env step at M = 1 (the four-plan runs cost 0.54–0.58), so about 30 h per run.
 
 ## Diagnostics
 
