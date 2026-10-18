@@ -39,6 +39,11 @@ One line per measurement: what was run, the number, what it decided. Details and
 - Short-horizon label vs episode return: 0.05–0.08 correlation.
 - Fresh five-head refits on the labels (3,000 steps, held out by time): pooled plan features agreement 0.30 / captured 0.18 / correlation 0.71; structured plan features 0.28 / 0.30 / 0.71. Both below the live critic (0.33 / 0.60 / 0.94), which has had 140k steps of online updates; the refit is too weak a proxy to settle the feature question on these labels, and the within-state ordering is the hard part (plan-to-plan label differences of 0.014 against level variation an order of magnitude larger).
 
+## Structured features in the live model (run B, 240k)
+
+- Run B's actor is inert: `residual_rms` 0.0015, `q_advantage` 0.0002, `actor_grad_norm` 0.017 at 240k against 0.02 / 0.03–0.05 / 0.5–0.7 in every pooled run. The structured state input has row norm 39 against 1.5 for the pooled vector (plan input 138 against 8.4); the critic's dQ/da median is 8× smaller (0.0028 vs 0.0235) and the first-layer action columns never left initialisation. Decision: any structured-feature recipe standardises the inputs to the pooled scale before the critic; run B measures structured features for the plan critic and Q selection only, not for the residual.
+- Training-episode success (mixed reset kinds, 40k windows) is flat after 120k in both runs: counterfactual 0.38–0.51, run B 0.51–0.53; the counterfactual run's executed-plan label advantage is 0.001–0.006 against an across-plan spread of 0.007–0.017.
+
 ## Throughput and engineering facts
 
 - GB10 is GEMM-bound (cutlass kernels about 70% of 100 TFLOPS); batching 4 plans saves 10% over looping; 0.54 s per env step (pooled run), 0.56 (structured), peak memory 38.7 / 47.8 GB; evaluation 65 s per episode SFT, 120–130 s at M = 4, 155 s on LIBERO-Plus.
