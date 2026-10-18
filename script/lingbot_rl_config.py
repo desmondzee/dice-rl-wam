@@ -124,8 +124,8 @@ class RLConfig:
                 raise ValueError("procedural_robot_init needs 0 < magnitude_lo <= cap_start <= cap_end <= 0.5")
             if not 0 <= merged["trigger_success"] <= 1 or merged["trigger_window"] < 1:
                 raise ValueError("procedural_robot_init trigger_success must lie in [0, 1] and trigger_window must be positive")
-            if tuple(self.task_ids) != (9,):
-                raise ValueError("procedural_robot_init is defined for task 9 only")
+            if tuple(self.task_ids) != (9,) or not self.plus_train:
+                raise ValueError("procedural_robot_init is defined for task 9 with plus_train")
         if (self.shaping or self.privileged_critic or self.diagnostic_label_every > 0 or self.procedural_robot_init) and not self.proprio:
             raise ValueError("shaping, privileged_critic, diagnostic labels, and procedural_robot_init need proprio")
         return self
@@ -255,8 +255,9 @@ class RLConfig:
                 "critic_input": "features_proprio_object_state" if self.privileged_critic else "features",
                 "feature_standardization": "expert_global_struct_per_dim_object_state" if self.standardize_features else "none",
                 "diagnostic_label_every": self.diagnostic_label_every,
-                "procedural_robot_init": self.procedural() or {},
             })
+            if self.procedural_robot_init:
+                protocol["procedural_robot_init"] = self.procedural()
         if self.plan_target != "q":
             protocol.update({"plan_target": self.plan_target, "plan_critic": "regression_mean_k_rollout_progress"})
         return protocol

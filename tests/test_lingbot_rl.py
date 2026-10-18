@@ -15,7 +15,7 @@ import torch
 from script.lingbot_eval import decode_action
 from script.lingbot_eval_config import EvalConfig, episode_plan
 from script.lingbot_rl_buffer import ChunkReplay
-from script.lingbot_rl_config import RLConfig, config_from_dict
+from script.lingbot_rl_config import RLConfig, config_from_dict, plus_train_variants
 from script.lingbot_rl_model import (
     ACTION_DIM, ACTOR_EVERY, ADAM_LR, BATCH, BETA, ENSEMBLE, EPSILON, GAMMA, GRADIENT_STEPS,
     HIDDEN, HORIZON, K_CANDIDATES, LR_MIN, MAX_GRAD_NORM, N_STEP_CHUNKS, STATE_DIM, TAU,
@@ -118,7 +118,7 @@ def test_config_plan_fields_enter_the_fingerprint():
 
 
 def test_config_feature_fields_enter_the_fingerprint_for_both_runs():
-    from script.lingbot_rl_config import plus_split, plus_train_variants
+    from script.lingbot_rl_config import plus_split
     base = RLConfig().protocol()
     assert plus_split("robot_init")[1] == tuple(range(642, 682, 3)) and plus_split("layout")[1] == tuple(range(1984, 2021, 3))
     train = plus_train_variants()
@@ -141,8 +141,11 @@ def test_config_bounded_recipe_fields_enter_the_fingerprint_only_when_set():
     config = RLConfig(task_ids=(9,), residual_input="base", proprio=True, state_features="struct", residual_bound=0.3, bc_weight=0.0,
                       actor_warmup_episodes=50, residual_ramp_steps=50_000, shaping=True, privileged_critic=True, standardize_features=True,
                       update_every_chunks=1, rlpd_start=0.5, rlpd_end=0.5, diagnostic_label_every=10,
-                      procedural_robot_init={"cap_start": 0.3}).validate()
+                      plus_train=plus_train_variants(), procedural_robot_init={"cap_start": 0.3}).validate()
     protocol = config.protocol()
+    no_procedural = replace(config, procedural_robot_init={}).protocol()
+    assert "procedural_robot_init" not in no_procedural and no_procedural["collection_mix"] == "thirds_standard_robot_init_layout"
+    assert no_procedural["residual_bound"] == 0.3
     assert len(base) == 78 and "residual_bound" not in base and base["beta"] == 100.0 and base["update_every_chunks"] == 4
     assert protocol["residual_bound"] == 0.3 and protocol["beta"] == 0.0 and protocol["bc_filter"] == "off"
     assert (protocol["actor_warmup_episodes"], protocol["residual_ramp_steps"]) == (50, 50_000)
@@ -158,11 +161,27 @@ def test_config_bounded_recipe_fields_enter_the_fingerprint_only_when_set():
     {"residual_bound": -0.1}, {"bc_weight": -1.0}, {"actor_warmup_episodes": -1}, {"residual_ramp_steps": -1},
     {"update_every_chunks": 0}, {"diagnostic_label_every": -1}, {"procedural_robot_init": {"cap_start": 0.6}},
     {"procedural_robot_init": {"bogus": 1}}, {"shaping": True, "proprio": False}, {"privileged_critic": True, "proprio": False},
-    {"diagnostic_label_every": 10, "proprio": False}, {"procedural_robot_init": {"cap_start": 0.3}, "task_ids": (0,)},
+    {"diagnostic_label_every": 10, "proprio": False}, {"procedural_robot_init": {"cap_start": 0.3}},
+    {"procedural_robot_init": {"cap_start": 0.3}, "plus_train": plus_train_variants(), "task_ids": (0,)},
 ])
 def test_config_rejects_invalid_bounded_recipe_values(changes):
     with pytest.raises(ValueError):
         RLConfig(**{"task_ids": (9,), "proprio": True, **changes}).validate()
+
+
+@pytest.mark.parametrize("changes", [
+    {"residual_bound": 0.3}, {"bc_weight": 50.0}, {"actor_warmup_episodes": 1}, {"residual_ramp_steps": 1},
+    {"shaping": True, "proprio": True}, {"privileged_critic": True, "proprio": True}, {"standardize_features": True},
+    {"update_every_chunks": 1}, {"diagnostic_label_every": 1, "proprio": True},
+])
+def test_config_each_bounded_recipe_field_alone_adds_exactly_the_new_keys(changes):
+    new = {"residual_bound", "bc_filter", "actor_warmup_episodes", "residual_ramp_steps", "reward", "critic_input",
+           "feature_standardization", "diagnostic_label_every"}
+    base = RLConfig(proprio=changes.get("proprio", False)).protocol()
+    protocol = RLConfig(**changes).protocol()
+    assert set(protocol) == set(base) | new
+    if "bc_weight" in changes:
+        assert protocol["beta"] == 50.0 and protocol["bc_filter"] == "q_stored_minus_mc_return"
 
 
 def test_default_protocol_is_unchanged_by_the_feature_fields():
