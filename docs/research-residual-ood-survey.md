@@ -51,3 +51,12 @@ Three focused surveys run before designing the post-V_plan recipe. Numbers were 
 - Exploration-noise curricula (2206.03787) decrease noise over training; growing noise was not tested.
 
 Verdict: a growing magnitude bound is unsupported; fixed bounds are insensitive over a broad range; the evidenced schedules are on the probability or gate of applying the residual, and a base-only warm-up before the actor moves. Decision: fixed α at the demonstration action scale, a probability ramp as insurance, critic warm-up first.
+
+## 5. Deployable critics after privileged training (follow-up search, 2026-10-19)
+
+- No published result compares a distilled observation-only critic against the privileged one for action ranking, and no paper regresses an observation Q on the same TD targets as a privileged Q and reports the ranking gap.
+- Every value function actually used for test-time selection was trained on deployable inputs from the start: V-GPS (2410.13816; image + language + action, Cal-QL offline; Octo-small real 0.24 → 0.44 at K = 50, SIMPLER K ablation base 0.49, K = 10 0.77, 50 0.84, 100 0.63), DiVeR (2610.04933; verifier on the VLA's action-expert representation, trajectory success labels; LIBERO-Long π0 83.5 → 89.3, π0.5 93.5 → 97.5 at N = 32), SVA (2607.03751; Q on observation + language + history + candidate, no privileged features at deployment; SimplerEnv π0 38.5 → 50.7), VGAS (2602.07399; LIBERO 39.8 → 49.0), DICE-RL (2603.10263; Q on frozen encoder latents + chunk, best-of-N over K latents, gain reported in a figure only).
+- The one privileged-to-observation value transfer used for selection is SimDist (2603.15759): an observation value head regressed onto privileged sim value targets, frozen, then used to score action candidates; no from-scratch ablation.
+- Asymmetric-critic papers (ReCoVLA 2606.09630, ResiP 2407.16677, Pinto 2017, SCORE 2606.27475) deploy the actor alone and never ablate best-of-N with the critic. DCRL (NeurIPS 2024) combines an oracle critic and a partial-observation critic for the actor update only.
+
+Verdict: the critic that selects at test time must be trained on deployable inputs; the best-evidenced construction is a second, observation-only Q regressed onto the privileged critic's TD targets, used for selection in training and at test time so the two match, with the privileged critic driving the actor and the targets. The deployable-versus-privileged ranking gap is unpublished, so we measure it online.

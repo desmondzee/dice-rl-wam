@@ -16,7 +16,7 @@ Make the residual actor, not plan selection, the object of the method, and measu
 | residual | unbounded, BC weight 100, DICE filter at ε = −0.3; settles at 8% of action rms | α·tanh(net), α = 0.3 in normalised action units (1.2 action rms), BC weight 0, filter off | Policy Decorator ablation (bound essential, set near demo action scale), PLD (clip 0.5, no BC term, 97 on LIBERO), fixed-bound sweeps insensitive over 0.1–0.5 |
 | residual schedule | none | actor frozen and residual off for the first 50 episodes; then applied per chunk with probability min((steps − warm-up) / 50k, 1) | Silver critic burn-in, PLD 100-episode warm-up, Policy Decorator ramp (collapse when too short) |
 | actor inputs | pooled 3072 + proprio 8 + base chunk | structured means (2 × 3072) standardised + proprio 8 + base chunk | pooled vector per-element spread 0.028; run B's actor died on unstandardised inputs (norm 39 vs 1.5) |
-| critic inputs | same as actor + action | actor's standardised features + proprio + object state (22 floats) + action | asymmetric critic (ReCoVLA, ResiP, Scaffolder); critic sees the actor's observation too (Baisero & Amato) |
+| critic inputs | same as actor + action | two critics: a privileged Q on the actor's standardised features + proprio + object state (22 floats) + action, driving the actor and the TD targets; a deployable Q on the actor's features + proprio + action, regressed onto the same targets, used for candidate selection in training and at test time | asymmetric critic (ReCoVLA, ResiP, Scaffolder); critic sees the actor's observation too (Baisero & Amato); every selection critic in use was trained on deployable inputs (V-GPS, DiVeR, SVA, DICE-RL); SimDist regresses an observation value head onto privileged targets |
 | reward | sparse success per chunk | sparse success + γΦ(s') − Φ(s), Φ the calibrated progress potential without the success term | Ng, Harada, Russell 1999; our V_plan tracked Φ's level at 0.94 while sparse Q had no action signal |
 | updates | 10 gradient steps every 4 chunks | 10 gradient steps every chunk | RLPD / IBRL update-to-data 5–20; critic is an MLP, chunk rollout is 8 s |
 | expert ratio | 0.9 → 0.1 over 208k steps | 0.5 constant | RLPD symmetric sampling |
@@ -35,11 +35,11 @@ Unchanged: frozen prior, instruction conditioning, guidance 5, 10-head critic wi
 
 ## Critic
 
-- Input: [standardised structured features, proprio, object state, action]. Object state is the 22-float record the buffer already stores (three bodies' position and w-x-y-z quaternion, door joint), standardised with expert statistics from the same calibration pass. The next-state record is captured at the chunk boundary, as `proprio_next` is now.
-- Target: r + γ³ · min-over-heads Q_target(s', a') over the 3-chunk window with a' = base candidates of s' plus the current actor's residual, as now, plus the shaping term folded into r.
-- Reward per chunk: `success` (1 on the first success) + γΦ(s_after) − Φ(s_before), where Φ(s) = −‖mug − microwave‖ + 1[inside] + (1 − door_open) · 1[inside] from `script/lingbot_rl_progress.py` with the success term removed. Φ at the terminal transition uses the real state; the telescoping sum over an episode is Φ(s_T)·γ-weighted minus Φ(s_0), a per-episode constant. `shaping = True` on both boxes.
+- Two 10-head ensembles with the same architecture. The privileged critic Q_p takes [standardised structured features, proprio, standardised object state, action]; the deployable critic Q_d takes [standardised structured features, proprio, action]. Object state is the 22-float record the buffer already stores (three bodies' position and w-x-y-z quaternion, door joint), standardised per dimension with expert statistics; the record after each chunk is captured as `object_state_next`.
+- Targets: r + γ³ · min-over-heads Q_p,target(s', a') over the 3-chunk window with a' = base candidates of s' plus the current actor's residual, as now, with the shaping term folded into r. Both critics regress onto this target; only Q_p has a target network. The actor maximises Q_p. Candidate selection (K = 4) uses Q_d in training and at test time, so the collected data reflects the deployed selector.
+- Reward per chunk: `success` (1 on the first success) + γΦ(s_after) − Φ(s_before), where Φ(s) = −‖mug − microwave‖ + 1[inside] + (1 − door_open) · 1[inside] from `script/lingbot_rl_progress.py` with the success term removed. Φ at the terminal transition uses the real state; the telescoping sum over an episode is a per-episode constant. `shaping = True` on both boxes. Expert rows get the same shaping from their replayed object states.
 - Updates: `gradient_steps` = 10 per chunk, `update_every_chunks` = 1, `rlpd_start = rlpd_end = 0.5`.
-- Warm-up Q quality gate (logged, not enforced): at the end of the warm-up, Q's agreement with measured outcomes on the labelled chunks must exceed chance (0.25) before the ramp starts; if not, the smoke failed and the run is stopped by hand.
+- Online checks: `select_agreement` (Q_d's and Q_p's argmax over the K candidates agree) every chunk; the labeller every 10th chunk scores the executed candidates and the base candidates, giving Q_d's agreement with measured outcomes and the residual's measured gain. The deployable-versus-privileged ranking gap is unpublished, so these two numbers are the run's own evidence.
 
 ## Data
 
@@ -64,7 +64,7 @@ Unchanged: frozen prior, instruction conditioning, guidance 5, 10-head critic wi
 - Residual: zero during warm-up; after a forced ramp start, rms within [0.02, 0.25] and saturation rate below 0.5.
 - Shaping: per-episode sum of shaping rewards equals Φ(s_T)-weighted minus Φ(s_0) to 1e-4; Φ(s_0) matches the calibration's `phi_initial` on standard resets.
 - Procedural pose: the arm's joint offset after reset equals the drawn offset to 1e-6; eef position differs from the base pose.
-- Critic input width 2 × 3072 + 8 + 22 + 480; standardised feature norm of order sqrt(6144) ≈ 78 (unit per element), not 39 unstandardised.
+- Privileged critic input width 2 × 3072 + 8 + 22 + 480 and deployable 2 × 3072 + 8 + 480; standardised feature norm of order sqrt(6144) ≈ 78 (unit per element), not 39 unstandardised.
 - Labeller: diagnostic labels present for every 10th chunk; shadow fidelity gates as before.
 - Throughput ≤ 0.5 s per env step; peak GPU memory below 60 GB.
 
@@ -73,8 +73,9 @@ Unchanged: frozen prior, instruction conditioning, guidance 5, 10-head critic wi
 1. Bound alone: the BC term and the DICE overestimation filter are dropped, as in Policy Decorator and PLD. What stays of DICE-RL: the frozen generative base, K noise candidates per chunk with the residual applied to each and Q choosing the executed one, the 10-head critic with the min target, n-step TD on a replay mixed with expert rows, and the actor maximising Q over the candidates. The hard bound replaces the BC penalty and filter as the constraint that keeps the residual near the base.
 2. α = 0.3 (1.2 action rms), inside the range the fixed-bound sweeps found insensitive.
 3. Box 2 is the data control, not an ablation. It is watched for the same signals as box 1: the labeller's Q agreement with measured outcomes and residual label gain on standard resets, residual rms and saturation, and training success against the in-distribution plan run's curve (0.8 window mean); its 160k standard-protocol result is compared with that run's 79 at 160k. Its held-out LIBERO-Plus number against box 1's is the result.
-4. Layout perturbations are trained on box 1 through the 26 stored training variants (a third of episodes) and evaluated on both boxes through the 13 held-out layout variants; procedural layout generation stays out of scope because the distractor variants need new scene objects and every policy already sits within 23–28 of 48 on this axis, against SFT's 25.
+4. Test-time selection uses the deployable critic only; the privileged critic never leaves training (reviewed 2026-10-19 after the deployable-critic survey, section 5 of the survey doc).
+5. Layout perturbations are trained on box 1 through the 26 stored training variants (a third of episodes) and evaluated on both boxes through the 13 held-out layout variants; procedural layout generation stays out of scope because the distractor variants need new scene objects and every policy already sits within 23–28 of 48 on this axis, against SFT's 25.
 
 ## Out of scope
 
-LIBERO-90, other tasks, noise-space actors, token encoders, guidance changes, layout procedural generation (stored variants only), real-robot deployment of the critic (it is privileged by design; the actor is not).
+LIBERO-90, other tasks, noise-space actors, token encoders, guidance changes, procedural layout generation (stored variants only), real-robot deployment.
