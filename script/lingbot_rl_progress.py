@@ -13,13 +13,21 @@ def joint_value(state, layout, name):
     return float(state[7 * len(layout["bodies"]) + layout["joints"].index(name)])
 
 
-def phi(calibration, layout, state, success):
+def phi_shape(calibration, layout, state):
     distance = float(np.linalg.norm(
         body_position(state, layout, calibration["mug"]) - body_position(state, layout, calibration["microwave"])))
     inside = float(distance < INSIDE_RADIUS)
     door_open = (joint_value(state, layout, calibration["door"]) - calibration["door_closed"]) / (
         calibration["door_open"] - calibration["door_closed"])
-    return -distance + inside + (1.0 - door_open) * inside + 2.0 * float(success)
+    return -distance + inside + (1.0 - door_open) * inside
+
+
+def phi(calibration, layout, state, success):
+    return phi_shape(calibration, layout, state) + 2.0 * float(success)
+
+
+def shaping_reward(calibration, layout, before, after, gamma):
+    return gamma * phi_shape(calibration, layout, after) - phi_shape(calibration, layout, before)
 
 
 def calibrate(task_id, inner, layout, initial):

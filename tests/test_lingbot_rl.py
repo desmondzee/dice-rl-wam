@@ -204,6 +204,31 @@ def test_config_plan_target_enters_the_fingerprint_only_for_rollout():
             RLConfig(**bad).validate()
 
 
+def test_shaping_reward_telescopes_and_ignores_success():
+    from script.lingbot_rl_progress import phi, phi_shape, shaping_reward
+    layout = {"bodies": ["microwave_1", "white_yellow_mug_1"], "joints": ["microwave_1_microjoint"]}
+    calibration = {"mug": "white_yellow_mug_1", "microwave": "microwave_1", "door": "microwave_1_microjoint", "door_closed": 0.0, "door_open": -2.0}
+    far = np.array([0, 0, 0, 1, 0, 0, 0, 0.5, 0, 0, 1, 0, 0, 0, -2.0], np.float32)
+    near = np.array([0, 0, 0, 1, 0, 0, 0, 0.05, 0, 0, 1, 0, 0, 0, 0.0], np.float32)
+    assert phi_shape(calibration, layout, near) == phi(calibration, layout, near, False) == pytest.approx(-0.05 + 1.0 + 1.0)
+    steps = [far, near, far]
+    total = sum(shaping_reward(calibration, layout, steps[i], steps[i + 1], 0.99) for i in range(2))
+    assert total == pytest.approx((0.99 - 1) * (phi_shape(calibration, layout, near) + phi_shape(calibration, layout, far)))
+    assert shaping_reward(calibration, layout, far, near, 1.0) == pytest.approx(phi_shape(calibration, layout, near) - phi_shape(calibration, layout, far))
+
+
+def test_expert_standardization_uses_expert_rows_only_and_floors_the_std():
+    from script.lingbot_rl_standardize import expert_standardization
+    rows = [{"is_expert": np.float32(1.0), "state_struct": torch.full((2, STATE_DIM), 0.5, dtype=torch.bfloat16), "object_state": np.array([1.0, 5.0], np.float32)},
+            {"is_expert": np.float32(1.0), "state_struct": torch.full((2, STATE_DIM), 1.5, dtype=torch.bfloat16), "object_state": np.array([3.0, 5.0], np.float32)},
+            {"is_expert": np.float32(0.0), "state_struct": torch.full((2, STATE_DIM), 9.0, dtype=torch.bfloat16), "object_state": np.array([9.0, 9.0], np.float32)}]
+    stats = expert_standardization(rows)
+    assert stats["struct_mean"] == pytest.approx(1.0) and stats["struct_std"] == pytest.approx(0.5)
+    assert stats["object_mean"].tolist() == [2.0, 5.0] and stats["object_std"].tolist() == pytest.approx([1.0, 1e-3])
+    with pytest.raises(ValueError):
+        expert_standardization([{**rows[0], "object_state": np.zeros(0, np.float32)}])
+
+
 def test_progress_rewards_approach_inside_and_closing_and_calibrates_the_door_from_the_rest_limit():
     from script.lingbot_rl_progress import INSIDE_RADIUS, calibrate, phi, progress
     layout = {"bodies": ["microwave_1", "porcelain_mug_1", "white_yellow_mug_1"], "joints": ["microwave_1_microjoint"], "body_quaternion": "wxyz"}
