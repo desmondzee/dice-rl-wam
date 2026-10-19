@@ -25,7 +25,7 @@ def unpack_snapshot(packed, sim):
     return {**packed, "state": type(sim.get_state())(time=time, qpos=qpos, qvel=qvel)}
 
 
-def _serve(connection, spec, norm, layout, calibration, shadow_factory):
+def _serve(connection, lock, spec, norm, layout, calibration, shadow_factory):
     os.environ.setdefault("MUJOCO_EGL_DEVICE_ID", "0")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     import torch
@@ -42,7 +42,8 @@ def _serve(connection, spec, norm, layout, calibration, shadow_factory):
                 if shadow is not None:
                     shadow.close()
                 if suite is None:
-                    suite = build_suite(spec)
+                    with lock:
+                        suite = build_suite(spec)
                 shadow, cached = None, None
                 shadow = (shadow_factory or make_shadow)(env_task, suite, init_states, plus, seed)
                 cached = key
@@ -84,10 +85,11 @@ class LabelHandle:
 class LabelPool:
     def __init__(self, workers, spec, norm, layout, calibration, shadow_factory=None):
         context = multiprocessing.get_context("spawn")
+        self.lock = context.Lock()
         self.connections, self.processes = [], []
         for _ in range(int(workers)):
             parent, child = context.Pipe()
-            process = context.Process(target=_serve, args=(child, spec, norm, layout, calibration, shadow_factory), daemon=True)
+            process = context.Process(target=_serve, args=(child, self.lock, spec, norm, layout, calibration, shadow_factory), daemon=True)
             process.start()
             child.close()
             self.connections.append(parent)

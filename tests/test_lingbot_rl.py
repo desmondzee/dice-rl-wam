@@ -1719,6 +1719,36 @@ def test_label_pool_matches_label_plans_across_two_workers_and_propagates_the_mi
     assert all(not process.is_alive() for process in pool.processes)
 
 
+def test_label_worker_builds_the_suite_while_holding_the_shared_lock(monkeypatch):
+    import script.lingbot_rl_label as label
+
+    class Lock:
+        held = False
+
+        def __enter__(self):
+            Lock.held = True
+
+        def __exit__(self, *exc):
+            Lock.held = False
+
+    class Connection:
+        def __init__(self):
+            self.messages, self.sent = [(None,) * 8, None], []
+
+        def recv(self):
+            return self.messages.pop(0)
+
+        def send(self, reply):
+            self.sent.append(reply)
+
+    seen = []
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setattr(label, "build_suite", lambda spec: seen.append(Lock.held))
+    connection = Connection()
+    label._serve(connection, Lock(), None, None, None, None, lambda *args: (_ for _ in ()).throw(RuntimeError("stop")))
+    assert seen == [True] and not Lock.held and connection.sent[0][0] is False
+
+
 def test_shadow_fidelity_measures_object_pose_gaps_per_chunk_and_gates_on_them(monkeypatch):
     import script.lingbot_rl_train as train
     from script.lingbot_rl_train import make_shadow, shadow_fidelity
