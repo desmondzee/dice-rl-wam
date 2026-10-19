@@ -52,3 +52,5 @@ is seeded by `config.seed + env_steps`, which diverges with the runs' episode le
 stores MuJoCo `body_xquat` in w-x-y-z order while `proprio` carries robosuite's x-y-z-w end-effector quaternion
 converted to axis-angle (`settings.json` records `object_layout.body_quaternion`). The held-out plan over the test
 variants (`task9-heldout-plan.json`) is built after the runs are launched.
+
+Procedural arm poses (`--recipe bounded-ood`) replace the 28 training robot-init variants for that third of episodes: each episode draws a unit-sphere joint offset of l2 norm 0.1 to 0.3 rad, the cap growing to 0.5 rad on a success trigger, and applies it by overriding the Panda's initial pose. All 52 robot-init evaluation episodes are therefore unseen poses.

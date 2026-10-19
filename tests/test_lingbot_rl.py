@@ -2966,3 +2966,17 @@ def test_rank_candidates_returns_the_plan_of_the_best_candidate():
             q = float(model.critic(model.critic_state(state, pools[m:m + 1]), action))
             best = (q, m) if best is None or q > best[0] else best
     assert model.rank_candidates(state, pools, a_base, z) == best[1]
+
+
+@pytest.mark.parametrize("name, mix", [("bounded-ood", "thirds_standard_procedural_robot_init_layout"), ("bounded-std", "standard")])
+def test_recipe_presets_validate_and_pin_the_spec_values(name, mix):
+    preset = json.loads((Path("brev/recipes") / f"{name}.json").read_text())
+    if "procedural_robot_init" in preset:
+        preset["plus_train"] = {axis: list(v) for axis, v in plus_train_variants().items()}
+    protocol = config_from_dict({"task_ids": [9], **preset}).protocol()
+    assert (protocol["residual_bound"], protocol["beta"], protocol["bc_filter"]) == (0.3, 0.0, "off")
+    assert (protocol["actor_warmup_episodes"], protocol["residual_ramp_steps"], protocol["update_every_chunks"]) == (50, 50_000, 1)
+    assert protocol["reward"] == "success_plus_potential_shaping" and protocol["critic_input"] == "features_proprio_object_state"
+    assert protocol["plan_candidates"] == 1 and (protocol["online_env_steps"], protocol["checkpoint_every"]) == (320_000, 80_000) and protocol["collection_mix"] == mix
+    assert (protocol["rlpd_start"], protocol["rlpd_end"], protocol["diagnostic_label_every"]) == (0.5, 0.5, 10)
+    assert (protocol["video_steps"], protocol["action_steps"]) == (5, 10)

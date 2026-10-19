@@ -103,7 +103,7 @@ Do not run `.remote()`, cloud builds, model downloads, real rollouts, or GPU all
 
 ## LingBot DICE-RL
 
-Residual RL lives in `script/lingbot_rl_*.py` on the **eval** LeRobot environment and trains one LIBERO-10 task per run on a Brev L40S (`brev/*.sh`). Do not instantiate Hydra `DistillResidualRLModel`. Do not edit `.cache/lerobot` or `script/lingbot_eval.py` protocol fields. Local tests must not call `modal run` `.remote()`. Zero comments and docstrings in the RL scripts; keep changes lean.
+Residual RL lives in `script/lingbot_rl_*.py` on the **eval** LeRobot environment and trains one LIBERO-10 task per run on a Brev L40S (`brev/*.sh`). Do not instantiate Hydra `DistillResidualRLModel`. Do not edit `.cache/lerobot` or `script/lingbot_eval.py` protocol fields. Local tests must not call `modal run` `.remote()`. Zero comments and docstrings in the RL scripts; keep changes lean. `brev/train.sh --recipe NAME` merges `brev/recipes/NAME.json` into the run's `config.json` (`bounded-ood` adds the procedural robot-init mix and the LIBERO-Plus activation, `bounded-std` is the standard-only control) and `--config-extra JSON` merges overrides after it.
 
 Verify locally with:
 
