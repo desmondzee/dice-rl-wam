@@ -85,7 +85,8 @@ class ChunkReplay:
         for key in STORED_BF16_KEYS:
             _default(stored, key, lambda: torch.zeros(0, dtype=torch.bfloat16))
         stored.setdefault("object_state", np.zeros(0, np.float32))
-        _default(stored, "object_state_next", lambda: np.array(stored["object_state"], copy=True))
+        stored.setdefault("object_state_next", np.zeros(0, np.float32))
+        stored.setdefault("object_state_n", np.zeros(0, np.float32))
         stored.setdefault("reset_kind", 0)
         stored.setdefault("variant_index", int(stored["task_id"]))
         for key in (*BF16_KEYS, *STORED_BF16_KEYS):
@@ -95,6 +96,7 @@ class ChunkReplay:
             raise ValueError(f"Rows must carry exactly {self.plans} plans")
         stored["object_state"] = _host_float(stored["object_state"])
         stored["object_state_next"] = _host_float(stored["object_state_next"])
+        stored["object_state_n"] = _host_float(stored["object_state_n"])
         stored["reset_kind"] = int(stored["reset_kind"])
         stored["variant_index"] = int(stored["variant_index"])
         return stored
@@ -162,6 +164,7 @@ class ChunkReplay:
             row["proprio_next"] = np.array(episode[nxt]["proprio"], copy=True)
             if row["object_state_next"].size == 0:
                 row["object_state_next"] = np.array(episode[min(index + 1, length - 1)]["object_state"], copy=True)
+            row["object_state_n"] = np.array(episode[nxt]["object_state"], copy=True)
             row["state_struct_next"] = episode[nxt]["state_struct"].clone()
             row["plan_struct_next"] = episode[nxt]["plan_struct"].clone()
             row["a_next"] = np.array(episode[nxt]["a"], copy=True)

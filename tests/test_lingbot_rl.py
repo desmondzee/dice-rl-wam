@@ -858,10 +858,47 @@ def test_buffer_keeps_captured_object_state_next_and_copies_it_otherwise():
     buffer = ChunkReplay(capacity=10)
     row = {"s": np.zeros(STATE_DIM, np.float32), "z": np.zeros((HORIZON, ACTION_DIM), np.float32), "a_base": np.zeros((HORIZON, ACTION_DIM), np.float32),
            "a": np.zeros((HORIZON, ACTION_DIM), np.float32), "reward": np.float32(0), "done": np.float32(0), "task_id": 9, "n_env_actions": 12}
-    buffer.add_online({**row, "object_state": np.array([1.0], np.float32), "object_state_next": np.array([2.0], np.float32)})
-    buffer.add_online({**row, "object_state": np.array([3.0], np.float32), "done": np.float32(1)})
+    buffer.add_online({**row, "object_state": np.array([1.0], np.float32)})
+    buffer.add_online({**row, "object_state": np.array([3.0], np.float32), "object_state_next": np.array([4.0], np.float32)})
+    buffer.add_online({**row, "object_state": np.array([5.0], np.float32), "done": np.float32(1)})
+    assert buffer.rows()[0]["object_state_next"].size == 0 and buffer.rows()[0]["object_state_n"].size == 0
     buffer.finalize_episode()
-    assert buffer.rows()[0]["object_state_next"].tolist() == [2.0] and buffer.rows()[1]["object_state_next"].tolist() == [3.0]
+    assert N_STEP_CHUNKS == 3 and [r["object_state_next"].tolist() for r in buffer.rows()] == [[3.0], [4.0], [5.0]]
+    assert [r["object_state_n"].tolist() for r in buffer.rows()] == [[5.0], [5.0], [5.0]]
+
+
+def test_match_initial_state_resets_each_stored_state_once_and_picks_the_nearest():
+    from script.lingbot_rl_expert_state import match_initial_state
+
+    class Env:
+        def __init__(self):
+            self._init_states = [0.1, 0.3, 0.5]; self.init_state_id = 0; self.resets = 0
+        def reset(self, seed=None):
+            self.resets += 1
+            pos = np.array([self._init_states[self.init_state_id], 0.2, 0.3])
+            return {"robot_state": {"eef": {"pos": pos, "quat": np.array([0, 0, 0, 1.0])}, "gripper": {"qpos": np.array([0.04, -0.04])}}}, {}
+    env = Env()
+    demo = lambda x: np.array([x, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, -0.04], np.float32)
+    assert match_initial_state(env, demo(0.31)) == 1 and match_initial_state(env, demo(0.48)) == 2 and env.resets == 3
+    with pytest.raises(ValueError, match="no stored state within 0.05 of the demo: 0.200"):
+        match_initial_state(env, demo(0.7))
+
+
+def test_expert_object_states_cache_is_keyed_by_task_and_layout(tmp_path, monkeypatch):
+    import script.lingbot_rl_expert_state as module
+    calls = []
+    monkeypatch.setattr(module, "make_env", lambda task_id, suite, **kw: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(module, "replay_episode", lambda env, layout, episode, norm: calls.append(episode["episode_index"]) or {
+        "object_states": np.full((2, 1), len(calls), np.float32), "matched": 1.0})
+    episodes = [{"episode_index": 3}]
+    norm = {"q01": [-1.0] * 7, "q99": [1.0] * 7}
+    layout = {"bodies": ["mug"], "joints": ["door"]}
+    cache = tmp_path / "states.pt"
+    first = module.expert_object_states(None, 9, episodes, norm, cache, layout)
+    assert module.expert_object_states(None, 9, episodes, norm, cache, layout)[3].tolist() == first[3].tolist() == [[1.0], [1.0]]
+    module.expert_object_states(None, 9, episodes, norm, cache, {"bodies": ["bowl"], "joints": ["door"]})
+    module.expert_object_states(None, 8, episodes, norm, cache, {"bodies": ["bowl"], "joints": ["door"]})
+    assert calls == [3, 3, 3]
 
 
 def test_token_store_round_trips_chunks_rolls_shards_and_continues_ordinals_across_reopen(tmp_path, monkeypatch):

@@ -26,9 +26,11 @@ def _gap(observation, state):
 
 
 def match_initial_state(env, first_proprio):
-    gaps = [_gap(_reset(env, index), first_proprio) for index in range(len(env._init_states))]
+    if getattr(env, "_reset_proprios", None) is None:
+        env._reset_proprios = np.stack([proprio_from_observation(_reset(env, index)) for index in range(len(env._init_states))])
+    gaps = np.abs(env._reset_proprios - np.asarray(first_proprio, np.float32)[None]).max(axis=1)
     index = int(np.argmin(gaps))
-    gap = gaps[index]
+    gap = float(gaps[index])
     if gap > REPLAY_TOLERANCE:
         raise ValueError(f"no stored state within {REPLAY_TOLERANCE} of the demo: {gap:.3f}")
     return index
@@ -59,14 +61,15 @@ def replay_episode(env, layout, episode, norm):
     return {"object_states": np.stack(boundaries).astype(np.float32), "matched": matched}
 
 
-def _fingerprint(episodes, norm):
-    payload = {"episodes": sorted(int(episode["episode_index"]) for episode in episodes),
+def _fingerprint(episodes, norm, task_id, layout):
+    payload = {"episodes": sorted(int(episode["episode_index"]) for episode in episodes), "task_id": int(task_id),
+               "layout": None if layout is None else [list(layout["bodies"]), list(layout["joints"])],
                "q01": [float(x) for x in norm["q01"]], "q99": [float(x) for x in norm["q99"]]}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def expert_object_states(suite, task_id, episodes, norm, cache_path, layout):
-    fingerprint = _fingerprint(episodes, norm)
+    fingerprint = _fingerprint(episodes, norm, task_id, layout)
     cache_path = Path(cache_path) if cache_path is not None else None
     if cache_path is not None and cache_path.is_file():
         payload = torch.load(cache_path, map_location="cpu", weights_only=False)
