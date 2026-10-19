@@ -687,7 +687,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     budget = max_env_steps if smoke else config.online_env_steps
     min_online_rows = 1 if smoke else BATCH
     next_sharpen = 0
-    chunk_seconds, chunk_actions, plan_info, chunk_info = 0.0, 0, {}, {}
+    chunk_seconds, chunk_actions, plan_info, chunk_info, label_failures = 0.0, 0, {}, {}, 0
     eval_points = set(config.train_eval_schedule())
 
     def maybe_checkpoint():
@@ -808,7 +808,8 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                             if future is not None:
                                 q_mean = torch.stack(model.select_critic(critic_all, action_all, return_all=True)).mean(dim=0).reshape(plans, k).max(dim=1).values
                     if config.plan_target != "rollout" and config.diagnostic_label_every > 0 and chunks % config.diagnostic_label_every == 0:
-                        future = pool.submit(capture_live(env._env.env), sim_state, np.stack([_host_array(executed), _host_array(a_base)]),
+                        candidates = np.stack([_host_array(executed), _host_array(a_base)]) if applied else _host_array(a_base)[None]
+                        future = pool.submit(capture_live(env._env.env), sim_state, candidates,
                                              decoded["first_chunk"], sim_task, stored, bool(config.plus_train), episode_seed)
                     chosen = executed[star:star + 1]
                     policy.commit_executed(chosen.cpu(), first_chunk=decoded["first_chunk"])
@@ -841,11 +842,19 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                                        "pose_offset_l2": 0.0 if offset is None else float(np.linalg.norm(offset))})
                     plan_labels = None
                     if future is not None and config.plan_target != "rollout":
-                        labels, label_seconds = future.result()
+                        try:
+                            labels, label_seconds = future.result()
+                        except RuntimeError:
+                            labels, label_failures = None, label_failures + 1
                         future = None
-                        chunk_info.update({"residual_label_gain": float(labels[0].mean() - labels[1].mean()), "label_seconds": label_seconds})
-                        if q_d is not None:
-                            chunk_info["q_label_agreement"] = float(int(q_d.argmax()) == int(labels[0].argmax()))
+                        chunk_info["label_failures"] = label_failures
+                        if labels is not None:
+                            spread = float(labels[0].std())
+                            chunk_info.update({"label_spread": spread, "label_seconds": label_seconds})
+                            if applied:
+                                chunk_info["residual_label_gain"] = float(labels[0].mean() - labels[1].mean())
+                            if q_d is not None and spread > 1e-3:
+                                chunk_info["q_label_agreement"] = float(int(q_d.argmax()) == int(labels[0].argmax()))
                     if future is not None:
                         wait_started = time.perf_counter()
                         plan_labels, label_seconds = future.result()
@@ -918,15 +927,16 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                 env.close()
                 if offset is not None:
                     pose_override.clear()
-            if offset is not None:
-                curriculum.record(episode_success)
             name = RESET_KINDS[kind]
             run.log({
                 "env_steps": env_steps, "episode_return": episode_return,
                 "episode_success": episode_success, "episode_length": episode_length,
                 "reset_kind": kind, "variant_index": env_task,
+                "pose_offset_l2": 0.0 if offset is None else float(np.linalg.norm(offset)), "pose_cap": curriculum.cap if curriculum else 0.0,
                 **({f"episode_success_{name}": episode_success, f"episode_length_{name}": episode_length} if config.plus_train else {}),
             })
+            if offset is not None:
+                curriculum.record(episode_success)
             episodes += 1
             maybe_checkpoint()
             if episodes % 10 == 0:

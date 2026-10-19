@@ -2064,6 +2064,7 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
     assert [row["reset_kind"] for row in rows] == [0, 1, 0, 2, 1] and [row["variant_index"] for row in rows[:2]] == [9, 673]
     episode_logs = [entry for entry in out["logs"] if "reset_kind" in entry]
     assert episode_logs[1]["variant_index"] == 673 and {"episode_success_robot_init", "episode_length_robot_init"} <= set(episode_logs[1])
+    assert all(entry["pose_offset_l2"] == 0.0 and entry["pose_cap"] == 0.0 for entry in episode_logs)
     updates = [entry for entry in out["logs"] if "plan_critic_loss" in entry]
     assert updates and any(key.startswith("plan_agreement/") for key in updates[0])
     settings = json.loads((tmp_path / "settings.json").read_text())
@@ -2074,12 +2075,15 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
 
 
 class _StubLabelPool:
-    def __init__(self, calls):
+    def __init__(self, calls, fail_at=None):
         self.calls = calls
+        self.fail_at = fail_at
 
     def submit(self, snapshot, before, candidates, first_chunk, env_task, init_states, plus, seed):
         self.calls.append({"candidates": candidates, "before": before, "env_task": env_task, "init_states": init_states, "seed": seed})
-        labels = np.full(candidates.shape[:2], 0.01, np.float32)
+        labels = np.arange(np.prod(candidates.shape[:2]), dtype=np.float32).reshape(candidates.shape[:2]) * 0.01
+        if len(self.calls) - 1 == self.fail_at:
+            return SimpleNamespace(result=lambda: (_ for _ in ()).throw(RuntimeError("shadow state mismatch")), wait=lambda: None)
         return SimpleNamespace(result=lambda: (labels, 0.0), wait=lambda: None)
 
     def close(self):
@@ -2166,8 +2170,12 @@ def test_train_bounded_recipe_warms_up_ramps_shapes_and_labels(tmp_path, monkeyp
     assert logs and all("residual_ramp_p" in entry and "pose_cap" in entry and "select_agreement" in entry for entry in logs)
     assert all(entry["shaping_reward"] == 0.25 and entry["pose_cap"] == 0.3 for entry in logs)
     assert any("select_critic_loss" in entry for entry in out["logs"])
-    assert any("q_label_agreement" in entry and entry["residual_label_gain"] == 0.0 for entry in out["logs"]) and len(labels) == len(rows) // 2
-    assert all(call["candidates"].shape[:2] == (2, 4) for call in labels)
+    assert [call["candidates"].shape[:2] for call in labels] == [(1, 4), (1, 4), (2, 4)]
+    labelled = [entry for entry in logs if "label_spread" in entry]
+    assert len(labelled) == 3 and all(entry["label_spread"] == pytest.approx(float(np.std([0.0, 0.01, 0.02, 0.03]))) for entry in labelled)
+    assert all("q_label_agreement" in entry and entry["label_failures"] == 0 for entry in labelled)
+    assert not any("residual_label_gain" in entry for entry in logs if entry["residual_applied_rate"] == 0.0)
+    assert [entry["residual_label_gain"] for entry in logs if "residual_label_gain" in entry] == [pytest.approx(-0.04)]
     updates = [entry for entry in out["logs"] if "critic_loss" in entry]
     assert [entry["chunks"] for entry in updates][:2] == [2, 3] and "actor_loss" not in updates[0] and "actor_loss" in updates[1]
     kinds = [row["reset_kind"] for row in rows]
@@ -2176,6 +2184,21 @@ def test_train_bounded_recipe_warms_up_ramps_shapes_and_labels(tmp_path, monkeyp
     assert 1 in kinds and all(env["task_id"] == 2519 and env["init_states"] is False for env, kind in zip(envs, kinds) if kind == 1)
     assert out["pose_overrides"] == [mark for kind in kinds if kind == 1 for mark in ("set", None)]
     assert any(entry.get("pose_offset_l2", 0.0) > 0.0 for entry in logs) and any("pose_offset_l2/robot_init" in entry for entry in logs)
+    episode_logs = [entry for entry in out["logs"] if "episode_return" in entry]
+    assert [entry["reset_kind"] for entry in episode_logs] == kinds and all(entry["pose_cap"] == 0.3 for entry in episode_logs)
+    assert all((entry["pose_offset_l2"] > 0.0) == (entry["reset_kind"] == 1) for entry in episode_logs)
+
+
+def test_train_bounded_recipe_survives_a_failed_diagnostic_label(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+    prepared, _ = _bounded_experts(tmp_path, monkeypatch)
+    labels = []
+    monkeypatch.setattr(train, "LabelPool", lambda *a, **k: _StubLabelPool(labels, fail_at=1))
+    out = _smoke_train(tmp_path, monkeypatch, 48, prepared=prepared, config=_bounded_config(), dataset_root=tmp_path / "dataset",
+                       object_state=lambda inner, layout: np.array([1.0, 1.0], np.float32))
+    counted = [entry["label_failures"] for entry in out["logs"] if "label_failures" in entry]
+    assert len(labels) == 2 and counted == [0, 1] and out["resume"]["env_steps"] == 48
+    assert sum("label_spread" in entry for entry in out["logs"]) == 1
 
 
 def test_resume_keeps_warmup_end_and_curriculum_cap(tmp_path, monkeypatch):
