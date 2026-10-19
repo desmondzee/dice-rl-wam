@@ -250,8 +250,6 @@ class DiceResidualModel:
             "critic_q_mean": float(torch.stack(preds).mean().detach()),
         }
         if self.select_opt is not None:
-            if select_state is None:
-                select_state = mlp_float(critic_state)[:, :self.state_dim + self.plan_dim]
             select_preds = self.select_critic(select_state, action, return_all=True)
             select_loss = torch.stack([F.mse_loss(pred, target_q) for pred in select_preds]).sum()
             self.select_opt.zero_grad(set_to_none=True)

@@ -230,7 +230,7 @@ class RLConfig:
             "libero_assets_repo": LIBERO_ASSETS_REPO,
             "libero_assets_revision": LIBERO_ASSETS_REVISION,
         }
-        if (self.state_features, self.proprio, bool(self.plus_train)) != ("pool", False, False) or self.procedural_robot_init:
+        if (self.state_features, self.proprio, bool(self.plus_train)) != ("pool", False, False):
             protocol.update({
                 "state_features": self.state_features,
                 "proprio": self.proprio,

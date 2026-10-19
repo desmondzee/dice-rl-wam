@@ -22,7 +22,7 @@ from script.lingbot_rl_model import (
 from script.lingbot_rl_policy import (
     env_action_count, histogram_entropy, load_residual_policy, slice_env_actions,
 )
-from script.lingbot_rl_pose import Curriculum, PoseOverride
+from script.lingbot_rl_pose import Curriculum, PoseOverride, procedural_offset
 from script.lingbot_rl_progress import calibrate, progress, shaping_reward
 from script.lingbot_rl_sharpen import bin_entropy, log_std
 from script.lingbot_rl_standardize import expert_standardization
@@ -85,7 +85,6 @@ def draw_reset(config, episode, cap=None):
     procedural = config.procedural() if kind == 1 else None
     if procedural is None:
         return kind, variant, draw, None
-    from script.lingbot_rl_pose import procedural_offset
     return kind, None, draw, procedural_offset(rng, procedural["magnitude_lo"], procedural["cap_start"] if cap is None else cap)
 
 
@@ -453,15 +452,15 @@ def _to_model_device(sample, device):
     return moved
 
 
-def _sample_batch(buffer, expert_ratio, device, *extra):
-    return _to_model_device(buffer.sample(min(BATCH, len(buffer)), expert_ratio, *extra), device)
+def _sample_batch(buffer, expert_ratio, device, extra=()):
+    return _to_model_device(buffer.sample(min(BATCH, len(buffer)), expert_ratio, extra), device)
 
 
 def _update_from_buffer(model, buffer, expert_ratio, device, filter_active, actor_active=True):
     info = {}
-    extra = (("object_state", "object_state_n"),) if model.privileged else ()
+    extra = ("object_state", "object_state_n") if model.privileged else ()
     for step in range(GRADIENT_STEPS):
-        sample = _sample_batch(buffer, expert_ratio, device, *extra)
+        sample = _sample_batch(buffer, expert_ratio, device, extra)
         state = model.state_input(sample["s"], sample["state_struct"], sample["proprio"])
         next_state = model.state_input(sample["s_next"], sample["state_struct_next"], sample["proprio_next"])
         plan_in = model.plan_input(sample["plan_pool"], sample["plan_struct"])
@@ -571,7 +570,6 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                     "plan_target": config.plan_target, "residual_bound": config.residual_bound, "bc_weight": config.bc_weight,
                     "privileged_critic": config.privileged_critic}
     model = None if config.standardize_features else DiceResidualModel(**model_kwargs)
-    policy.residual_model = model
     policy.eval_candidates = config.k_candidates
     policy.eval_plans = config.plan_candidates
     buffer = ChunkReplay(plans=config.plan_candidates)
@@ -645,7 +643,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
     if model is None:
         standardize = expert_standardization(expert_rows) if expert_rows else None
         model = DiceResidualModel(**model_kwargs, standardize=standardize)
-        policy.residual_model = model
+    policy.residual_model = model
     if not resume:
         _ingest_experts(buffer, expert_rows, config.task_ids)
     procedural = config.procedural()
@@ -762,9 +760,6 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                                                      random_plan=random_plan, decode_all=True, return_tokens=tokens is not None)
                     else:
                         decoded = policy.decode_candidates(batch, k=config.k_candidates)
-                    if config.plan_target == "rollout":
-                        future = pool.submit(capture_live(env._env.env), sim_state, decoded["plan_a_base_all"].detach().float().cpu().numpy(),
-                                             decoded["first_chunk"], sim_task, stored, bool(config.plus_train), episode_seed)
                     if tokens is not None:
                         token_future = labeller.submit(tokens.append, decoded["plan_tokens"], chunk=chunks, episode=episodes, step=env_steps,
                                                        reset_kind=kind, variant_index=env_task, plan_index=int(decoded["plan_index"]))
@@ -805,10 +800,11 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                                          "plan_regret": float(q_all.max() - q_all[decoded["plan_index"]]),
                                          "plan_value_spread": float(v_all.max() - v_all.min()),
                                          "plan_random_rate": float(random_plan)}
-                            if future is not None:
+                            if config.plan_target == "rollout":
                                 q_mean = torch.stack(model.select_critic(critic_all, action_all, return_all=True)).mean(dim=0).reshape(plans, k).max(dim=1).values
-                    if config.plan_target != "rollout" and config.diagnostic_label_every > 0 and chunks % config.diagnostic_label_every == 0:
-                        candidates = np.stack([_host_array(executed), _host_array(a_base)]) if applied else _host_array(a_base)[None]
+                    if config.plan_target == "rollout" or (config.diagnostic_label_every > 0 and chunks % config.diagnostic_label_every == 0):
+                        candidates = (decoded["plan_a_base_all"].detach().float().cpu().numpy() if config.plan_target == "rollout"
+                                      else np.stack([_host_array(executed), _host_array(a_base)]) if applied else _host_array(a_base)[None])
                         future = pool.submit(capture_live(env._env.env), sim_state, candidates,
                                              decoded["first_chunk"], sim_task, stored, bool(config.plus_train), episode_seed)
                     chosen = executed[star:star + 1]
@@ -841,31 +837,32 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
                                        "pose_cap": curriculum.cap if curriculum else 0.0,
                                        "pose_offset_l2": 0.0 if offset is None else float(np.linalg.norm(offset))})
                     plan_labels = None
-                    if future is not None and config.plan_target != "rollout":
+                    if future is not None:
+                        wait_started = time.perf_counter()
                         try:
                             labels, label_seconds = future.result()
                         except RuntimeError:
+                            if config.plan_target == "rollout":
+                                raise
                             labels, label_failures = None, label_failures + 1
-                        future = None
-                        chunk_info["label_failures"] = label_failures
-                        if labels is not None:
-                            spread = float(labels[0].std())
-                            chunk_info.update({"label_spread": spread, "label_seconds": label_seconds})
-                            if applied:
-                                chunk_info["residual_label_gain"] = float(labels[0].mean() - labels[1].mean())
-                            if q_d is not None and spread > 1e-3:
-                                chunk_info["q_label_agreement"] = float(int(q_d.argmax()) == int(labels[0].argmax()))
-                    if future is not None:
-                        wait_started = time.perf_counter()
-                        plan_labels, label_seconds = future.result()
                         label_wait_seconds, future = time.perf_counter() - wait_started, None
-                        plan_mean = plan_labels.mean(axis=1)
-                        plan_info.update({
-                            "label_agreement_with_q": float(int(plan_mean.argmax()) == int(q_mean.argmax())),
-                            "label_spread_within_plan": float(plan_labels.std(axis=1).mean()),
-                            "label_spread_across_plans": float(plan_mean.std()),
-                            "label_executed_minus_mean": float(plan_mean[decoded["plan_index"]] - plan_mean.mean()),
-                            "label_seconds": label_seconds, "label_wait_seconds": label_wait_seconds})
+                        if config.plan_target == "rollout":
+                            plan_labels, plan_mean = labels, labels.mean(axis=1)
+                            plan_info.update({
+                                "label_agreement_with_q": float(int(plan_mean.argmax()) == int(q_mean.argmax())),
+                                "label_spread_within_plan": float(plan_labels.std(axis=1).mean()),
+                                "label_spread_across_plans": float(plan_mean.std()),
+                                "label_executed_minus_mean": float(plan_mean[decoded["plan_index"]] - plan_mean.mean()),
+                                "label_seconds": label_seconds, "label_wait_seconds": label_wait_seconds})
+                        else:
+                            chunk_info["label_failures"] = label_failures
+                            if labels is not None:
+                                spread = float(labels[0].std())
+                                chunk_info.update({"label_spread": spread, "label_seconds": label_seconds})
+                                if applied:
+                                    chunk_info["residual_label_gain"] = float(labels[0].mean() - labels[1].mean())
+                                if q_d is not None and spread > 1e-3:
+                                    chunk_info["q_label_agreement"] = float(int(q_d.argmax()) == int(labels[0].argmax()))
                     if token_future is not None:
                         token_future.result()
                         token_future = None

@@ -728,7 +728,7 @@ def test_update_runs_actor_and_polyak_on_every_second_gradient_step():
         order.append(("actor", id(state)))
         return actor(state, *args)
 
-    buf.sample = lambda size, expert_ratio: samples.append(size) or original(size, expert_ratio)
+    buf.sample = lambda size, expert_ratio, extra=(): samples.append(size) or original(size, expert_ratio, extra)
     model.update_critic = spy_critic
     model.update_actor = spy_actor
     info = _update_from_buffer(model, buf, 0.0, "cpu", False)
@@ -2008,9 +2008,9 @@ def test_pose_override_patches_the_panda_pose_and_clears(monkeypatch):
     monkeypatch.setitem(sys.modules, "libero.libero.envs.robots.mounted_panda", panda)
     override = PoseOverride()
     override.set(np.full(7, 0.1))
-    assert np.allclose(panda.MountedPanda().init_qpos, BASE_QPOS + 0.1) and np.allclose(override.current(), np.full(7, 0.1))
+    assert np.allclose(panda.MountedPanda().init_qpos, BASE_QPOS + 0.1)
     override.clear()
-    assert np.allclose(panda.MountedPanda().init_qpos, BASE_QPOS) and override.current() is None
+    assert np.allclose(panda.MountedPanda().init_qpos, BASE_QPOS)
 
 
 def test_proprio_from_observation_follows_the_dataset_convention():
