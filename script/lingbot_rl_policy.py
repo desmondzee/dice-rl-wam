@@ -45,6 +45,9 @@ def histogram_entropy(samples, bins=32):
         values = values.reshape(values.shape[0], -1)
     entropies = []
     for dim in range(values.shape[1]):
+        if np.ptp(values[:, dim]) < 1e-6:
+            entropies.append(0.0)
+            continue
         hist, _ = np.histogram(values[:, dim], bins=bins)
         total = hist.sum()
         if total == 0:

@@ -1006,6 +1006,15 @@ def test_model_mlp_roundtrip():
     torch.testing.assert_close(mlp_to_model(model_to_mlp(model)), model)
 
 
+def test_histogram_entropy_skips_near_constant_columns():
+    g = torch.Generator().manual_seed(0)
+    varied = torch.linspace(-1, 1, 64)
+    constant = 1.0 + 1e-9 * torch.randn(64, generator=g)
+    both = histogram_entropy(torch.stack([constant, varied], dim=1))
+    assert both == pytest.approx(histogram_entropy(varied[:, None]) / 2)
+    assert histogram_entropy(constant[:, None]) == 0.0
+
+
 def test_histogram_entropy_is_per_coordinate():
     torch.manual_seed(0)
     peaked = torch.zeros(32, 16, 30)
@@ -3036,7 +3045,7 @@ def test_recipe_presets_validate_and_pin_the_spec_values(name, mix):
     if "procedural_robot_init" in preset:
         preset["plus_train"] = {axis: list(v) for axis, v in plus_train_variants().items()}
     protocol = config_from_dict({"task_ids": [9], **preset}).protocol()
-    assert (protocol["residual_bound"], protocol["beta"], protocol["bc_filter"]) == (0.3, 0.0, "off")
+    assert (protocol["residual_bound"], protocol["beta"], protocol["bc_filter"], protocol["epsilon"]) == (0.3, 100.0, "q_stored_minus_mc_return", -0.3)
     assert (protocol["actor_warmup_episodes"], protocol["residual_ramp_steps"], protocol["update_every_chunks"]) == (50, 50_000, 1)
     assert protocol["reward"] == "success_plus_potential_shaping" and protocol["critic_input"] == "features_proprio_object_state"
     assert protocol["plan_candidates"] == 1 and (protocol["online_env_steps"], protocol["checkpoint_every"]) == (320_000, 80_000) and protocol["collection_mix"] == mix
