@@ -173,7 +173,7 @@ class ChunkReplay:
             row["mc_return"] = np.float32(mc_returns[index])
         self._episode_start = len(self._data)
 
-    def sample(self, batch_size, expert_ratio):
+    def sample(self, batch_size, expert_ratio, extra=()):
         ready = self.finalized_indices()
         online = [i for i in ready if float(self._data[i]["is_expert"]) == 0.0]
         expert = [i for i in ready if float(self._data[i]["is_expert"]) == 1.0]
@@ -186,7 +186,7 @@ class ChunkReplay:
         if n_expert:
             indices += list(np.random.choice(expert, size=n_expert, replace=len(expert) < n_expert))
         batch = {}
-        for key in KEYS:
+        for key in (*KEYS, *extra):
             if key in BF16_KEYS:
                 batch[key] = torch.stack([self._data[i][key] for i in indices]).to(self.device)
                 continue

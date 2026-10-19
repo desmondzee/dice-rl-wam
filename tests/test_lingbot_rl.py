@@ -1458,7 +1458,7 @@ def test_save_load_resume_roundtrips_rng_checkpointed_and_schedulers(tmp_path):
     random.seed(999)
     restored = DiceResidualModel(device="cpu")
     buffer = ChunkReplay()
-    env_steps, chunks, checkpointed, wandb_id, episodes = load_resume(path, restored, buffer, recipe)
+    env_steps, chunks, checkpointed, wandb_id, episodes, _ = load_resume(path, restored, buffer, recipe)
     assert env_steps == 0
     assert chunks == 0
     assert checkpointed == {0, 80_000}
@@ -1490,7 +1490,7 @@ def test_load_resume_restores_rng_from_non_byte_mapped_tensor(tmp_path):
     payload["rng"]["torch"] = payload["rng"]["torch"].to(dtype=torch.int32)
     torch.save(payload, path)
     torch.manual_seed(0)
-    env_steps, chunks, checkpointed, wandb_id, episodes = load_resume(
+    env_steps, chunks, checkpointed, wandb_id, episodes, _ = load_resume(
         path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
     assert env_steps == 12
     assert chunks == 3
@@ -1524,12 +1524,16 @@ def test_load_resume_accepts_legacy_torch_numpy_rng(tmp_path):
     }
     payload.pop("checkpointed")
     payload.pop("wandb_id")
+    payload.pop("warmup_end_steps")
+    payload.pop("curriculum")
     torch.save(payload, path)
-    env_steps, _, checkpointed, wandb_id, episodes = load_resume(
-        path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe)
+    from script.lingbot_rl_pose import Curriculum
+    curriculum = Curriculum(0.3, 0.5, 0.5, 2)
+    env_steps, _, checkpointed, wandb_id, episodes, warmup_end_steps = load_resume(
+        path, DiceResidualModel(device="cpu"), ChunkReplay(), recipe, curriculum)
     assert env_steps == 0
     assert checkpointed == set()
-    assert wandb_id is None
+    assert wandb_id is None and warmup_end_steps is None and curriculum.state_dict() == {"cap": 0.3, "history": []}
 
 
 class _Observable:
@@ -1725,16 +1729,23 @@ class _StubPolicy:
 
 def _sum_critic_model(device="cpu", residual_input="z", epsilon=-0.5, plan_candidates=1, **kwargs):
     model = DiceResidualModel(device=device, residual_input=residual_input, plan_candidates=plan_candidates, **kwargs)
-    model.critic = _SumCritic()
+    model.critic = model.select_critic = _SumCritic()
     return model
 
 
-def _smoke_train(tmp_path, monkeypatch, budget, prepared=None, model_factory=None, **kwargs):
+def _smoke_train(tmp_path, monkeypatch, budget, prepared=None, model_factory=None, object_state=None, **kwargs):
     import sys
 
     import script.lingbot_rl_train as train
 
-    envs, logs, wandb_calls = [], [], []
+    envs, logs, wandb_calls, pose_overrides = [], [], [], []
+
+    class StubPose:
+        def set(self, offset):
+            pose_overrides.append("set")
+
+        def clear(self):
+            pose_overrides.append(None)
 
     class StubEnv:
         def __init__(self, **env_kwargs):
@@ -1782,17 +1793,18 @@ def _smoke_train(tmp_path, monkeypatch, budget, prepared=None, model_factory=Non
     monkeypatch.setattr(train, "LiberoEnv", StubEnv)
     monkeypatch.setattr(train, "_plus_suite", lambda base: (None, 2519))
     monkeypatch.setattr(train, "object_layout", lambda inner: {"bodies": ["mug"], "joints": ["door"]})
-    monkeypatch.setattr(train, "object_state", lambda inner, layout: np.array([7.0, 8.0], np.float32))
+    monkeypatch.setattr(train, "object_state", object_state or (lambda inner, layout: np.array([7.0, 8.0], np.float32)))
+    monkeypatch.setattr(train, "PoseOverride", StubPose)
     monkeypatch.setattr(train.np.random, "randint", lambda n: 0 if n == 1 else 1)
     monkeypatch.setitem(sys.modules, "wandb", type("W", (), {
         "init": staticmethod(lambda **k: wandb_calls.append(k) or Run()),
         "finish": staticmethod(lambda **k: None),
     })())
     train.train(output_dir=tmp_path, run_name="unit", max_env_steps=budget,
-                prepared_path=prepared_path, **kwargs)
+                prepared_path=prepared_path, demos_root=tmp_path, **kwargs)
     resume = torch.load(tmp_path / "resume" / "latest.pt", map_location="cpu", weights_only=False)
     return {"rows": resume["replay"]["data"], "logs": logs, "envs": envs,
-            "wandb": wandb_calls, "resume": resume}
+            "wandb": wandb_calls, "resume": resume, "pose_overrides": pose_overrides}
 
 
 def test_train_smoke_loop_gates_updates_saves_weights_and_runs_hook(tmp_path, monkeypatch):
@@ -2009,6 +2021,123 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
     assert out["resume"]["episodes"] == 5 and out["resume"]["layout"] == {"state_features": "struct", "proprio": True, "plan_candidates": 2}
     assert out["wandb"][0]["config"]["proprio"] is True and out["wandb"][0]["config"]["state_features"] == "struct"
     assert not any("episode_success_standard" in entry for entry in _smoke_train(tmp_path / "plain", monkeypatch, 24)["logs"])
+
+
+class _StubLabelPool:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def submit(self, snapshot, before, candidates, first_chunk, env_task, init_states, plus, seed):
+        self.calls.append({"candidates": candidates, "before": before, "env_task": env_task, "init_states": init_states, "seed": seed})
+        labels = np.full(candidates.shape[:2], 0.01, np.float32)
+        return SimpleNamespace(result=lambda: (labels, 0.0), wait=lambda: None)
+
+    def close(self):
+        return None
+
+
+def _bounded_config(**overrides):
+    from script.lingbot_rl_config import plus_train_variants
+    return RLConfig(task_ids=(9,), residual_input="base", proprio=True, state_features="struct", plus_train=plus_train_variants(),
+                    residual_bound=0.3, bc_weight=0.0, actor_warmup_episodes=2, residual_ramp_steps=24, shaping=True, privileged_critic=True,
+                    standardize_features=True, update_every_chunks=1, rlpd_start=0.5, rlpd_end=0.5, diagnostic_label_every=2,
+                    procedural_robot_init={"cap_start": 0.3, "trigger_window": 2}, selection_warmup_steps=0, **overrides)
+
+
+def _bounded_experts(tmp_path, monkeypatch):
+    import script.lingbot_rl_expert_state as expert_state
+    import script.lingbot_rl_model as model_module
+    import script.lingbot_rl_train as train
+    monkeypatch.setattr(model_module, "HIDDEN", (32, 32, 32))
+    monkeypatch.setattr(model_module, "OBJECT_STATE_DIM", 2)
+    monkeypatch.setattr(train, "calibrate", lambda task_id, inner, layout, initial: {"task_id": task_id})
+    monkeypatch.setattr(train, "shaping_reward", lambda calibration, layout, before, after, gamma: 0.25)
+    monkeypatch.setattr(train, "capture_live", lambda live: {"stub": True})
+    monkeypatch.setattr("script.lingbot_eval.read_checkpoint_metadata", lambda path: {"architecture": {}, "normalization": _eval_normalization()})
+    calls = {"states": [], "attached": []}
+
+    def rows():
+        out = []
+        for task_id, struct in ((9, 0.5), (0, 9.0), (9, 1.5)):
+            for index in range(2):
+                out.append({"s": np.zeros(STATE_DIM, np.float32), "z": np.zeros((HORIZON, ACTION_DIM), np.float32),
+                            "a_base": np.zeros((HORIZON, ACTION_DIM), np.float32), "a": np.zeros((HORIZON, ACTION_DIM), np.float32),
+                            "reward": np.float32(0.0), "done": np.float32(index), "task_id": task_id, "n_env_actions": 12,
+                            "is_expert": np.float32(1.0), "state_struct": torch.full((2, STATE_DIM), struct + index, dtype=torch.bfloat16)})
+        return out
+
+    def attach(task_rows, states):
+        calls["attached"].append([int(row["task_id"]) for row in task_rows])
+        for index, row in enumerate(task_rows):
+            row["object_state"] = np.array([float(index), 1.0], np.float32)
+            row["object_state_next"] = np.array([float(index + 1), 1.0], np.float32)
+        return task_rows
+
+    monkeypatch.setattr(train, "load_manifest_episodes", lambda root, manifest, task_to_id, norm: [
+        {"task_id": 9, "episode_index": 450}, {"task_id": 0, "episode_index": 0}, {"task_id": 9, "episode_index": 451}])
+    monkeypatch.setattr(train, "featurize_experts", lambda policy, episodes, manifest, norm, cache_path: rows())
+    monkeypatch.setattr(expert_state, "expert_object_states", lambda *args: calls["states"].append(args) or {})
+    monkeypatch.setattr(expert_state, "attach_object_states", attach)
+    ckpt = tmp_path / "ckpt"
+    ckpt.mkdir(exist_ok=True)
+    (ckpt / "dataset_manifest.json").write_text("{}")
+    prepared = {"tasks": [{"task_id": task_id, "instruction": f"task-{task_id}", "name": f"task_{task_id}_name", "initial_state_count": 50}
+                          for task_id in range(10)],
+                "normalization": _eval_normalization(), "checkpoint": str(ckpt), "model_path": None, "architecture": {},
+                "source_run": "libero30-sft", "checkpoint_step": 600}
+    return prepared, calls
+
+
+def test_train_bounded_recipe_warms_up_ramps_shapes_and_labels(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+    prepared, calls = _bounded_experts(tmp_path, monkeypatch)
+    states = iter(range(1000))
+    labels = []
+    monkeypatch.setattr(train, "LabelPool", lambda *a, **k: _StubLabelPool(labels))
+    out = _smoke_train(tmp_path, monkeypatch, 72, prepared=prepared, config=_bounded_config(), dataset_root=tmp_path / "dataset",
+                       object_state=lambda inner, layout: np.array([float(next(states)), 1.0], np.float32))
+    name, suite, task_id, episodes, _, cache_path, layout = calls["states"][0][1:]
+    assert (name, task_id, [episode["episode_index"] for episode in episodes]) == ("task_9_name", 2519, [450, 451])
+    assert cache_path == tmp_path / "expert_object_states.pt" and layout == {"bodies": ["mug"], "joints": ["door"]}
+    assert calls["attached"] == [[9, 9, 9, 9]]
+    experts = [row for row in out["rows"] if float(row["is_expert"]) == 1.0]
+    assert [int(row["task_id"]) for row in experts] == [9, 9, 9, 9] and experts[0]["object_state"].tolist() == [0.0, 1.0]
+    rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
+    applied = [float(row["residual_applied"]) for row in rows]
+    assert len(rows) == 6 and applied[:3] == [0.0, 0.0, 0.0] and applied[4:] == [1.0, 1.0]
+    assert all(row["object_state_next"].tolist() != row["object_state"].tolist() for row in rows)
+    settings = json.loads((tmp_path / "settings.json").read_text())
+    assert {"struct_mean", "struct_std", "object_mean", "object_std"} <= set(settings["standardize"]) and settings["procedural_robot_init"]["cap_end"] == 0.5
+    assert settings["standardize"]["object_mean"] == [1.5, 1.0] and settings["expert_object_states"] == {"demos": 2}
+    assert out["resume"]["warmup_end_steps"] == 24 and out["resume"]["curriculum"]["cap"] in (0.3, 0.5)
+    logs = [entry for entry in out["logs"] if "shaping_reward" in entry]
+    assert logs and all("residual_ramp_p" in entry and "pose_cap" in entry and "select_agreement" in entry for entry in logs)
+    assert all(entry["shaping_reward"] == 0.25 and entry["pose_cap"] == 0.3 for entry in logs)
+    assert any("select_critic_loss" in entry for entry in out["logs"])
+    assert any("q_label_agreement" in entry and entry["residual_label_gain"] == 0.0 for entry in out["logs"]) and len(labels) == len(rows) // 2
+    assert all(call["candidates"].shape[:2] == (2, 4) for call in labels)
+    updates = [entry for entry in out["logs"] if "critic_loss" in entry]
+    assert [entry["chunks"] for entry in updates][:2] == [2, 3] and "actor_loss" not in updates[0] and "actor_loss" in updates[1]
+    kinds = [row["reset_kind"] for row in rows]
+    envs = [env for env in out["envs"][1:] if "task_id" in env]
+    assert 1 in kinds and all(env["task_id"] == 2519 and env["init_states"] is False for env, kind in zip(envs, kinds) if kind == 1)
+    assert out["pose_overrides"] == [mark for kind in kinds if kind == 1 for mark in ("set", None)]
+    assert any(entry.get("pose_offset_l2", 0.0) > 0.0 for entry in logs) and any("pose_offset_l2/robot_init" in entry for entry in logs)
+
+
+def test_resume_keeps_warmup_end_and_curriculum_cap(tmp_path, monkeypatch):
+    import script.lingbot_rl_train as train
+    prepared, _ = _bounded_experts(tmp_path, monkeypatch)
+    monkeypatch.setattr(train, "LabelPool", lambda *a, **k: _StubLabelPool([]))
+    constant = lambda inner, layout: np.array([1.0, 1.0], np.float32)
+    first = _smoke_train(tmp_path, monkeypatch, 36, prepared=prepared, config=_bounded_config(), dataset_root=tmp_path / "dataset",
+                         object_state=constant)
+    second = _smoke_train(tmp_path, monkeypatch, 72, prepared=prepared, config=_bounded_config(), dataset_root=tmp_path / "dataset",
+                          object_state=constant, resume=True)
+    assert second["resume"]["warmup_end_steps"] == first["resume"]["warmup_end_steps"] == 24
+    assert first["resume"]["curriculum"] == {"cap": 0.3, "history": [0.0]} and second["resume"]["curriculum"] == {"cap": 0.3, "history": [0.0, 0.0]}
+    ramp = [entry["residual_ramp_p"] for entry in second["logs"] if "residual_ramp_p" in entry]
+    assert ramp == sorted(ramp) and ramp[-1] == 1.0
 
 
 def test_train_with_rollout_labels_overlaps_the_live_chunk_stores_them_and_records_both_fidelity_gates(tmp_path, monkeypatch):
