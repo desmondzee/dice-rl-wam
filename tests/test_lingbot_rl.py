@@ -824,6 +824,46 @@ def test_plan_labels_default_to_zeros_and_sample_with_the_plan_shape():
     assert legacy.sample(2, 0.0)["plan_labels"].shape == (2, 2, K_CANDIDATES) and not legacy.rows()[0]["plan_labels"].any()
 
 
+def test_replay_episode_records_chunk_boundary_states_and_rejects_drift(monkeypatch):
+    from script.lingbot_rl_expert_state import replay_episode, attach_object_states
+
+    class Sim:
+        def __init__(self):
+            self.t = 0
+    class Env:
+        def __init__(self, drift=0.0):
+            self.sim = Sim(); self.drift = drift; self._env = SimpleNamespace(env=self)
+        def reset(self, seed=None):
+            self.sim.t = 0; return self._obs(), {}
+        def _obs(self):
+            pos = np.array([0.1 + 0.01 * self.sim.t + self.drift * self.sim.t, 0.2, 0.3])
+            return {"robot_state": {"eef": {"pos": pos, "quat": np.array([0, 0, 0, 1.0])}, "gripper": {"qpos": np.array([0.04, -0.04])}}}
+        def step(self, action):
+            self.sim.t += 1; return self._obs(), 0.0, False, False, {}
+    states = np.stack([np.concatenate([[0.1 + 0.01 * t, 0.2, 0.3], np.zeros(3), [0.04, -0.04]]) for t in range(28)]).astype(np.float32)
+    episode = {"episode_index": 7, "actions": np.zeros((28, 7), np.float32), "states": states}
+    norm = {"q01": [-1.0] * 7 + [0.0] * 23, "q99": [1.0] * 7 + [0.0] * 23}
+    layout = {"bodies": ["mug"], "joints": ["door"]}
+    import script.lingbot_rl_expert_state as module
+    monkeypatch.setattr(module, "object_state", lambda inner, layout: np.array([float(inner.sim.t), 1.0], np.float32))
+    out = replay_episode(Env(), layout, episode, norm)
+    assert out["object_states"].tolist() == [[0.0, 1.0], [12.0, 1.0], [28.0, 1.0]] and out["matched"] == 1.0
+    rows = attach_object_states([{"is_expert": np.float32(1.0)}, {"is_expert": np.float32(1.0)}], {7: out["object_states"]})
+    assert rows[0]["object_state"].tolist() == [0.0, 1.0] and rows[0]["object_state_next"].tolist() == [12.0, 1.0] and rows[1]["object_state_next"].tolist() == [28.0, 1.0]
+    with pytest.raises(ValueError, match="drifted"):
+        replay_episode(Env(drift=0.01), layout, episode, norm)
+
+
+def test_buffer_keeps_captured_object_state_next_and_copies_it_otherwise():
+    buffer = ChunkReplay(capacity=10)
+    row = {"s": np.zeros(STATE_DIM, np.float32), "z": np.zeros((HORIZON, ACTION_DIM), np.float32), "a_base": np.zeros((HORIZON, ACTION_DIM), np.float32),
+           "a": np.zeros((HORIZON, ACTION_DIM), np.float32), "reward": np.float32(0), "done": np.float32(0), "task_id": 9, "n_env_actions": 12}
+    buffer.add_online({**row, "object_state": np.array([1.0], np.float32), "object_state_next": np.array([2.0], np.float32)})
+    buffer.add_online({**row, "object_state": np.array([3.0], np.float32), "done": np.float32(1)})
+    buffer.finalize_episode()
+    assert buffer.rows()[0]["object_state_next"].tolist() == [2.0] and buffer.rows()[1]["object_state_next"].tolist() == [3.0]
+
+
 def test_token_store_round_trips_chunks_rolls_shards_and_continues_ordinals_across_reopen(tmp_path, monkeypatch):
     import script.lingbot_rl_tokens as tokens_module
     from script.lingbot_rl_tokens import TokenStore
@@ -2016,6 +2056,29 @@ def test_env_proprio_matches_the_first_demo_frame_of_a_stored_initial_state():
     for demo in demos:
         gaps = np.abs(states - demo[None]).max(axis=1)
         assert gaps.min() < 5e-2, (gaps.min(), np.abs(states - demo[None])[gaps.argmin()])
+
+
+@pytest.mark.skipif("DICE_DATA" not in os.environ, reason="needs the box environment")
+def test_expert_replay_matches_the_demos_on_the_box():
+    from script.lingbot_eval import describe_suite, read_json
+    from script.lingbot_rl_data import load_manifest_episodes
+    from script.lingbot_rl_expert_state import expert_object_states
+    from script.lingbot_rl_train import make_env, object_layout
+    data = Path(os.environ["DICE_DATA"])
+    prepared = read_json(data / "prepared.json"); prepared = read_json(prepared["prepared_path"]) if "prepared_path" in prepared else prepared
+    manifest = read_json(Path(prepared["checkpoint"]) / "dataset_manifest.json")
+    norm = read_json(Path(prepared["checkpoint"]) / "norm_stats.json") if (Path(prepared["checkpoint"]) / "norm_stats.json").is_file() else prepared["normalization"]
+    task_to_id = {task["instruction"]: task["task_id"] for task in prepared["tasks"]}
+    episodes = [e for e in load_manifest_episodes((data / "dataset_root").read_text().strip(), manifest, task_to_id, norm) if e["task_id"] == 9]
+    suite, _ = describe_suite(prepared["assets_path"])
+    env = make_env(9, suite, init_states=True, proprio=True)
+    try:
+        env.reset(seed=0)
+        layout = object_layout(env._env.env) if hasattr(env._env.env, "obj_body_id") else None
+        states = expert_object_states(suite, 9, episodes, norm, None, layout)
+    finally:
+        env.close()
+    assert len(states) == 30 and all(value.shape[1] == 22 for value in states.values())
 
 
 def test_save_inference_checkpoints_keeps_latest_and_step_copy(tmp_path):
