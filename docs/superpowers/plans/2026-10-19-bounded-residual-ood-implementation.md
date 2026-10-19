@@ -643,7 +643,7 @@ git commit -m "Smoke results for the bounded residual recipe on both boxes."
 
 - [ ] **Step 4: Launch (user's go required)**
 
-`brev/train.sh dice-t9-ood-bounded 9 --recipe bounded-ood --max-env-steps 240000` on Jarvis, `brev/train.sh dice-t9-std-bounded 9 --recipe bounded-std --max-env-steps 240000` on Watson (resume with `--resume`, extend to 320k by raising `--max-env-steps` on a resume); confirm in the W&B run that `residual_saturation`, `select_agreement`, `q_label_agreement`, `residual_label_gain`, `shaping_reward`, `pose_cap` and the per-kind keys are present; start a 30-minute watcher for crashes, checkpoints, `residual_saturation`, `q_label_agreement` and `pose_cap`.
+`brev/train.sh dice-t9-ood-bounded 9 --recipe bounded-ood` on Jarvis, `brev/train.sh dice-t9-std-bounded 9 --recipe bounded-std` on Watson (no step cap: `--max-env-steps` turns on smoke mode; the watcher stops each run after its 240k checkpoint and resume save; a relaunch with the same flags resumes, and running past 240k is the extension to 320k); confirm in the W&B run that `residual_saturation`, `select_agreement`, `q_label_agreement`, `residual_label_gain`, `shaping_reward`, `pose_cap` and the per-kind keys are present; start a 30-minute watcher for crashes, checkpoints, `residual_saturation`, `q_label_agreement` and `pose_cap`.
 
 ---
 
