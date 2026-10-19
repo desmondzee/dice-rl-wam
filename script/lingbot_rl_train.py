@@ -71,15 +71,21 @@ def _plus_suite(base):
 RESET_KINDS = ("standard", "robot_init", "layout")
 
 
-def draw_reset(config, episode):
+def draw_reset(config, episode, cap=None):
     if not config.plus_train:
-        return 0, None, 0.0
+        return 0, None, 0.0, None
     rng = np.random.default_rng([config.seed, episode])
     kind = int(rng.integers(3))
     if kind == 0:
-        return 0, None, float(rng.random())
+        return 0, None, float(rng.random()), None
     variants = config.plus_train[("robot_init", "layout")[kind - 1]]
-    return kind, int(variants[rng.integers(len(variants))]), float(rng.random())
+    variant = int(variants[rng.integers(len(variants))])
+    draw = float(rng.random())
+    procedural = config.procedural() if kind == 1 else None
+    if procedural is None:
+        return kind, variant, draw, None
+    from script.lingbot_rl_pose import procedural_offset
+    return kind, None, draw, procedural_offset(rng, procedural["magnitude_lo"], procedural["cap_start"] if cap is None else cap)
 
 
 def proprio_from_observation(observation):
@@ -679,7 +685,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         while env_steps < budget:
             task = tasks[int(np.random.randint(len(tasks)))]
             task_id = task["task_id"]
-            kind, variant, draw = draw_reset(config, episodes)
+            kind, variant, draw, _ = draw_reset(config, episodes)
             env_task = task_id if variant is None else variant
             stored = bool(config.plus_train) and kind != 1
             sim_task = task["env_task"] if variant is None else variant

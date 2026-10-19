@@ -1899,7 +1899,56 @@ def test_draw_reset_is_per_episode_deterministic_and_covers_every_kind():
     assert all(draw[1] is None for draw in draws if draw[0] == 0)
     assert all(draw[1] in config.plus_train[("robot_init", "layout")[draw[0] - 1]] for draw in draws if draw[0])
     assert [draw[:2] for draw in draws[:4]] == [(0, None), (1, 673), (0, None), (2, 1989)]
-    assert draw_reset(RLConfig(), 5) == (0, None, 0.0)
+    assert draw_reset(RLConfig(), 5) == (0, None, 0.0, None)
+
+
+def test_procedural_offset_and_curriculum_follow_the_spec():
+    from script.lingbot_rl_pose import Curriculum, procedural_offset
+    rng = np.random.default_rng(0)
+    offsets = np.stack([procedural_offset(rng, 0.1, 0.3) for _ in range(500)])
+    norms = np.linalg.norm(offsets, axis=1)
+    assert offsets.shape == (500, 7) and norms.min() >= 0.1 and norms.max() <= 0.3 and abs(offsets.mean()) < 0.02
+    curriculum = Curriculum(0.3, 0.5, 0.5, 4)
+    for success in (1, 0, 0, 0, 1):
+        curriculum.record(success)
+    assert curriculum.cap == 0.3
+    for success in (1, 1):
+        curriculum.record(success)
+    assert curriculum.cap == 0.5
+    for _ in range(10):
+        curriculum.record(0)
+    assert curriculum.cap == 0.5
+    restored = Curriculum(0.3, 0.5, 0.5, 4)
+    restored.load_state_dict(curriculum.state_dict())
+    assert restored.cap == 0.5 and restored.state_dict() == curriculum.state_dict()
+
+
+def test_draw_reset_returns_a_procedural_offset_for_kind_one_only_when_configured():
+    from script.lingbot_rl_config import plus_train_variants
+    from script.lingbot_rl_train import draw_reset
+    plain = RLConfig(task_ids=(9,), proprio=True, plus_train=plus_train_variants())
+    procedural = RLConfig(task_ids=(9,), proprio=True, plus_train=plus_train_variants(), procedural_robot_init={"cap_start": 0.3})
+    kinds = [draw_reset(plain, episode) for episode in range(30)]
+    assert all(draw[3] is None for draw in kinds)
+    draws = [draw_reset(procedural, episode, cap=0.5) for episode in range(30)]
+    assert [(draw[0], draw[2]) for draw in draws] == [(draw[0], draw[2]) for draw in kinds]
+    assert all((draw[3] is None) == (draw[0] != 1) for draw in draws)
+    offsets = [draw[3] for draw in draws if draw[0] == 1]
+    assert offsets and all(0.1 <= np.linalg.norm(offset) <= 0.5 for offset in offsets) and all(draw[1] is None for draw in draws if draw[0] == 1)
+    assert np.allclose(draw_reset(procedural, 1, cap=0.5)[3], draw_reset(procedural, 1, cap=0.5)[3])
+
+
+def test_pose_override_patches_the_panda_pose_and_clears(monkeypatch):
+    import sys
+    import types
+    from script.lingbot_rl_pose import BASE_QPOS, PoseOverride
+    panda = types.SimpleNamespace(MountedPanda=type("MountedPanda", (), {"init_qpos": property(lambda self: BASE_QPOS)}))
+    monkeypatch.setitem(sys.modules, "libero.libero.envs.robots.mounted_panda", panda)
+    override = PoseOverride()
+    override.set(np.full(7, 0.1))
+    assert np.allclose(panda.MountedPanda().init_qpos, BASE_QPOS + 0.1) and np.allclose(override.current(), np.full(7, 0.1))
+    override.clear()
+    assert np.allclose(panda.MountedPanda().init_qpos, BASE_QPOS) and override.current() is None
 
 
 def test_proprio_from_observation_follows_the_dataset_convention():
@@ -1944,7 +1993,7 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
     draws = [draw_reset(config, episode) for episode in range(len(envs))]
     assert [draw[0] for draw in draws] == [0, 1, 0, 2, 1] and all(env["obs_type"] == "pixels_agent_pos" for env in envs)
     assert [(env["task_id"], env["init_states"], env["is_libero_plus"]) for env in envs] == \
-        [(2519 if variant is None else variant, kind != 1, True) for kind, variant, _ in draws]
+        [(2519 if variant is None else variant, kind != 1, True) for kind, variant, _, _ in draws]
     rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
     np.testing.assert_allclose(rows[0]["proprio"], [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, -0.04], atol=1e-6)
     assert rows[0]["plan_pool"].shape == rows[0]["s"].shape == (STATE_DIM,) and rows[0]["plan_pools_all"].shape == (2, STATE_DIM)
