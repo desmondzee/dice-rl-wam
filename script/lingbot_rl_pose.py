@@ -20,12 +20,12 @@ class PoseOverride:
         mounted_panda = import_module(PANDA_MODULE)
         self.offset = np.asarray(offset, dtype=np.float64).copy()
         pose = BASE_QPOS + self.offset
-        mounted_panda.MountedPanda.init_qpos = property(lambda self: pose)
+        mounted_panda.MountedPanda.init_qpos = property(lambda self: pose.copy())
 
     def clear(self):
         mounted_panda = import_module(PANDA_MODULE)
         self.offset = None
-        mounted_panda.MountedPanda.init_qpos = property(lambda self: BASE_QPOS)
+        mounted_panda.MountedPanda.init_qpos = property(lambda self: BASE_QPOS.copy())
 
     def current(self):
         return self.offset

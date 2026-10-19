@@ -603,7 +603,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             layout = object_layout(env._env.env)
             if config.plan_target == "rollout" or config.shaping or config.diagnostic_label_every > 0:
                 calibration = calibrate(tasks[0]["task_id"], env._env.env, layout, object_state(env._env.env, layout))
-            if config.plan_target == "rollout":
+            if config.plan_target == "rollout" or config.diagnostic_label_every > 0:
                 act = lambda current: decode_action(
                     policy.select_action(rl_observation_batch(current, tasks[0]["instruction"], device, True)), norm)
                 shadow = make_shadow(tasks[0]["env_task"], suite, False, False, config.seed)
@@ -634,7 +634,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
         rng = capture_rng()
         states = expert_object_states(demos_root, tasks[0]["name"], suite, tasks[0]["env_task"],
                                       [episode for episode in expert_episodes if episode["task_id"] in config.task_ids], norm,
-                                      output_dir / "expert_object_states.pt", layout)
+                                      output_dir / "expert_object_states.pt", layout, bool(config.plus_train))
         restore_rng(rng)
         attach_object_states(expert_rows, states)
         expert_states = {"demos": int(sum(float(row["done"]) == 1.0 for row in expert_rows))}
@@ -732,7 +732,7 @@ def train(config=None, prepared_path=None, output_dir=None, run_name=None, resum
             task_id = task["task_id"]
             kind, variant, draw, offset = draw_reset(config, episodes, cap=curriculum.cap if curriculum else None)
             env_task = task_id if variant is None else variant
-            stored = bool(config.plus_train) and kind != 1
+            stored = kind == 2
             sim_task = task["env_task"] if variant is None else variant
             residual_active = episodes >= config.actor_warmup_episodes
             if residual_active and warmup_end_steps is None:

@@ -675,11 +675,12 @@ def test_privileged_critic_input_standardises_struct_and_object_state_and_layout
     standardize = {"struct_mean": 0.01, "struct_std": 0.5, "object_mean": torch.zeros(22), "object_std": torch.full((22,), 2.0)}
     model = DiceResidualModel(device="cpu", residual_input="base", state_features="struct", proprio=True, residual_bound=0.3, bc_weight=0.0,
                               privileged_critic=True, standardize=standardize)
-    struct = torch.full((3, 2, STATE_DIM), 0.51); proprio = torch.ones(3, 8); obj = torch.full((3, 22), 4.0)
+    struct = torch.full((3, 2, STATE_DIM), 0.51); proprio = torch.ones(3, 8); obj = torch.full((3, 22), 4.0); obj[:, 0] = 200.0
     state = model.state_input(None, struct, proprio)
     assert torch.allclose(state[:, :2 * STATE_DIM], torch.ones(3, 2 * STATE_DIM)) and torch.allclose(state[:, -8:], proprio)
     critic_state = model.critic_state(state, None, obj)
-    assert critic_state.shape == (3, 2 * STATE_DIM + 8 + 22) and torch.allclose(critic_state[:, -22:], torch.full((3, 22), 2.0))
+    assert critic_state.shape == (3, 2 * STATE_DIM + 8 + 22) and torch.allclose(critic_state[:, -21:], torch.full((3, 21), 2.0))
+    assert torch.equal(critic_state[:, -22], torch.full((3,), 5.0))
     assert model.critic.heads[0][0].weight.shape[1] == 2 * STATE_DIM + 8 + 22 + HORIZON * ACTION_DIM
     assert model.select_critic is not model.critic and model.select_critic.heads[0][0].weight.shape[1] == 2 * STATE_DIM + 8 + HORIZON * ACTION_DIM
     assert model.critic_state(state, None).shape == (3, 2 * STATE_DIM + 8)
@@ -889,13 +890,13 @@ def test_demo_object_states_load_chunk_boundaries_and_match_demo_by_actions(monk
     layout = {"bodies": ["mug"], "joints": ["door"]}
     assert match_demo(handle, episode) == "demo_0"
     out = demo_object_states(env, layout, handle, "demo_0", episode)
-    assert out["object_states"].dtype == np.float32 and out["object_states"].tolist() == [[0.0, 1.0], [12.0, 1.0], [27.0, 1.0]] and out["matched"] == 1.0
+    assert out.dtype == np.float32 and out.tolist() == [[0.0, 1.0], [12.0, 1.0], [27.0, 1.0]]
     with pytest.raises(ValueError, match="demo for episode 8 not found"):
         match_demo(handle, {**episode, "episode_index": 8, "actions": np.full((28, 7), 0.5, np.float32)})
     shift[0] = 0.05
     with pytest.raises(ValueError, match="demo 7 states disagree with the dataset: matched 0.00"):
         demo_object_states(env, layout, handle, "demo_0", episode)
-    rows = module.attach_object_states([{"is_expert": np.float32(1.0)}, {"is_expert": np.float32(1.0)}], {7: out["object_states"]})
+    rows = module.attach_object_states([{"is_expert": np.float32(1.0)}, {"is_expert": np.float32(1.0)}], {7: out})
     assert rows[0]["object_state"].tolist() == [0.0, 1.0] and rows[0]["object_state_next"].tolist() == [12.0, 1.0] and rows[1]["object_state_next"].tolist() == [27.0, 1.0]
 
 
@@ -916,12 +917,12 @@ def test_expert_object_states_cache_is_keyed_by_task_and_layout(tmp_path, monkey
     import contextlib
     import sys
     import script.lingbot_rl_expert_state as module
-    calls, opened = [], []
+    calls, opened, plus = [], [], []
     monkeypatch.setitem(sys.modules, "h5py", SimpleNamespace(File=lambda path, mode: opened.append(path) or contextlib.nullcontext({"data": {}})))
-    monkeypatch.setattr(module, "make_env", lambda task_id, suite, **kw: SimpleNamespace(reset=lambda seed=None: ({}, {}), close=lambda: None))
+    monkeypatch.setattr(module, "make_env", lambda task_id, suite, **kw: plus.append(kw["plus"]) or SimpleNamespace(reset=lambda seed=None: ({}, {}), close=lambda: None))
     monkeypatch.setattr(module, "match_demo", lambda handle, episode: "demo_0")
-    monkeypatch.setattr(module, "demo_object_states", lambda env, layout, handle, key, episode: calls.append(episode["episode_index"]) or {
-        "object_states": np.full((2, 1), len(calls), np.float32), "matched": 1.0})
+    monkeypatch.setattr(module, "demo_object_states", lambda env, layout, handle, key, episode: calls.append(episode["episode_index"]) or
+                        np.full((2, 1), len(calls), np.float32))
     episodes = [{"episode_index": 3}]
     norm = {"q01": [-1.0] * 7, "q99": [1.0] * 7}
     layout = {"bodies": ["mug"], "joints": ["door"]}
@@ -931,6 +932,11 @@ def test_expert_object_states_cache_is_keyed_by_task_and_layout(tmp_path, monkey
     module.expert_object_states(tmp_path, "TASK", None, 9, episodes, norm, cache, {"bodies": ["bowl"], "joints": ["door"]})
     module.expert_object_states(tmp_path, "TASK", None, 8, episodes, norm, cache, {"bodies": ["bowl"], "joints": ["door"]})
     assert calls == [3, 3, 3] and opened == [tmp_path / "libero_10" / "TASK_demo.hdf5"] * 3
+    pair = [{"episode_index": 3}, {"episode_index": 4}]
+    module.expert_object_states(tmp_path, "TASK", None, 8, pair, norm, cache, layout)
+    module.expert_object_states(tmp_path, "TASK", None, 8, pair, norm, cache, layout)
+    module.expert_object_states(tmp_path, "TASK", None, 8, pair[::-1], norm, cache, layout, plus=True)
+    assert calls == [3, 3, 3, 3, 4, 4, 3] and plus == [False, False, False, False, True]
 
 
 def test_token_store_round_trips_chunks_rolls_shards_and_continues_ordinals_across_reopen(tmp_path, monkeypatch):
@@ -2049,7 +2055,7 @@ def test_train_under_plus_resets_with_proprio_stores_features_and_logs_per_kind(
     draws = [draw_reset(config, episode) for episode in range(len(envs))]
     assert [draw[0] for draw in draws] == [0, 1, 0, 2, 1] and all(env["obs_type"] == "pixels_agent_pos" for env in envs)
     assert [(env["task_id"], env["init_states"], env["is_libero_plus"]) for env in envs] == \
-        [(2519 if variant is None else variant, kind != 1, True) for kind, variant, _, _ in draws]
+        [(2519 if variant is None else variant, kind == 2, True) for kind, variant, _, _ in draws]
     rows = [row for row in out["rows"] if float(row["is_expert"]) == 0.0]
     np.testing.assert_allclose(rows[0]["proprio"], [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.04, -0.04], atol=1e-6)
     assert rows[0]["plan_pool"].shape == rows[0]["s"].shape == (STATE_DIM,) and rows[0]["plan_pools_all"].shape == (2, STATE_DIM)
@@ -2097,6 +2103,7 @@ def _bounded_experts(tmp_path, monkeypatch):
     monkeypatch.setattr(train, "calibrate", lambda task_id, inner, layout, initial: {"task_id": task_id})
     monkeypatch.setattr(train, "shaping_reward", lambda calibration, layout, before, after, gamma: 0.25)
     monkeypatch.setattr(train, "capture_live", lambda live: {"stub": True})
+    monkeypatch.setattr(train, "shadow_fidelity", lambda env, shadow, layout, act, observation, chunks=20: {"chunks": chunks})
     monkeypatch.setattr("script.lingbot_eval.read_checkpoint_metadata", lambda path: {"architecture": {}, "normalization": _eval_normalization()})
     calls = {"states": [], "attached": []}
 
@@ -2140,8 +2147,8 @@ def test_train_bounded_recipe_warms_up_ramps_shapes_and_labels(tmp_path, monkeyp
     monkeypatch.setattr(train, "LabelPool", lambda *a, **k: _StubLabelPool(labels))
     out = _smoke_train(tmp_path, monkeypatch, 72, prepared=prepared, config=_bounded_config(), dataset_root=tmp_path / "dataset",
                        object_state=lambda inner, layout: np.array([float(next(states)), 1.0], np.float32))
-    name, suite, task_id, episodes, _, cache_path, layout = calls["states"][0][1:]
-    assert (name, task_id, [episode["episode_index"] for episode in episodes]) == ("task_9_name", 2519, [450, 451])
+    name, suite, task_id, episodes, _, cache_path, layout, plus = calls["states"][0][1:]
+    assert (name, task_id, [episode["episode_index"] for episode in episodes], plus) == ("task_9_name", 2519, [450, 451], True)
     assert cache_path == tmp_path / "expert_object_states.pt" and layout == {"bodies": ["mug"], "joints": ["door"]}
     assert calls["attached"] == [[9, 9, 9, 9]]
     experts = [row for row in out["rows"] if float(row["is_expert"]) == 1.0]
@@ -2152,6 +2159,7 @@ def test_train_bounded_recipe_warms_up_ramps_shapes_and_labels(tmp_path, monkeyp
     assert all(row["object_state_next"].tolist() != row["object_state"].tolist() for row in rows)
     settings = json.loads((tmp_path / "settings.json").read_text())
     assert {"struct_mean", "struct_std", "object_mean", "object_std"} <= set(settings["standardize"]) and settings["procedural_robot_init"]["cap_end"] == 0.5
+    assert settings["shadow_fidelity"] == {"base": {"chunks": 20}, "plus": {"variant_index": 1982, "chunks": 3}}
     assert settings["standardize"]["object_mean"] == [1.5, 1.0] and settings["expert_object_states"] == {"demos": 2}
     assert out["resume"]["warmup_end_steps"] == 24 and out["resume"]["curriculum"]["cap"] in (0.3, 0.5)
     logs = [entry for entry in out["logs"] if "shaping_reward" in entry]
@@ -2163,7 +2171,8 @@ def test_train_bounded_recipe_warms_up_ramps_shapes_and_labels(tmp_path, monkeyp
     updates = [entry for entry in out["logs"] if "critic_loss" in entry]
     assert [entry["chunks"] for entry in updates][:2] == [2, 3] and "actor_loss" not in updates[0] and "actor_loss" in updates[1]
     kinds = [row["reset_kind"] for row in rows]
-    envs = [env for env in out["envs"][1:] if "task_id" in env]
+    envs = out["envs"][4:]
+    assert len(envs) == len(kinds)
     assert 1 in kinds and all(env["task_id"] == 2519 and env["init_states"] is False for env, kind in zip(envs, kinds) if kind == 1)
     assert out["pose_overrides"] == [mark for kind in kinds if kind == 1 for mark in ("set", None)]
     assert any(entry.get("pose_offset_l2", 0.0) > 0.0 for entry in logs) and any("pose_offset_l2/robot_init" in entry for entry in logs)

@@ -52,17 +52,17 @@ def demo_object_states(env, layout, handle, key, episode):
     matched = float(np.mean(hits))
     if matched < DEMO_MIN_MATCH:
         raise ValueError(f"demo {episode['episode_index']} states disagree with the dataset: matched {matched:.2f}")
-    return {"object_states": np.stack(boundaries).astype(np.float32), "matched": matched}
+    return np.stack(boundaries).astype(np.float32)
 
 
 def _fingerprint(episodes, norm, task_id, layout):
-    payload = {"episodes": sorted(int(episode["episode_index"]) for episode in episodes), "task_id": int(task_id),
+    payload = {"episodes": [int(episode["episode_index"]) for episode in episodes], "task_id": int(task_id),
                "layout": None if layout is None else [list(layout["bodies"]), list(layout["joints"])],
                "q01": [float(x) for x in norm["q01"]], "q99": [float(x) for x in norm["q99"]]}
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def expert_object_states(demos_root, task_name, suite, task_id, episodes, norm, cache_path, layout):
+def expert_object_states(demos_root, task_name, suite, task_id, episodes, norm, cache_path, layout, plus=False):
     import h5py
 
     fingerprint = _fingerprint(episodes, norm, task_id, layout)
@@ -71,12 +71,12 @@ def expert_object_states(demos_root, task_name, suite, task_id, episodes, norm, 
         payload = torch.load(cache_path, map_location="cpu", weights_only=False)
         if payload.get("fingerprint") == fingerprint:
             return payload["states"]
-    env = make_env(task_id, suite, init_states=True, proprio=True)
+    env = make_env(task_id, suite, init_states=True, plus=plus, proprio=True)
     try:
         seed_all(0)
         env.reset(seed=0)
         with h5py.File(demo_path(demos_root, task_name), "r") as handle:
-            states = {int(episode["episode_index"]): demo_object_states(env, layout, handle, match_demo(handle, episode), episode)["object_states"]
+            states = {int(episode["episode_index"]): demo_object_states(env, layout, handle, match_demo(handle, episode), episode)
                       for episode in episodes}
     finally:
         env.close()

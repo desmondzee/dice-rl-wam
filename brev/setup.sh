@@ -41,6 +41,8 @@ fi
 "$PY" -m script.lingbot_eval prepare --config-json '{"source_run":"libero30-sft","checkpoint_step":600,"stage":"eval","seed":42}' --cache-root "$DICE_DATA/cache" --checkpoint "$SFT" --prepared-output "$DICE_DATA/prepared.json"
 "$PY" -c "import os; from script.lingbot_eval import download_snapshot; download_snapshot('$DATASET_REPO', repo_type='dataset', revision='$DATASET_REVISION', cache_dir='$DICE_DATA/cache/hub', token='${HF_TOKEN:?HF_TOKEN is required}')"
 echo "$DICE_DATA/cache/hub/datasets--${DATASET_REPO//\//--}/snapshots/$DATASET_REVISION" > "$DICE_DATA/dataset_root"
+DEMO="libero_10/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it_demo.hdf5"
+[ -f "$DICE_DATA/libero-demos/$DEMO" ] || HF_HUB_OFFLINE=0 "$PY" -c "from huggingface_hub import hf_hub_download; hf_hub_download('yifengzhu-hf/LIBERO-datasets', '$DEMO', repo_type='dataset', local_dir='$DICE_DATA/libero-demos')"
 "$PY" -c "from lerobot.policies.lingbot_va.modeling_lingbot_va import LingBotVAPolicy; import wandb, modal"
 "$PY" -m script.lingbot_rl_config > /dev/null
 echo "setup complete: $DICE_DATA"

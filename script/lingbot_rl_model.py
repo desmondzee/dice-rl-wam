@@ -30,6 +30,7 @@ REPLAY_CAPACITY = 100_000
 K_CANDIDATES = 4
 PROPRIO_DIM = 8
 OBJECT_STATE_DIM = 22
+OBJECT_CLIP = 5.0
 
 
 def mlp_float(tensor):
@@ -195,7 +196,7 @@ class DiceResidualModel:
             return out
         object_state = mlp_float(object_state).to(out.device)
         if self.standardize is not None:
-            object_state = (object_state - self.standardize["object_mean"]) / self.standardize["object_std"]
+            object_state = ((object_state - self.standardize["object_mean"]) / self.standardize["object_std"]).clamp(-OBJECT_CLIP, OBJECT_CLIP)
         return torch.cat([out, object_state], dim=-1)
 
     def standardize_layout(self):
