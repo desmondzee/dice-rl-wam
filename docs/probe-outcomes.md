@@ -55,6 +55,10 @@ One line per measurement: what was run, the number, what it decided. Details and
 - With no BC term the residual reaches its bound quickly when the warm-up is short (W&B saturation 0.44–0.48 after 5,500 steps with a 1-episode warm-up); the real runs use a 50-episode warm-up and a 50k ramp.
 - Standard resets in the earlier LIBERO-Plus runs used the stored initial states, not procedural placement (`stored = bool(plus_train) and kind != 1`); fixed to `kind == 2`.
 
+## Bound-only residual collapses (first launch, 2026-10-19)
+
+- With α · tanh at α = 0.3 and no BC term, the deterministic actor reached the bound at its first update (residual rms 0.26, 55–63% of entries within 5% of the bound) while the critic's advantage was 0.01; once the ramp applied it, training success fell from 0.55–0.60 to 0 by 40k env steps on both boxes, standard-reset control included, and stayed at 0 to 88k. Saturated tanh has near-zero gradient, so the actor cannot come back. Policy Decorator and PLD avoid this with a stochastic entropy-regularised actor (and PLD with a Cal-QL-pretrained critic); our deterministic actor needs the BC term. Decision: BC weight 100 with the filter at ε = −0.3 restored, bound kept as a cap.
+
 ## Throughput and engineering facts
 
 - Open-loop replay of the LeRobot demonstrations in the simulator does not reproduce them: with the initial state matched to about 0.01 per proprioception entry, only 7 of 30 task 9 demos reach success and 20 never place the mug (median max end-effector gap 0.065 m). The original LIBERO demonstration files (HF `yifengzhu-hf/LIBERO-datasets`, `libero_10/<task>_demo.hdf5`, 1.5 GB for task 9) store the flattened MuJoCo state (47 floats) at every frame; our 30 LeRobot episodes match `demo_k` exactly by actions (episode 450 + k ↔ demo_k), and loading those states reproduces the demos (progress −0.34 → 1.97, gripper site within 1.1 cm of the dataset proprioception). Expert object states come from those files; the files live under `~/Documents/dice/libero-demos/` on both boxes.
