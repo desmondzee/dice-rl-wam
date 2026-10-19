@@ -336,6 +336,50 @@ def test_evaluate_reconstructs_the_input_layout_from_the_residual_checkpoint(tmp
     assert (stub.residual_model.features, stub.residual_model.proprio) == ("pool", False) and envs[-1]["obs_type"] == "pixels"
 
 
+def test_evaluate_rebuilds_the_bounded_model_and_needs_no_object_state(tmp_path, monkeypatch):
+    import script.lingbot_eval as eval_module
+    import script.lingbot_rl_train as train
+
+    class StubEnv:
+        def __init__(self, **env_kwargs):
+            pass
+
+        def close(self):
+            return None
+
+    tasks = [{"task_id": task_id, "instruction": f"task-{task_id}", "initial_state_count": 50} for task_id in range(10)]
+    stub = _StubPolicy()
+    calls = []
+    monkeypatch.setattr(train, "load_residual_policy", lambda *a: stub)
+    monkeypatch.setattr(train, "LiberoEnv", StubEnv)
+    monkeypatch.setattr(eval_module, "read_checkpoint_metadata", lambda path: {"architecture": {}, "normalization": _eval_normalization()})
+    monkeypatch.setattr(eval_module, "describe_suite", lambda path: (object(), tasks))
+    monkeypatch.setattr(train, "run_rl_episode", lambda *a, **k: calls.append((a, k)) or {
+        **a[2], "success": True, "seconds": 1.0, "policy_steps": 3})
+    saved = DiceResidualModel(
+        device="cpu", residual_input="base", state_features="struct", proprio=True, residual_bound=0.3, privileged_critic=True,
+        standardize={"struct_mean": 0.0, "struct_std": 1.0, "object_mean": torch.zeros(22), "object_std": torch.ones(22)})
+    with torch.no_grad():
+        for parameter in saved.select_critic.parameters():
+            parameter.fill_(0.25)
+    torch.save(saved.inference_state_dict(), tmp_path / "residual.pt")
+    prepared = tmp_path / "prepared.json"
+    prepared.write_text(json.dumps({"checkpoint": "ckpt", "model_path": "model", "assets_path": "assets",
+                                    "source_run": "libero30-sft", "checkpoint_step": 600}))
+    summary = train.evaluate(config_from_dict({"task_ids": [9], "residual_input": "base"}), prepared, tmp_path / "out",
+                             residual_path=tmp_path / "residual.pt", shard=1, shards=50)
+    model = stub.residual_model
+    assert summary["complete"] and model.actor.bound == 0.3 and model.privileged
+    assert model.select_critic is not model.critic
+    assert all(torch.all(parameter == 0.25) for parameter in model.select_critic.parameters())
+    assert not any(torch.all(parameter == 0.25) for parameter in model.critic.parameters())
+    assert model.standardize["object_mean"].shape == (22,) and calls and all(len(a) == 7 and not k for a, k in calls)
+    settings = json.loads((tmp_path / "out" / "settings" / "shard_1.json").read_text())
+    assert settings["layout"]["privileged_critic"] is True and settings["layout"]["residual_bound"] == 0.3
+    assert settings["rl"]["privileged_critic"] is True and settings["rl"]["standardize_features"] is True
+    assert settings["rl"]["residual_bound"] == 0.3
+
+
 def test_config_from_dict_restores_task_ids_and_validates():
     cfg = RLConfig(task_ids=(0, 3)).validate()
     payload = cfg.to_dict()
@@ -2503,6 +2547,38 @@ def test_predict_action_chunk_executes_highest_q_candidate():
     expected = int(model.critic(state, executed).reshape(-1).argmax())
     assert captured["k"] == 4
     assert captured["index"] == expected
+
+
+def test_predict_action_chunk_selects_with_the_deployable_critic():
+    from script.lingbot_rl_policy import ResidualLingBotPolicy
+
+    torch.manual_seed(9)
+    policy = ResidualLingBotPolicy.__new__(ResidualLingBotPolicy)
+    policy.eval_candidates = 4
+    policy.eval_plans = 1
+    model = DiceResidualModel(device="cpu", privileged_critic=True)
+    for parameter in model.select_critic.parameters():
+        torch.nn.init.normal_(parameter, std=0.05)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("selection must not use the privileged critic")
+
+    model.critic = forbidden
+    policy.residual_model = model
+    decoded = {
+        "s": torch.zeros(1, STATE_DIM),
+        "z": torch.randn(4, HORIZON, ACTION_DIM),
+        "a_base": mask_unused_dof(torch.randn(4, HORIZON, ACTION_DIM)),
+        "first_chunk": False,
+        "latents": torch.zeros(1),
+    }
+    captured = {}
+    policy.decode_candidates = lambda batch, k: decoded
+    policy._apply_residual_choice = lambda dec, index: captured.setdefault("index", index) or torch.zeros(1, 12, USED_DOF)
+    policy.predict_action_chunk({"task": ["t"]})
+    state = decoded["s"].expand(4, -1)
+    executed = apply_residual(decoded["a_base"], model.actor(state, decoded["z"], decoded["a_base"]))
+    assert captured["index"] == int(model.select_critic(state, executed).reshape(-1).argmax())
 
 
 def test_predict_action_chunk_stays_single_candidate_without_residual_model():

@@ -700,7 +700,7 @@ class ResidualLingBotPolicy(LingBotVAPolicy):
             executed = apply_residual(a_base, self.residual_model.actor(state, noise, a_base))
             if plans > 1:
                 state = self.residual_model.critic_state(state, self._plan_input(decoded["plan_pool"], decoded.get("plan_struct")).expand(k, -1))
-            index = int(self.residual_model.critic(state, executed).reshape(-1).argmax())
+            index = int(self.residual_model.select_critic(state, executed).reshape(-1).argmax())
         return self._apply_residual_choice(decoded, index)
 
 

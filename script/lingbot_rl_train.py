@@ -971,10 +971,10 @@ def evaluate(config=None, prepared_path=None, output_dir=None, run_name=None, re
     try:
         payload = torch.load(residual_path, map_location="cpu", weights_only=True)
         layout = DiceResidualModel.layout_of(payload)
-        config = replace(config, **layout).validate()
+        config = replace(config, **{key: value for key, value in layout.items() if key != "standardize"},
+                         **({"standardize_features": True} if "standardize" in layout else {})).validate()
         model = DiceResidualModel(device=device, residual_input=config.residual_input, epsilon=config.epsilon,
-                                  plan_candidates=config.plan_candidates, state_features=config.state_features, proprio=config.proprio,
-                                  plan_target=config.plan_target)
+                                  plan_candidates=config.plan_candidates, **layout)
         model.load_inference_state_dict(payload)
     except Exception as exc:
         raise RuntimeError(f"Failed to load residual weights {residual_path}: {exc}") from exc

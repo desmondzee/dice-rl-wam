@@ -57,7 +57,7 @@ def analyse(resume_path, residual_path, batch=512, device="cpu", residual_input=
                 critic_k = model.critic_state(state_k, pool.unsqueeze(1).expand(n, k, -1).reshape(n * k, -1))
             base_flat = base_all.reshape(n * k, HORIZON, -1)
             action = apply_residual(base_flat, model.actor(state_k, z_all.reshape(n * k, HORIZON, -1), base_flat))
-            delta_v = (model.critic(critic_k, action) - model.critic(critic_k, base_flat)).reshape(n, k).mean(dim=1).cpu().numpy()
+            delta_v = (model.select_critic(critic_k, action) - model.select_critic(critic_k, base_flat)).reshape(n, k).mean(dim=1).cpu().numpy()
             after = action.reshape(n, k, HORIZON, -1).cpu().numpy()
             before = base_flat.reshape(n, k, HORIZON, -1).cpu().numpy()
             delta_h = bin_entropy(after) - bin_entropy(before)
