@@ -7,57 +7,51 @@ import torch
 
 from script.lingbot_eval import seed_all
 from script.lingbot_rl_policy import env_action_count
-from script.lingbot_rl_train import make_env, object_state, proprio_from_observation
+from script.lingbot_rl_train import make_env, object_state
 
-REPLAY_TOLERANCE = 0.05
-REPLAY_MIN_MATCH = 0.9
-
-
-def _reset(env, index=None):
-    if index is not None:
-        env.init_state_id = index
-    seed_all(0)
-    observation, _ = env.reset(seed=0)
-    return observation
+DEMO_TOLERANCE = 0.02
+DEMO_MIN_MATCH = 0.9
 
 
-def _gap(observation, state):
-    return float(np.abs(proprio_from_observation(observation) - np.asarray(state, np.float32)).max())
+def demo_path(demos_root, task_name):
+    return Path(demos_root) / "libero_10" / f"{task_name}_demo.hdf5"
 
 
-def match_initial_state(env, first_proprio):
-    if getattr(env, "_reset_proprios", None) is None:
-        env._reset_proprios = np.stack([proprio_from_observation(_reset(env, index)) for index in range(len(env._init_states))])
-    gaps = np.abs(env._reset_proprios - np.asarray(first_proprio, np.float32)[None]).max(axis=1)
-    index = int(np.argmin(gaps))
-    gap = float(gaps[index])
-    if gap > REPLAY_TOLERANCE:
-        raise ValueError(f"no stored state within {REPLAY_TOLERANCE} of the demo: {gap:.3f}")
-    return index
-
-
-def replay_episode(env, layout, episode, norm):
+def match_demo(handle, episode):
     actions = np.asarray(episode["actions"], np.float32)
-    states = np.asarray(episode["states"], np.float32)
-    index = match_initial_state(env, states[0]) if getattr(env, "_init_states", None) is not None else None
-    observation = _reset(env, index)
+    keys = []
+    for key in handle["data"]:
+        candidate = np.asarray(handle["data"][key]["actions"], np.float32)
+        if candidate.shape == actions.shape and float(np.abs(candidate - actions).max(initial=0.0)) < 1e-5:
+            keys.append(key)
+    if len(keys) != 1:
+        raise ValueError(f"demo for episode {episode['episode_index']} not found")
+    return keys[0]
+
+
+def _gripper_position(inner):
+    return inner.sim.data.site_xpos[inner.sim.model.site_name2id("gripper0_grip_site")]
+
+
+def demo_object_states(env, layout, handle, key, episode):
+    states = np.asarray(handle["data"][key]["states"])
+    dataset = np.asarray(episode["states"], np.float32)
     inner = env._env.env
-    boundaries = [object_state(inner, layout)]
-    hits = [_gap(observation, states[0]) <= REPLAY_TOLERANCE]
-    offset = 0
+    offsets = [0]
     first = True
-    while offset < len(actions):
-        n_env = min(env_action_count(first), len(actions) - offset)
-        for action in actions[offset:offset + n_env]:
-            observation, *_ = env.step(np.asarray(action, np.float32))
-        offset += n_env
+    while offsets[-1] < len(episode["actions"]):
+        offsets.append(offsets[-1] + min(env_action_count(first), len(episode["actions"]) - offsets[-1]))
         first = False
+    boundaries, hits = [], []
+    for offset in offsets:
+        inner.sim.set_state_from_flattened(states[min(offset, len(states) - 1)])
+        inner.sim.forward()
         boundaries.append(object_state(inner, layout))
-        if offset < len(states):
-            hits.append(_gap(observation, states[offset]) <= REPLAY_TOLERANCE)
+        target = dataset[min(offset, len(dataset) - 1)][:3]
+        hits.append(float(np.abs(np.asarray(_gripper_position(inner), np.float32) - target).max()) <= DEMO_TOLERANCE)
     matched = float(np.mean(hits))
-    if matched < REPLAY_MIN_MATCH:
-        raise ValueError(f"demo {episode['episode_index']} replay drifted: matched {matched:.2f}")
+    if matched < DEMO_MIN_MATCH:
+        raise ValueError(f"demo {episode['episode_index']} states disagree with the dataset: matched {matched:.2f}")
     return {"object_states": np.stack(boundaries).astype(np.float32), "matched": matched}
 
 
@@ -68,7 +62,9 @@ def _fingerprint(episodes, norm, task_id, layout):
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def expert_object_states(suite, task_id, episodes, norm, cache_path, layout):
+def expert_object_states(demos_root, task_name, suite, task_id, episodes, norm, cache_path, layout):
+    import h5py
+
     fingerprint = _fingerprint(episodes, norm, task_id, layout)
     cache_path = Path(cache_path) if cache_path is not None else None
     if cache_path is not None and cache_path.is_file():
@@ -77,7 +73,11 @@ def expert_object_states(suite, task_id, episodes, norm, cache_path, layout):
             return payload["states"]
     env = make_env(task_id, suite, init_states=True, proprio=True)
     try:
-        states = {int(episode["episode_index"]): replay_episode(env, layout, episode, norm)["object_states"] for episode in episodes}
+        seed_all(0)
+        env.reset(seed=0)
+        with h5py.File(demo_path(demos_root, task_name), "r") as handle:
+            states = {int(episode["episode_index"]): demo_object_states(env, layout, handle, match_demo(handle, episode), episode)["object_states"]
+                      for episode in episodes}
     finally:
         env.close()
     if cache_path is not None:
