@@ -224,7 +224,7 @@ def test_expert_standardization_uses_expert_rows_only_and_floors_the_std():
             {"is_expert": np.float32(0.0), "state_struct": torch.full((2, STATE_DIM), 9.0, dtype=torch.bfloat16), "object_state": np.array([9.0, 9.0], np.float32)}]
     stats = expert_standardization(rows)
     assert stats["struct_mean"] == pytest.approx(1.0) and stats["struct_std"] == pytest.approx(0.5)
-    assert stats["object_mean"].tolist() == [2.0, 5.0] and stats["object_std"].tolist() == pytest.approx([1.0, 1e-3])
+    assert stats["object_mean"].tolist() == [2.0, 5.0] and stats["object_std"].tolist() == pytest.approx([1.0, 0.05])
     with pytest.raises(ValueError):
         expert_standardization([{**rows[0], "object_state": np.zeros(0, np.float32)}])
 
