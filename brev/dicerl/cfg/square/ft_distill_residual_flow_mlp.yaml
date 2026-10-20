@@ -1,0 +1,215 @@
+_target_: agent.finetune.train_distill_residual_flow_agent.TrainDistillResidualFlowAgent
+name: ${env_name}_ft_distill_residual_flow_mlp_ta${horizon_steps}_fl${flow_steps}
+logdir: log_dir/robomimic-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+base_policy_path: log_dir/robomimic-pretrain/pretrained_bc_policy_square_low_dim/checkpoint/state_3000.pt
+robomimic_env_cfg_path: cfg/robomimic/env_meta/${env_name}.json
+normalization_path: data_dir/robomimic/${env_name}-low-dim/ph_finetune/normalization.npz
+seed: 42
+device: cuda:0
+env_name: square
+obs_dim: 23
+action_dim: 7
+flow_steps: 10
+cond_steps: 1
+horizon_steps: 4
+act_steps: 4
+noise_dim: 28
+env:
+  n_envs: 4
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 400
+  save_video: false
+  wrappers:
+    robomimic_lowdim:
+      normalization_path: ${normalization_path}
+      success_steps_before_termination: 1
+      low_dim_keys:
+      - robot0_eef_pos
+      - robot0_eef_quat
+      - robot0_gripper_qpos
+      - object
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: true
+      discount_within_horizon: false
+      gamma: ${train.gamma}
+wandb:
+  entity: ${oc.env:DICE_RL_WANDB_ENTITY}
+  project: dice-rl-repro
+  run: ${now:%Y-%m-%d_%H-%M-%S_%f}_${name}
+train:
+  num_train_steps: 2000000
+  val_freq: 10
+  n_steps: 200
+  n_train_itr: 1000
+  batch_size: 256
+  eval_freq: 1000
+  gamma: 0.99
+  tau: 0.01
+  update_freq: 1
+  gradient_steps: 10
+  pcgrad: false
+  pcgrad_start_step: 10000
+  actor_lr: 0.0001
+  critic_lr: 0.0001
+  dynamics_lr: 0.0001
+  actor_weight_decay: 1.0e-05
+  critic_weight_decay: 1.0e-05
+  dynamics_weight_decay: 1.0e-05
+  use_lr_scheduler: true
+  lr_scheduler:
+    first_cycle_steps: 1000
+    warmup_steps: 10
+    min_lr: 1.0e-06
+  actor_update_freq: 2
+  critic_target_update_freq: 2
+  save_model_freq: 100
+  render:
+    freq: 1
+    num: 0
+  log_freq: 1
+  max_grad_norm: 1.0
+replay_buffer:
+  max_size: 5000000
+  use_prioritized: false
+  use_n_step: true
+  n_step: 3
+  expert_use_n_step: ${expert_dataset.use_n_step}
+  expert_n_step: ${expert_dataset.n_step}
+use_rlpd: true
+expert_ratio: 0.3
+use_adaptive_expert_ratio: true
+adaptive_expert_ratio_start: 0.5
+adaptive_expert_ratio_end: 0.1
+adaptive_expert_ratio_steps: 10000
+pretrain_actor: false
+pretrain_epochs: 500
+pretrain_batch_size: 512
+model:
+  _target_: model.rl.distill_residual_rl.DistillResidualRLModel
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  noise_dim: ${noise_dim}
+  cond_steps: ${cond_steps}
+  horizon_steps: ${horizon_steps}
+  device: ${device}
+  discount_within_horizon: ${env.wrappers.multi_step.discount_within_horizon}
+  clip_residual_action: false
+  condition_residual_on_base_action: false
+  sample_multi_z_for_actor_loss: true
+  num_multi_z_for_actor_loss: 16
+  topk_divisor_for_self_imitation: 8
+  use_softmax_weighted: false
+  self_imitation_for_actor_loss: false
+  winner_loser: false
+  self_imitation_loss_distributional: false
+  self_imitation_loss_weight: 500
+  use_n_step: ${replay_buffer.use_n_step}
+  n_step: ${replay_buffer.n_step}
+  pretrained_flow_policy_path: ${base_policy_path}
+  actor_hidden_dims:
+  - 1024
+  - 1024
+  - 1024
+  critic_hidden_dims:
+  - 1024
+  - 1024
+  - 1024
+  dynamics_hidden_dims:
+  - 512
+  - 512
+  - 512
+  activation_type: GELU
+  use_layernorm: true
+  use_transformer_actor: false
+  transformer_hidden_dim: 256
+  transformer_num_heads: 4
+  transformer_num_layers: 3
+  transformer_dropout: 0.1
+  use_dynamics: false
+  bc_loss_weight: 100.0
+  future_confidence_weight: 0.0
+  dynamics_weight: 0.0
+  critic_weight: 1.0
+  use_confidence_estimation: false
+  confidence_metric: score_matching
+  confidence_normalization: running_stats
+  use_soft_q_filtering: true
+  use_tube_loss: false
+  q_filtering_warmup_steps: 3500
+  q_underestimation_threshold: -0.5
+  multi_z_actor_loss_warmup_steps: 5000
+  use_intrinsic_reward: false
+  intrinsic_reward_lambda: 0.0
+  intrinsic_reward_tau: 2.0
+  intrinsic_reward_samples: 5
+  intrinsic_reward_baseline_thres: 1.2
+  clamp_intrinsic_reward: true
+  use_gfc_loss: false
+  use_dtr_loss: false
+  use_q_normalization: true
+  disable_q_loss_for_expert_data: true
+  disable_td_loss_for_expert_data: false
+  always_retain_bc_loss_for_expert_data: false
+  q_depends_on_noise: false
+  multi_sample_next_noise: true
+  num_next_noise_samples: 4
+  optimistic_target: false
+  optimistic_percentile: 0.75
+  clip_action: false
+  clip_q:
+  - null
+  - null
+  critic_ensemble_size: 10
+  conservative_q_method: min
+  lcb_kappa: 0.03
+  td_loss: mse
+  asymmetric_regression: false
+expert_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceQLearningDataset
+  dataset_path: data_dir/robomimic/${env_name}-low-dim/ph_finetune/train.npz
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  device: ${device}
+  discount_factor: ${train.gamma}
+  discount_within_horizon: ${env.wrappers.multi_step.discount_within_horizon}
+  gamma: ${train.gamma}
+  max_n_episodes: 50
+  use_img: false
+  success_steps_for_termination: ${env.wrappers.robomimic_lowdim.success_steps_before_termination}
+  use_n_step: true
+  n_step: 3
+  add_trimming_pad: false
+visualize_trajectories: false
+visualization_freq: 200000000
+num_eval_episodes: 10
+eval_n_envs: 30
+log_q_overestimation: true
+warmstart_critic: false
+warmstart_rollout_episodes: 5
+warmstart_critic_iterations: 5000
+init_exploration_steps: 0
+use_upsampling: true
+online_explore_strategy: max_q_min
+evaluate_strategy: max_q_min
+num_exploration_samples: 16
+max_replay_diversity:
+  q_filter_k: 5
+  update_frequency: 500
+  num_epochs: 400
+  num_epochs_first: 2000
+  batch_size: 2048
+  learning_rate: 0.0003
+  weight_decay: 1.0e-06
+  boost_factor: 1.05
+  replay_flow_warmup_steps: 4000
+  use_prioritize_recent: true
+  prioritize_recent_window: 60000
+  prioritize_recent_fraction: 0.5
+  stream_train_replay_batches: 40
+  flow_steps: 10
+  exploration_n_mc: 4
+  use_surrogate_loglik: false
