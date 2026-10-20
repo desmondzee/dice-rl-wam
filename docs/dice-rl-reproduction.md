@@ -29,6 +29,32 @@ The public repository (`zhanyisun/dice-rl`, 22 commits, head 98d936e of 2026-08-
 
 Other environment notes: `wandb` 0.17.7 (reference pin) cannot initialise against the current W&B backend (`CommError: 'NoneType' object has no attribute 'get'` on a bare `wandb.init`); 0.27.2, the version the box's other environment uses, works, so the setup installs 0.27.2.
 
-## Gate 1 runs (launched 2026-10-20 21:14 BST on Jarvis)
+## Gate 1 runs (2026-10-20, Jarvis)
 
-`brev/dicerl/finetune.sh square 42` and `brev/dicerl/finetune.sh tool_hang 42`: public code, released recipe values, released pretrained checkpoints, 4 envs each, 1,000 iterations of 200 steps, evaluation on 30 envs every 1,000 iterations as released. W&B project `dice-rl-repro`.
+`brev/dicerl/finetune.sh <env> 42`: public code, released recipe values, released pretrained checkpoints, 4 training envs, evaluation of 300 episodes on 30 envs every 1,000 steps (one step = one action chunk on each of the 4 envs, i.e. 16 env steps on Square and 32 on Tool Hang, which is the W&B x-axis). W&B project `dice-rl-repro`. Comparison points from the released logs, in steps: Square 2,000 (0.68), 4,000 (0.69), 10,000 (0.887), 15,000 (0.937), 28,000 (0.98); Tool Hang 3,000 (0.553), 5,000 (0.71), 14,000 (0.797), 34,000 (0.937).
+
+### Step 0 (both runs, 21:14 BST)
+
+| run | pretrained flow BC, ours | authors' log | random-init residual at step 0, ours | authors' log |
+|---|---|---|---|---|
+| Square | 0.587 | 0.583 | 0.007 (mean length 399.1) | 0.007 (399.6) |
+| Tool Hang | 0.443 | 0.497 | 0.000 | 0.000 |
+
+The training-time evaluation path reproduces the released step-0 rows to the third decimal on Square, which closes Square's gate 0 (no fine-tuned Square checkpoint is released). The Tool Hang pretrained value sits 5 points under the released log, consistent with the gate 0 figure above and inside the ±8 tolerance; the open question on that row stays open. The released Tool Hang CSV reports lengths in chunks (88 = 704 / 8), the released Square CSV in steps, a cosmetic difference between the authors' two code versions.
+
+### Throughput: the two runs must not share the GPU
+
+Measured with the W&B step counter (fresh API client per sample; the client caches run objects, so a reused one reports stale values):
+
+| condition | Square | Tool Hang | authors' log |
+|---|---|---|---|
+| both running on the GB10 | 12.0 s/step | 33.4 s/step | — |
+| alone (other process paused with SIGSTOP for 5 min) | 5.6 s/step | 6.4 s/step | Square 13–18 s/step, Tool Hang 4.7–7 s/step |
+
+Both processes are single-threaded Python at about 85% of one core each; CUDA time-slicing between two contexts issuing many small kernels costs 2× on Square and 5× on Tool Hang, so concurrent runs are strictly worse than sequential ones (Tool Hang to 34,000 steps: 13 days concurrent, 60 h alone; Square to 28,000: 93 h concurrent, 44 h alone). The Tool Hang step is heavier than Square's because the public replay buffer's n-step loop runs (n−1)·horizon+1 synchronised GPU iterations per sample: 33 with n = 5, horizon 8 versus 9 with n = 3, horizon 4. Decision: run one fine-tune at a time, Tool Hang first (it has the gate 0 checkpoint), Square after it reaches 34,000 steps; projected 2.5 days plus 1.8 days, the first comparison point of each inside 6 h of its launch.
+
+### Launch record
+
+- 21:14 BST: both launched concurrently; 22:02: Square stopped at step 339 after the measurement above (its W&B run `kp2dh169` ends there; its run directory keeps the step-0 CSV).
+- 22:03: the `pkill` used to clear Square's leftover env workers matched the shared tmux server (its command line names the first session's command), which took the Tool Hang run (`epveqvjz`, step 230) down with it. Lesson: kill by pid, never by a pattern that the tmux server's or the shell's own command line can match.
+- 22:06 BST: Tool Hang seed 42 relaunched alone (`dicerl-tool_hang-42`); Square relaunches after it. Earlier failed launches (wandb 0.17.7, released-config unknown keys) remain in the same log files, appended by `tee -a`.

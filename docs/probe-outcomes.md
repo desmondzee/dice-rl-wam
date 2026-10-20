@@ -76,6 +76,8 @@ One line per measurement: what was run, the number, what it decided. Details and
 ## DICE-RL reproduction (2026-10-20; `docs/dice-rl-reproduction.md`)
 
 - The authors' released Tool Hang checkpoint evaluates at 92.0% (fine-tuned) / 40.7% (pretrained) on their 300 held-out seeds under mujoco 2.3.7 (authors: 94% / 50% on 50 episodes; 49.7% pretrained in the 300-episode log). mujoco 3.8.1 lowers the fine-tuned policy to 85.3%: the simulator version shifts contact-rich success by 7 points, so the reproduction pins mujoco 2.3.7 on Python 3.11 with torch 2.11 (the GB10's build).
+- Gate 1 step 0 reproduces the released CSV rows: Square pretrained 0.587 vs 0.583, random-init residual 0.007 vs 0.007 (closes Square's gate 0); Tool Hang pretrained 0.443 vs 0.497, residual 0.000 vs 0.000. The public configs plus the three released recipe values (soft Q-filter on, thresholds −0.5 / −0.55, expert BC not always retained) run unchanged on the public code.
+- Two fine-tunes on one GB10 time-slice the GPU badly: 12 / 33 s per step together against 5.6 / 6.4 s alone (Square / Tool Hang; authors 13–18 / 5–7). Sequential runs: Tool Hang first from 22:06 BST 2026-10-20, Square after it.
 
 ## Throughput and engineering facts
 
@@ -84,6 +86,7 @@ One line per measurement: what was run, the number, what it decided. Details and
 - GB10 is GEMM-bound (cutlass kernels about 70% of 100 TFLOPS); batching 4 plans saves 10% over looping; 0.54 s per env step (pooled run), 0.56 (structured), peak memory 38.7 / 47.8 GB; evaluation 65 s per episode SFT, 120–130 s at M = 4, 155 s on LIBERO-Plus.
 - Labelling: thread worker 0.72 s per step (interpreter lock defeats the overlap and slows the main loop); four worker processes 0.61 s per step with 0.35 s label time and 0.02 s wait per chunk.
 - A second model process beside a rollout run with its workers exceeds the 121 GB unified memory and the kernel kills the run.
+- Two small-kernel CUDA processes on the GB10 slow each other 2–5× (CUDA context time-slicing), far beyond their share of the GPU; serialise them. `pkill -f` on a pattern naming a tmux session's command kills the shared tmux server and every session in it; kill by pid.
 - Shadow environments must be built with the live episode's reset seed: LIBERO places fixtures at model build from the seeded sampling, and a shadow from another seed sits about 1 cm off. The live pose snapshot lags its qpos by one physics substep, so pose sanity checks need a 1 cm tolerance, not 1 mm.
 - The LIBERO-Plus `libero_10` suite holds 2,519 variants and no base tasks; the base bddl and stored initial states exist in its checkout and are appended as task 2519. Its assets render the same physical state 0.36 / 255 differently per pixel.
 - Proprioception from the environment matches the dataset's 8-float end-effector convention to 0.016 per entry (the settle steps account for the gap).
