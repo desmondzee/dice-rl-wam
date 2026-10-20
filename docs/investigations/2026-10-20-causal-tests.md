@@ -47,3 +47,28 @@ The run made 18,600 actor updates by its 80k checkpoint (3,720 logged update cal
 - Removing the coupled decay prevents the weight shrinkage completely but not the collapse of the last hidden layer's output (0.65 → 0.03 in every arm, a few units with large negative pre-activations dominating that LayerNorm; inferred mechanism, not tested).
 - It does not change the residual's size in any useful sense (both below 1% of the 0.3 bound) or its input dependence.
 - Conclusion: coupled weight decay causes the weight-norm collapse, not the small residual. The residual's size is set by the critic's g / q, as the equilibrium model says. Weight decay is not a lever; the critic is.
+
+## Result of Test A (2026-10-20)
+
+All fits converged (stop rule: 2,000-step mean TD loss changing < 5%, 12k–25k steps), two seeds each; held out: the last 20% of the cf buffer's online chunks (2,594 plan rows with label spread > 1e-3). Chance reference: 20 untrained critics give within-plan Spearman mean −0.002, sd 0.064, max +0.134 (the planned shuffled-label nulls were not run; untrained critics stand in). The seed-to-seed rank agreement of trained critics is 0.75–0.82 (nulls 0.06–0.17), so trained critics learn a reproducible ordering.
+
+| fit | action share (layer 1; V4: layer 2) | per-entry \|dQ/da\| median | within-plan Q spread | held-out within-plan Spearman (two seeds) | hit vs 0.252 | value corr with MC, held out |
+|---|---|---|---|---|---|---|
+| V0 pooled + proprio + plan pool (the cf critic's inputs) | 0.58 / 0.57 | 0.0042 / 0.0039 | 0.0115 | +0.021 / +0.034 | 0.274 / 0.281 | 0.71 |
+| V1 structured, global standardisation (current recipe) | 0.075 / 0.083 | 0.00014 / 0.00018 | 0.0039 | +0.063 / +0.059 | 0.300 / 0.294 | 0.66 |
+| V2 structured, per-dimension stats from expert rows (keeps 78% of the pattern, norm 122) | 0.037 | 0.00005 | 0.0021 | +0.061 / +0.048 | 0.291 | 0.64 |
+| V2o structured, per-dimension stats from online rows (pattern removed, norm 78) | 0.074 | 0.00008 | 0.0015 | +0.017 / +0.022 | 0.274 | 0.63 |
+| V3 V1 rescaled to the pooled norm | 0.45 / 0.39 | 0.0024 / 0.0017 | 0.0105 | +0.040 / +0.051 | 0.283 / 0.277 | 0.67 |
+| V4 V1 with the action at the second layer | 0.37 / 0.36 | 0.00067 / 0.00074 | 0.0036 | +0.056 / +0.055 | 0.293 | 0.66 |
+| V5 V1 + standardised object state (object share 0.01) | 0.030 | 0.00004 | 0.0020 | +0.053 / +0.039 | 0.290 / 0.281 | 0.65 |
+| live cf critic 80k / 160k / 240k / final | 0.57 / 0.53 / 0.50 / 0.49 | 0.0048 / 0.0028 / 0.0018 / 0.0017 | 0.0107–0.0086 | +0.014 / +0.034 / +0.026 / +0.021 | 0.268–0.285 | 0.62 / 0.69 (240k and final saw these rows) |
+| Cv0 ceiling: V0 inputs regressed on centred labels | 0.44 / 0.41 | — | 0.0007 | +0.196 / +0.218 (train 0.22 / 0.24) | 0.367 / 0.371 | — |
+| Cv2 ceiling: V2 inputs regressed on centred labels | 0.009 / 0.007 | — | 0.0001 | +0.288 / +0.302 (train 0.29 / 0.31) | 0.418 / 0.422 | — |
+| linear ridge on the 112 action entries alone, no state | — | — | — | +0.330 ± 0.011 (train 0.338; fitted on half the rows: +0.320) | 0.437 | — |
+
+- The V0 refit reproduces the live cf critic: chance-level ranking, action share, dQ/da, Q spread and value correlation all match.
+- Input scale sets how strongly Q responds to the action (V1 → V3: share 5×, median dQ/da 12×; V4 gives the action a 0.36 share at its layer) but no representation changes the ranking: every converged TD critic lies inside the untrained-critic distribution (best +0.06 against a null sd of 0.064 and max +0.134). The constant pattern is not what suppresses the action (V2o, with it removed, has the same share as V1); the input norm is. The object state adds nothing.
+- Trained TD critics learn a reproducible action tilt that is orthogonal to the label direction (cosine −0.10 to +0.09): a consistent ordering, but not the outcome ordering. Structured variants transiently reach +0.10–0.15 around 2,000 steps and fall back as the TD loss drops.
+- The outcome ordering is learnable and needs no state: both label-supervised ceilings rank held-out candidates (+0.20–0.30, no overfitting), and a 112-parameter linear model on the action alone does better (+0.33, hit 0.44). Cv2's within-state Q is 96% a linear action tilt; the labels correlate with the candidate's summed y displacement at 0.29–0.31. No state-dependent ranking signal was found (a crude tilt-removed check gives negative ρ; weak evidence).
+- Conclusion: the critic's inputs are not what stops it ranking actions. The one within-state signal in the measured labels is a fixed action direction that the TD critics never learn, because their sparse n-step targets do not contain it (inferred). The limit is the training signal, not the representation.
+- Caveats: fits use online rows only (expert ratio 0); nulls are untrained critics; the Cv ceilings' MSE equals the predict-zero loss (64% of squared label mass sits in 1% of rows); the labels are one-chunk Δφ + 2·success, which correlate only 0.05–0.08 with episode return, so matching them is not the same as estimating the return.

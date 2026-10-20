@@ -68,6 +68,11 @@ One line per measurement: what was run, the number, what it decided. Details and
 - Coupled Adam weight decay collapses actors whose residual is pinned small (hidden weights −85–96%); a consequence that locks the residual in, not its cause.
 - W&B `q_mean` includes expert rows (the actor normaliser does not); earlier "dQ/da 0.025–0.036" were per-chunk norms over the last 300 rows (per-entry 0.001).
 
+## Offline causal tests (2026-10-20; `docs/investigations/2026-10-20-causal-tests.md`)
+
+- Weight decay: removing Adam's coupled decay keeps the actor's weights intact (hidden 1.10 vs 0.11 of start) but leaves the residual the same size (0.0020 vs 0.0024 rms, both at the critic-set equilibrium) and as input-dependent; the last hidden layer's output collapses either way. Not a lever.
+- Critic inputs: refitting the cf critic on six representations moves the action's share of the first layer from 0.03 to 0.58 and dQ/da by 10–20× without changing held-out candidate ranking: every converged TD critic sits inside the untrained-critic distribution (best Spearman +0.06, null sd 0.064). Trained critics learn a reproducible action tilt orthogonal to the measured-outcome direction. The outcome ordering is learnable from the action alone (linear ridge on 112 action entries: +0.33, hit 0.44 vs 0.25) and needs no state. The limit is the TD training signal, not the representation.
+
 ## Throughput and engineering facts
 
 - Open-loop replay of the LeRobot demonstrations in the simulator does not reproduce them: with the initial state matched to about 0.01 per proprioception entry, only 7 of 30 task 9 demos reach success and 20 never place the mug (median max end-effector gap 0.065 m). The original LIBERO demonstration files (HF `yifengzhu-hf/LIBERO-datasets`, `libero_10/<task>_demo.hdf5`, 1.5 GB for task 9) store the flattened MuJoCo state (47 floats) at every frame; our 30 LeRobot episodes match `demo_k` exactly by actions (episode 450 + k ↔ demo_k), and loading those states reproduces the demos (progress −0.34 → 1.97, gripper site within 1.1 cm of the dataset proprioception). Expert object states come from those files; the files live under `~/Documents/dice/libero-demos/` on both boxes.
