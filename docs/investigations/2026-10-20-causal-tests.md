@@ -29,3 +29,21 @@ Data: the ood-bc run (`runs/dice-t9-ood-bounded-bc`): the step-0 actor, the 80k 
 Fit: `update_actor` exactly as in the run (β 100, ε −0.3, bound 0.3, expert ratio 0.5, batch 256), for the number of actor updates the run had made by 80k (about 18,600), under three optimisers: Adam with weight decay 1e-5 (the run), AdamW with 1e-5, and no weight decay. Basis: decoupled weight decay (Loshchilov & Hutter 2017, arXiv 1711.05101) removes the coupling the audit identified.
 
 Metrics: hidden-weight rms and LayerNorm gains against step 0 over the updates; residual rms; the share of the residual that varies across states (input dependence); the predicted equilibrium 0.56 · g / q.
+
+## Result of Test B (2026-10-20)
+
+The run made 18,600 actor updates by its 80k checkpoint (3,720 logged update calls of 5 actor steps; the resume's actor scheduler count confirms the rate). The Adam arm reproduces the run's weight shrinkage approximately (LayerNorm gains 0.26 / 0.21 / 0.19 vs the run's 0.19 / 0.18 / 0.16; hidden weights 0.11 / 0.09 vs 0.06 / 0.06), with residuals about 2× the run's because the frozen 80k critic is the one difference from the run (the run's own 80k actor continued against it moves the same way); the comparison between arms holds because the critic is shared.
+
+| at 18,600 updates | Adam, weight decay 1e-5 (the run) | AdamW 1e-5 = no weight decay (bitwise identical) |
+|---|---|---|
+| hidden weights vs step 0 | 0.11 / 0.09 | 1.10 / 1.09 |
+| LayerNorm gains | 0.26 / 0.21 / 0.19 | 1.00 / 1.00 / 0.91 |
+| last hidden layer output rms (step 0: 0.65) | 0.027 | 0.033 |
+| held-out residual rms / median | 2.4e-3 / 2.9e-4 | 2.0e-3 / 5.5e-4 |
+| median vs predicted 0.56 · g / q (5.6e-4) | 0.54× | 1.05× |
+| residual share that varies across states | 0.92 | 0.96 |
+
+- AdamW at weight decay 1e-5 is a no-op in fp32 (1 − lr · wd rounds to 1), so it equals no decay; an AdamW decay large enough to act was not tested.
+- Removing the coupled decay prevents the weight shrinkage completely but not the collapse of the last hidden layer's output (0.65 → 0.03 in every arm, a few units with large negative pre-activations dominating that LayerNorm; inferred mechanism, not tested).
+- It does not change the residual's size in any useful sense (both below 1% of the 0.3 bound) or its input dependence.
+- Conclusion: coupled weight decay causes the weight-norm collapse, not the small residual. The residual's size is set by the critic's g / q, as the equilibrium model says. Weight decay is not a lever; the critic is.
