@@ -59,6 +59,15 @@ One line per measurement: what was run, the number, what it decided. Details and
 
 - With α · tanh at α = 0.3 and no BC term, the deterministic actor reached the bound at its first update (residual rms 0.26, 55–63% of entries within 5% of the bound) while the critic's advantage was 0.01; once the ramp applied it, training success fell from 0.55–0.60 to 0 by 40k env steps on both boxes, standard-reset control included, and stayed at 0 to 88k. Saturated tanh has near-zero gradient, so the actor cannot come back. Policy Decorator and PLD avoid this with a stochastic entropy-regularised actor (and PLD with a Cal-QL-pretrained critic); our deterministic actor needs the BC term. Decision: BC weight 100 with the filter at ε = −0.3 restored, bound kept as a cap.
 
+## Residual and critic investigation (2026-10-20; `docs/investigations/2026-10-20-residual-and-critic.md`)
+
+- The residual sits at r* = 0.56 · dQ/da / q_scale (β = 100) in every run with a BC term (14 of 15 snapshots within 0.42–1.28×); the BC runs' residual is 15–45× below cf's because q_scale is 2.5–3.8× larger and per-entry dQ/da 2–8× smaller.
+- Structured features standardised with one global mean and std keep a constant per-dimension pattern (93% of the state's energy, norm 88), so the action supplies 2.7–4% of the critic's first-layer pre-activation against 31–62% with pooled features; the common factor of run B and both new recipes.
+- No critic ranks actions within a state: cf out-of-sample Spearman against per-candidate labels +0.004, captured −0.006; new selection critics hit the label-best candidate 0.23–0.34 (chance 0.25). Critics extrapolate linearly or convexly along the actor's direction; only the pooled critic is concave.
+- Shaping kept Φ(s_T) at success and timeout (success worth 2.95, invariance broken); it inflates q_scale but should scale dQ/da equally; normalising by Q + Φ would not help. The 0.12 m inside radius pays near-success value to 12–15% of failures; the ±5 clamp hides the mug's orientation on 29% of rows.
+- Coupled Adam weight decay collapses actors whose residual is pinned small (hidden weights −85–96%); a consequence that locks the residual in, not its cause.
+- W&B `q_mean` includes expert rows (the actor normaliser does not); earlier "dQ/da 0.025–0.036" were per-chunk norms over the last 300 rows (per-entry 0.001).
+
 ## Throughput and engineering facts
 
 - Open-loop replay of the LeRobot demonstrations in the simulator does not reproduce them: with the initial state matched to about 0.01 per proprioception entry, only 7 of 30 task 9 demos reach success and 20 never place the mug (median max end-effector gap 0.065 m). The original LIBERO demonstration files (HF `yifengzhu-hf/LIBERO-datasets`, `libero_10/<task>_demo.hdf5`, 1.5 GB for task 9) store the flattened MuJoCo state (47 floats) at every frame; our 30 LeRobot episodes match `demo_k` exactly by actions (episode 450 + k ↔ demo_k), and loading those states reproduces the demos (progress −0.34 → 1.97, gripper site within 1.1 cm of the dataset proprioception). Expert object states come from those files; the files live under `~/Documents/dice/libero-demos/` on both boxes.
