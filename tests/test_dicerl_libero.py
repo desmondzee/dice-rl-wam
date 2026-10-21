@@ -1,7 +1,9 @@
+import importlib.util
+
 import numpy as np
 import pytest
 
-pytest.importorskip("gym")
+needs_gym = pytest.mark.skipif(importlib.util.find_spec("gym") is None, reason="gym not installed")
 
 
 class FakeLibero:
@@ -27,6 +29,7 @@ def make_wrapper(tmp_path, **kw):
                                    normalization_path=str(tmp_path / "norm.npz"), init_states=np.arange(50)[:, None] * np.ones((50, 47)), **kw)
 
 
+@needs_gym
 def test_observation_layout(tmp_path):
     env, w = make_wrapper(tmp_path)
     obs = w.reset(options={"seed": 3})
@@ -36,6 +39,7 @@ def test_observation_layout(tmp_path):
     assert np.allclose(obs["state"][6:], [0.04, -0.04], atol=1e-5)
 
 
+@needs_gym
 def test_reset_seed_selects_stored_state_and_settles(tmp_path):
     env, w = make_wrapper(tmp_path)
     w.reset(options={"seed": 53})
@@ -43,12 +47,14 @@ def test_reset_seed_selects_stored_state_and_settles(tmp_path):
     assert len(env.actions) == 10 and np.allclose(env.actions[0], [0, 0, 0, 0, 0, 0, -1])
 
 
+@needs_gym
 def test_reset_init_state_option(tmp_path):
     env, w = make_wrapper(tmp_path)
     w.reset(options={"init_state": np.full(47, 7.0)})
     assert np.allclose(env.state, 7.0)
 
 
+@needs_gym
 def test_termination_after_five_cumulative_successes(tmp_path):
     env, w = make_wrapper(tmp_path, env=FakeLibero(success_after=13))
     w.reset(options={"seed": 0})
@@ -59,6 +65,7 @@ def test_termination_after_five_cumulative_successes(tmp_path):
     assert terms.index(True) == 6 and sum(rewards) >= 1
 
 
+@needs_gym
 def test_truncation_at_max_steps(tmp_path):
     env, w = make_wrapper(tmp_path, max_episode_steps=4)
     w.reset(options={"seed": 0})
@@ -66,24 +73,28 @@ def test_truncation_at_max_steps(tmp_path):
     assert out == [False, False, False, True]
 
 
+@needs_gym
 def test_orient():
     from env.gym_utils.wrapper.libero_image import orient
     img = np.arange(12, dtype=np.uint8).reshape(2, 2, 3)
     assert np.array_equal(orient(img, "vertical"), img[::-1]) and np.array_equal(orient(img, "both"), img[::-1, ::-1]) and np.array_equal(orient(img, "none"), img)
 
 
+@needs_gym
 def test_action_unnormalize(tmp_path):
     env, w = make_wrapper(tmp_path)
     w.action_min = np.full(7, -0.5); w.action_max = np.full(7, 0.5)
     assert np.allclose(w.unnormalize_action(np.ones(7)), 0.5) and np.allclose(w.unnormalize_action(-np.ones(7)), -0.5)
 
 
+@needs_gym
 def test_wrapper_registered():
     from env.gym_utils.wrapper import wrapper_dict
     from env.gym_utils.wrapper.libero_image import LiberoImageWrapper
     assert wrapper_dict["libero_image"] is LiberoImageWrapper
 
 
+@needs_gym
 def test_write_config_is_atomic(tmp_path):
     from unittest import mock
     from env.gym_utils.wrapper import libero_image
@@ -94,3 +105,61 @@ def test_write_config_is_atomic(tmp_path):
         with pytest.raises(OSError):
             libero_image.write_config(target, '{"a": 2}')
     assert target.read_text() == '{"a": 1}' and [p.name for p in target.parent.iterdir()] == ["config.yaml"]
+
+
+def make_demo_h5(path, lengths=(5, 7)):
+    import h5py
+    with h5py.File(path, "w") as f:
+        for i, n in enumerate(lengths):
+            g = f.create_group(f"data/demo_{i}")
+            o = g.create_group("obs")
+            o["agentview_rgb"] = np.full((n, 128, 128, 3), i + 1, np.uint8)
+            o["eye_in_hand_rgb"] = np.full((n, 128, 128, 3), i + 11, np.uint8)
+            o["ee_pos"] = np.tile([0.0, 0.5, 1.0], (n, 1)) + i
+            o["ee_ori"] = np.zeros((n, 3)); o["gripper_states"] = np.tile([0.02, -0.02], (n, 1))
+            g["actions"] = np.linspace(-0.5, 0.5, n * 7).reshape(n, 7)
+            g["rewards"] = np.r_[np.zeros(n - 1), 1.0]; g["dones"] = np.r_[np.zeros(n - 1), 1.0]
+            g["states"] = np.zeros((n, 47))
+
+
+def test_convert_shapes_and_order(tmp_path):
+    from script.dataset.process_libero_dataset import convert
+    make_demo_h5(tmp_path / "d.hdf5")
+    convert(str(tmp_path / "d.hdf5"), str(tmp_path / "out"))
+    d = np.load(tmp_path / "out" / "train.npz")
+    assert d["states"].shape == (12, 8) and d["actions"].shape == (12, 7) and d["images"].shape == (12, 6, 128, 128)
+    assert d["images"].dtype == np.uint8 and d["images"][0, 0, 0, 0] == 1 and d["images"][0, 3, 0, 0] == 11 and d["images"][5, 0, 0, 0] == 2
+    assert list(d["traj_lengths"]) == [5, 7] and d["rewards"].sum() == 2 and d["terminals"].sum() == 2
+
+
+def test_normalization_true_extremes(tmp_path):
+    from script.dataset.process_libero_dataset import convert
+    make_demo_h5(tmp_path / "d.hdf5")
+    convert(str(tmp_path / "d.hdf5"), str(tmp_path / "out"))
+    n = np.load(tmp_path / "out" / "normalization.npz"); d = np.load(tmp_path / "out" / "train.npz")
+    assert np.allclose(n["obs_min"][:3], [0.0, 0.5, 1.0]) and np.allclose(n["obs_max"][:3], [1.0, 1.5, 2.0])
+    assert n["obs_min"][2] > 0
+    assert d["states"].min() >= -1 - 1e-6 and d["states"].max() <= 1 + 1e-6 and np.isfinite(d["states"]).all()
+    assert np.isclose(n["action_min"].min(), -0.5) and np.isclose(n["action_max"].max(), 0.5)
+
+
+def test_convert_orders_demos_numerically_and_flips(tmp_path):
+    import h5py
+    from script.dataset.process_libero_dataset import convert
+    make_demo_h5(tmp_path / "d.hdf5", lengths=(2,) * 11)
+    with h5py.File(tmp_path / "d.hdf5", "a") as f:
+        f["data/demo_10/obs/agentview_rgb"][:, 0] = 99
+    convert(str(tmp_path / "d.hdf5"), str(tmp_path / "out"))
+    d = np.load(tmp_path / "out" / "train.npz")
+    assert d["images"][20, 0, 127, 0] == 99 and d["images"][20, 0, 0, 0] == 11
+    convert(str(tmp_path / "d.hdf5"), str(tmp_path / "none"), flip="none")
+    assert np.load(tmp_path / "none" / "train.npz")["images"][20, 0, 0, 0] == 99
+
+
+@needs_gym
+def test_flip_matches_wrapper_orient(tmp_path):
+    from env.gym_utils.wrapper.libero_image import orient
+    from script.dataset.process_libero_dataset import oriented
+    frames = np.random.default_rng(0).integers(0, 255, (3, 8, 8, 3), dtype=np.uint8)
+    for flip in ("none", "vertical", "both"):
+        assert np.array_equal(oriented(frames, flip), np.stack([orient(f, flip) for f in frames]))
