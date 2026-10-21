@@ -72,6 +72,7 @@ def make_libero_env(task_name, camera_names=("agentview", "robot0_eye_in_hand"),
     from libero.libero.envs import OffScreenRenderEnv
     return OffScreenRenderEnv(
         bddl_file_name=bddl, camera_heights=image_hw, camera_widths=image_hw, camera_names=list(camera_names),
+        ignore_done=True,
     )
 
 
