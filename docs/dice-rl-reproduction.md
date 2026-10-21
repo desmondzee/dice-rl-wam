@@ -91,3 +91,14 @@ For each checkpoint: 60 max-Q-min rollouts on seeds 10000+ give 4,000–4,500 st
 | 8,000 (256k) | 0.70 | 0.338 | +0.037 | −0.007 | +0.021 | 0.116 | 0.031, 0.023, 0.011, 0.018 |
 
 Reading: the residual raises the critic's value of the executed action at every state (ΔV > 0 in all quartiles) and the gain grows with training, but it does not contract the action distribution. Early on it widens the spread of the K candidates (Δlog-std +0.10, i.e. 10% wider), and the widening decays towards zero by 256k steps; the per-state correlation between ΔH and either ΔV or V is below 0.14 in magnitude at every checkpoint, and the highest-value quartile is not contracted more than the others. The residual is a value-increasing shift of the whole candidate set rather than a sharpening of it. The same measure on the LingBot bounded recipe is in `docs/investigations/2026-10-20-residual-and-critic.md`; later Tool Hang checkpoints (14,000 and 34,000) will be added as the run reaches them.
+
+Rerun with the paper's measurement (256 candidates per state, 50-bin histogram entropy, demonstration anchor states from the expert dataset as well as rollout states; `result/dicerl-sharpen/k256_*`):
+
+| step (env steps) | anchors | ΔV | ΔH | Δlog-std | r(ΔV, ΔH) | ΔH by ΔV quartile (low → high) |
+|---|---|---|---|---|---|---|
+| 1,000 (32k) | expert / rollout | +0.011 / +0.015 | +0.011 / +0.016 | +0.080 / +0.094 | 0.06 / 0.17 | 0.009, 0.010, 0.011, 0.016 / 0.004, 0.011, 0.019, 0.029 |
+| 4,000 (128k) | expert / rollout | +0.023 / +0.027 | +0.003 / +0.001 | +0.043 / +0.080 | 0.12 / 0.03 | 0.000, −0.001, 0.004, 0.008 / 0.002, −0.001, 0.001, 0.001 |
+| 8,000 (256k) | expert / rollout | +0.027 / +0.037 | −0.003 / −0.008 | +0.016 / +0.019 | 0.02 / 0.02 | −0.003, −0.003, −0.004, −0.001 / −0.007, −0.009, −0.005, −0.009 |
+| 11,000 (352k) | expert / rollout | +0.037 / +0.035 | −0.005 / −0.008 | +0.003 / +0.001 | 0.00 / −0.01 | −0.003, −0.006, −0.005, −0.005 / −0.005, −0.007, −0.013, −0.009 |
+
+With 256 candidates the picture is the same as with 16: the paper's Fig. 5 coupling ("larger value gains come with larger entropy drops") is absent through 352k; where the correlation is non-zero (step 1,000) it has the opposite sign, larger ΔV with slightly more spread. The residual's effect on the candidate spread goes from +8–9% wider at 32k to neutral at 352k, while ΔV triples. Entropy at the 448k checkpoint will be added when the run reaches it.

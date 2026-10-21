@@ -88,7 +88,18 @@ def rollout(cfg, model, venv, episodes, n, k, device):
     return rows
 
 
-def analyse(model, rows, k, device, batch=256):
+def expert_states(cfg, limit, seed):
+    data = np.load(os.path.join(os.getcwd(), cfg.expert_dataset.dataset_path), allow_pickle=False)
+    lengths = data["traj_lengths"]
+    states = data["states"][: int(lengths.sum())]
+    episode = np.repeat(np.arange(len(lengths)), lengths)
+    step = np.concatenate([np.arange(n) for n in lengths])
+    pick = np.random.RandomState(seed).choice(len(states), size=min(limit, len(states)), replace=False)
+    return [{"episode": int(episode[i]), "step": int(step[i]), "state": states[i][None] if states[i].ndim == 1 else states[i],
+             "reward": 0.0, "mc_return": 0.0, "success": 1.0} for i in sorted(pick)]
+
+
+def analyse(model, rows, k, device, batch=64):
     out = []
     with torch.no_grad():
         for start in range(0, len(rows), batch):
@@ -179,19 +190,27 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--episodes", type=int, default=2)
     parser.add_argument("--envs", type=int, default=30)
-    parser.add_argument("--k", type=int, default=16)
+    parser.add_argument("--k", type=int, default=256)
+    parser.add_argument("--select-k", type=int, default=16)
+    parser.add_argument("--anchors", choices=["rollout", "expert"], default="rollout")
+    parser.add_argument("--limit", type=int, default=4000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     cfg, model = load(str(args.ckpt), args.device)
-    venv = make_env(cfg, args.envs)
-    states = rollout(cfg, model, venv, args.episodes, args.envs, args.k, args.device)
-    venv.close()
+    if args.anchors == "expert":
+        states = expert_states(cfg, args.limit, args.seed)
+    else:
+        venv = make_env(cfg, args.envs)
+        states = rollout(cfg, model, venv, args.episodes, args.envs, args.select_k, args.device)
+        venv.close()
     rows = analyse(model, states, args.k, args.device)
     summary, episodes = summarise(rows)
     summary["ckpt"] = str(args.ckpt)
+    summary["anchors"] = args.anchors
+    summary["k"] = args.k
     args.out.mkdir(parents=True, exist_ok=True)
     for name, data in (("rows.csv", rows), ("episodes.csv", episodes)):
         with (args.out / name).open("w", newline="") as handle:
