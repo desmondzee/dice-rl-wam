@@ -2,6 +2,7 @@ from .multi_step import MultiStep
 from .multi_step_full import MultiStepFull
 from .robomimic_lowdim import RobomimicLowdimWrapper
 from .robomimic_image import RobomimicImageWrapper
+from .libero_image import LiberoImageWrapper
 from .d3il_lowdim import D3ilLowdimWrapper
 from .mujoco_locomotion_lowdim import MujocoLocomotionLowdimWrapper
 # from .pusht_state import PushTStateWrapper
@@ -13,6 +14,7 @@ wrapper_dict = {
     "multi_step_full": MultiStepFull,
     "robomimic_lowdim": RobomimicLowdimWrapper,
     "robomimic_image": RobomimicImageWrapper,
+    "libero_image": LiberoImageWrapper,
     "d3il_lowdim": D3ilLowdimWrapper,
     "mujoco_locomotion_lowdim": MujocoLocomotionLowdimWrapper,
     # "pusht_state": PushTStateWrapper,

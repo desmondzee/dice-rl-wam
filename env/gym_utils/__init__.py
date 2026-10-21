@@ -192,6 +192,8 @@ def make_async(
     if robomimic_env_cfg_path is not None:
         import robomimic.utils.env_utils as EnvUtils
         import robomimic.utils.obs_utils as ObsUtils
+    elif env_type == "libero":
+        pass
     elif "avoiding" in id:
         import gym_avoiding
     else:
@@ -199,6 +201,15 @@ def make_async(
     from gym.envs import make as make_
 
     def _make_env():
+        if env_type == "libero":
+            os.environ["MUJOCO_GL"] = "egl"
+            from env.gym_utils.wrapper.libero_image import make_libero_env, libero_task_files
+            env = make_libero_env(id)
+            _, init_states = libero_task_files(id)
+            for wrapper, args in wrappers.items():
+                extra = {"init_states": init_states} if wrapper == "libero_image" else {}
+                env = wrapper_dict[wrapper](env, **args, **extra)
+            return env
         if robomimic_env_cfg_path is not None:
             obs_modality_dict = {
                 "low_dim": (
