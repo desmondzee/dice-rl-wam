@@ -68,6 +68,10 @@ Both processes are single-threaded Python at about 85% of one core each; CUDA ti
 
 Gate 1 verdict for Tool Hang: pass. Mean over the fourteen points 0.638 ours against 0.597 theirs; the last seven points average 0.799 against 0.721; no point is below its counterpart by more than the ±6-point sampling noise, and the 448k comparison point is +2.6. The run was stopped at 448k (the spec's last Tool Hang comparison point before the 1.09M endpoint) to free the box. Square seed 42 was launched at 21:34 BST and stopped 25 minutes later: Tool Hang alone establishes that the environment, public code and released recipe reproduce the authors' curve, Square has no released fine-tuned checkpoint to compare against, and the next phase needs the GPU. Its step-0 rows (pretrained 0.587, residual 0.007) are recorded above. Gate 3 (pretraining) is deferred for the same reason; the LIBERO phase pretrains its own prior with the released pretrain config, which exercises that path.
 
+### Closing number (final checkpoint, step 14,000 = 448k env steps)
+
+Standalone evaluation of `model_step_14000.pth` on the 300 held-out episodes with torch seeds 42, 43, 44: fine-tuned 0.870 / 0.800 / 0.843 (mean 0.838, spread 3.5 points), pretrained 0.473 / 0.443 / 0.463 (mean 0.460). Authors at the same step: 0.797 (their log row), 0.497 pretrained. Gain over the prior: +38 points ours, +30 theirs.
+
 ### Evaluation noise (step-7,000 checkpoint, 2026-10-21)
 
 The standalone evaluator (`script/eval_rl_checkpoint.py`) and the training loop use the same 300 reset seeds (10000–10299, applied through the robomimic wrapper's `np.random.seed` at every reset), the same 30 envs, the same max-Q-min selection with 16 samples and equivalent multi-step wrappers; the training loop additionally seeds torch with the run seed. Two standalone runs with torch seed 42 are identical, so both paths are deterministic given the seed and differ only by the policy's action noise. Repeated standalone evaluations of the same checkpoint on the same 300 initial states:
