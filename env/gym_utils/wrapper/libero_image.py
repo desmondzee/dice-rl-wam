@@ -164,7 +164,9 @@ class LiberoImageWrapper(gym.Env):
         obs = self.get_observation(raw_obs)
         reward = float(self.env.check_success())
         self.step_count += 1
-        truncated = self.step_count >= self.max_episode_steps
+        info = {}
+        if self.step_count >= self.max_episode_steps:
+            info["TimeLimit.truncated"] = True
         terminated = False
         if reward > 0:
             self.ever_succeeded = True
@@ -178,7 +180,7 @@ class LiberoImageWrapper(gym.Env):
             self.success_count = 0
         if self.video_writer is not None:
             self.video_writer.append_data(self.render(mode="rgb_array"))
-        return obs, reward, terminated, truncated, {}
+        return obs, reward, terminated, info
 
     def render(self, mode="rgb_array"):
         return orient(self.last_raw_obs[f"{self.render_camera_name}_image"], self.flip)

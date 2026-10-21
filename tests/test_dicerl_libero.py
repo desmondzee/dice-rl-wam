@@ -54,7 +54,7 @@ def test_termination_after_five_cumulative_successes(tmp_path):
     w.reset(options={"seed": 0})
     rewards, terms = [], []
     for _ in range(8):
-        _, r, term, trunc, _ = w.step(np.zeros(7)); rewards.append(r); terms.append(term)
+        _, r, term, info = w.step(np.zeros(7)); rewards.append(r); terms.append(term)
     assert rewards[:2] == [0.0, 0.0] and rewards[2] == 1.0
     assert terms.index(True) == 6 and sum(rewards) >= 1
 
@@ -62,7 +62,7 @@ def test_termination_after_five_cumulative_successes(tmp_path):
 def test_truncation_at_max_steps(tmp_path):
     env, w = make_wrapper(tmp_path, max_episode_steps=4)
     w.reset(options={"seed": 0})
-    out = [w.step(np.zeros(7))[3] for _ in range(4)]
+    out = [w.step(np.zeros(7))[3].get("TimeLimit.truncated", False) for _ in range(4)]
     assert out == [False, False, False, True]
 
 
