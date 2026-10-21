@@ -82,3 +82,15 @@ def test_wrapper_registered():
     from env.gym_utils.wrapper import wrapper_dict
     from env.gym_utils.wrapper.libero_image import LiberoImageWrapper
     assert wrapper_dict["libero_image"] is LiberoImageWrapper
+
+
+def test_write_config_is_atomic(tmp_path):
+    from unittest import mock
+    from env.gym_utils.wrapper import libero_image
+    target = tmp_path / "cfg" / "config.yaml"
+    libero_image.write_config(target, '{"a": 1}')
+    assert target.read_text() == '{"a": 1}' and [p.name for p in target.parent.iterdir()] == ["config.yaml"]
+    with mock.patch.object(libero_image.os, "replace", side_effect=OSError("boom")):
+        with pytest.raises(OSError):
+            libero_image.write_config(target, '{"a": 2}')
+    assert target.read_text() == '{"a": 1}' and [p.name for p in target.parent.iterdir()] == ["config.yaml"]

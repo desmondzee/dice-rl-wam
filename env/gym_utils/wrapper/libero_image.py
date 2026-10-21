@@ -1,6 +1,8 @@
+import functools
 import importlib.util
 import json
 import os
+import tempfile
 from pathlib import Path
 
 import gym
@@ -13,6 +15,21 @@ SETTLE_STEPS = 10
 FLIP = "vertical"
 
 
+def write_config(config, content):
+    config = Path(config)
+    config.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=config.parent, prefix=config.name + ".")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        os.replace(tmp, config)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+@functools.lru_cache(maxsize=None)
 def libero_task_files(task_name):
     spec = importlib.util.find_spec("libero")
     if spec is None or not spec.submodule_search_locations:
@@ -21,8 +38,7 @@ def libero_task_files(task_name):
     config_dir = Path(os.environ.setdefault("LIBERO_CONFIG_PATH", "/tmp/dicerl-libero-config"))
     config = config_dir / "config.yaml"
     if not config.exists():
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config.write_text(json.dumps({
+        write_config(config, json.dumps({
             "benchmark_root": str(root), "bddl_files": str(root / "bddl_files"),
             "init_states": str(root / "init_files"), "assets": str(root / "assets"),
             "datasets": str(config_dir / "unused-datasets"),
