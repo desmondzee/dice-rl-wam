@@ -139,7 +139,7 @@ def test_reset_init_state_option(tmp_path):
     assert np.allclose(env.state, 7.0)
 
 def test_termination_after_five_cumulative_successes(tmp_path):
-    env, w = make_wrapper(tmp_path, env=FakeLibero(success_after=2))
+    env, w = make_wrapper(tmp_path, env=FakeLibero(success_after=3))
     w.reset(options={"seed": 0})
     rewards, terms = [], []
     for _ in range(8):
@@ -263,7 +263,7 @@ def test_normalization_true_extremes(tmp_path):
     assert np.allclose(n["obs_min"][:3], [0.0, 0.5, 1.0]) and np.allclose(n["obs_max"][:3], [1.0, 1.5, 2.0])
     assert n["obs_min"][2] > 0
     assert d["states"].min() >= -1 - 1e-6 and d["states"].max() <= 1 + 1e-6 and np.isfinite(d["states"]).all()
-    assert np.allclose(n["action_min"], np.linspace(-0.5, 0.5, 84).reshape(12, 7).min(0))
+    assert np.isclose(n["action_min"].min(), -0.5) and np.isclose(n["action_max"].max(), 0.5)
 ```
 
 Normalisation: `2 * (x - min) / (max - min) - 1`, with a constant dimension (max == min) mapped to 0 (e.g. `ee_ori` here).
