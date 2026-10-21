@@ -204,7 +204,7 @@ def test_make_libero_env_ignores_robosuite_horizon(monkeypatch):
 def test_episode_plan_order():
     from script.dicerl_libero_eval import episode_plan
     plan = episode_plan(3, (0, 1))
-    assert plan == [{"init_state_id": 0, "seed": 0}, {"init_state_id": 0, "seed": 1}, {"init_state_id": 1, "seed": 0}, {"init_state_id": 1, "seed": 1}, {"init_state_id": 2, "seed": 0}, {"init_state_id": 2, "seed": 1}]
+    assert plan == [{"init_state_id": 0, "seed": 0}, {"init_state_id": 1, "seed": 0}, {"init_state_id": 2, "seed": 0}, {"init_state_id": 0, "seed": 1}, {"init_state_id": 1, "seed": 1}, {"init_state_id": 2, "seed": 1}]
 
 
 class FakeVenv:
@@ -226,7 +226,7 @@ def test_eval_resets_with_init_state_every_episode():
     from script.dicerl_libero_eval import episode_plan, run_protocol, summarise
     venv = FakeVenv(2, succeed_at=[3, 10 ** 6])
     init_states = np.arange(4)[:, None] * np.ones((4, 47))
-    rows = run_protocol(lambda obs: np.zeros((2, 8, 7)), venv, init_states, episode_plan(4, (0,)), n_envs=2, max_steps=40)
+    rows = run_protocol(lambda obs: np.zeros((2, 8, 7)), venv, init_states, episode_plan(4, (0,)), n_envs=2, max_steps=80)
     assert venv.resets == [[0.0, 1.0], [2.0, 3.0]]
-    assert [r["success"] for r in rows] == [True, False, True, False] and rows[0]["length"] == 7 * 8 and rows[1]["length"] == 40
+    assert [r["success"] for r in rows] == [True, False, True, False] and rows[0]["length"] == 7 * 8 and rows[1]["length"] == 80
     s = summarise(rows); assert s["n"] == 4 and s["success_rate"] == 0.5 and abs(s["stderr"] - 0.25) < 1e-9

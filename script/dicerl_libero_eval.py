@@ -9,7 +9,7 @@ import torch
 
 
 def episode_plan(n_states=50, seeds=(0, 1)):
-    return [{"init_state_id": i, "seed": s} for i in range(n_states) for s in seeds]
+    return [{"init_state_id": i, "seed": s} for s in seeds for i in range(n_states)]
 
 
 def stack_obs(obs):
@@ -20,9 +20,14 @@ def stack_obs(obs):
 
 def run_protocol(policy, venv, init_states, plan, n_envs, act_steps=8, max_steps=520):
     rows = []
-    chunks = 2 * math.ceil(max_steps / act_steps)
-    for start in range(0, len(plan), n_envs):
-        batch = plan[start:start + n_envs]
+    chunks = math.ceil(max_steps / act_steps)
+    start = 0
+    while start < len(plan):
+        end = start + 1
+        while end < len(plan) and end - start < n_envs and plan[end]["seed"] == plan[start]["seed"]:
+            end += 1
+        batch = plan[start:end]
+        start = end
         live = len(batch)
         batch = batch + [batch[-1]] * (n_envs - live)
         torch.manual_seed(batch[0]["seed"])
@@ -36,7 +41,7 @@ def run_protocol(policy, venv, init_states, plan, n_envs, act_steps=8, max_steps
             active = ~done
             reward[active] += np.asarray(r, dtype=float)[active]
             length[active] += act_steps
-            done |= active & (np.asarray(term, dtype=bool) | np.asarray(trunc, dtype=bool) | ((length >= max_steps) & (reward < 1)))
+            done |= active & (np.asarray(term, dtype=bool) | np.asarray(trunc, dtype=bool) | (length >= max_steps))
             if done.all():
                 break
         for i in range(live):
