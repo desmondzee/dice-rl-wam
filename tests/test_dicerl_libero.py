@@ -151,9 +151,10 @@ def test_convert_orders_demos_numerically_and_flips(tmp_path):
         f["data/demo_10/obs/agentview_rgb"][:, 0] = 99
     convert(str(tmp_path / "d.hdf5"), str(tmp_path / "out"))
     d = np.load(tmp_path / "out" / "train.npz")
-    assert d["images"][20, 0, 127, 0] == 99 and d["images"][20, 0, 0, 0] == 11
-    convert(str(tmp_path / "d.hdf5"), str(tmp_path / "none"), flip="none")
-    assert np.load(tmp_path / "none" / "train.npz")["images"][20, 0, 0, 0] == 99
+    assert d["images"][20, 0, 0, 0] == 99 and d["images"][20, 0, 127, 0] == 11
+    convert(str(tmp_path / "d.hdf5"), str(tmp_path / "vertical"), flip="vertical")
+    v = np.load(tmp_path / "vertical" / "train.npz")["images"]
+    assert v[20, 0, 127, 0] == 99 and v[20, 0, 0, 0] == 11
 
 
 @needs_gym

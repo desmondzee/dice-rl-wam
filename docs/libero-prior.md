@@ -32,7 +32,7 @@ Run on Jarvis (GB10, 20 cores, no other GPU jobs) with `python -m script.dicerl_
 
 ### Demo replay
 
-`set_init_state(states[0])` of demo_0, then the 329 raw demo actions through the raw `OffScreenRenderEnv` (no wrapper, no normalisation): success reached, first at step 301 in the final run (322 and 326 in earlier runs; the scene fixtures are re-sampled at each `reset()`, so timing varies by tens of steps). Success is still true after the last action.
+`set_init_state(states[0])` of demo_0, then the 329 raw demo actions through the raw `OffScreenRenderEnv` (no wrapper, no normalisation): success reached, first at step 324 in the final run (301, 322 and 326 in earlier runs; the replay timing varies between resets). Success is still true after the last action.
 
 ### Image orientation
 
@@ -40,11 +40,19 @@ The demo file stores the raw MuJoCo orientation (agentview and wrist both upside
 
 | flip | score | agentview | wrist |
 |---|---|---|---|
-| none | 0.0327 | 0.0078 (0.0114) | 0.0327 (0.0291) |
-| vertical | 0.3689 | 0.3689 (0.3713) | 0.2566 (0.2530) |
-| both | 0.4059 | 0.4059 (0.4069) | 0.2819 (0.2748) |
+| none | 0.0204 | 0.0080 (0.0099) | 0.0204 (0.0280) |
+| vertical | 0.3705 | 0.3705 (0.3706) | 0.2522 (0.2534) |
+| both | 0.4066 | 0.4066 (0.4067) | 0.2772 (0.2766) |
 
-Criterion: the best flip's score must be below 0.05 and at most half of the next-best score, otherwise `pick_flip` raises with the three scores. This replaces the design's 2/255 = 0.0078 bound, which the scene cannot meet: the fixtures are re-sampled at each `reset()` and `set_init_state` does not restore them, so two renders of the same state from different resets differ from each other by up to 0.9 percent (agentview) and 2.8 percent (wrist), as large as the difference to the stored frame. The difference image shows only edges of the microwave and robot. `none` passes (0.0327 < 0.05, and about 11 times better than the next flip); the chosen flip is `none`.
+Criterion: the best flip's score must be below 0.05 and at most half of the next-best score, otherwise `pick_flip` raises with the three scores. This replaces the design's 2/255 = 0.0078 bound, which this scene does not meet on the wrist camera (best of 8 resets 0.0197). The bound is too tight because renders of the same state already differ between resets. `gate0.json` records this as `reset_jitter`, the mean absolute pixel difference as a fraction of 255 between two renders of the same `set_init_state(states[0])` after separate `reset()` calls:
+
+| measurement | agentview | wrist |
+|---|---|---|
+| render before the replay vs render after it | 0.0102 | 0.0183 |
+| consecutive pairs of the 8 sweep renders, mean | 0.0099 | 0.0272 |
+| consecutive pairs of the 8 sweep renders, max | 0.0152 | 0.0407 |
+
+These are as large as the difference between a render and the stored frame (`none` row above), so a render-versus-stored difference of that size cannot be told apart from reset-to-reset variation. The cause of the variation was not isolated. `none` passes (0.0204 < 0.05, and about 18 times better than the next flip); the chosen flip is `none`.
 
 The wrapper's `FLIP` is `none` and the data on Jarvis was reconverted with `--flip none` (frame 0 of `train.npz` equals the demo file's frame 0 exactly), so the wrapper, the data and the demo file agree.
 
@@ -65,11 +73,11 @@ Random uniform chunks of 8 actions through `make_async` with `libero_image` and 
 
 | envs | env steps per second |
 |---|---|
-| 1 | 190.5 |
-| 4 | 657.4 |
-| 20 | 1625.8 |
+| 1 | 190.2 |
+| 4 | 676.6 |
+| 20 | 1612.6 |
 
-At 20 envs one 8-step chunk across all envs takes 0.098 s. A 100-episode evaluation is five waves of 20 episodes of up to 65 chunks (520 steps): 5 x 65 x 0.098 s = about 32 s of simulation, excluding policy inference, resets and video.
+At 20 envs one 8-step chunk across all envs takes 0.099 s. A 100-episode evaluation is five waves of 20 episodes of up to 65 chunks (520 steps): 5 x 65 x 0.099 s = about 32 s of simulation, excluding policy inference, resets and video.
 
 ### Findings that affect later tasks
 

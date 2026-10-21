@@ -15,6 +15,10 @@ def orient(image, flip):
     return {"none": image, "vertical": image[::-1], "both": image[::-1, ::-1]}[flip]
 
 
+def image_diff(a, b):
+    return float(np.abs(a.astype(np.float64) - b.astype(np.float64)).mean() / 255)
+
+
 def camera_scores(rendered, stored):
     return {
         flip: {
@@ -69,15 +73,13 @@ def replay_demo(hdf5_path, task_name, demo="demo_0", resets=8):
         stored = {cam: o[key][0] for cam, (_, key) in CAMERAS.items()}
         demo_state = np.concatenate([o["ee_pos"][0], o["ee_ori"][0], o["gripper_states"][0]])
     env = make_libero_env(task_name)
-    sweep = []
+    sweep, renders = [], []
     for _ in range(resets):
         env.reset()
         raw = env.set_init_state(states[0])
-        rendered = {cam: raw[key] for cam, (key, _) in CAMERAS.items()}
+        rendered = {cam: raw[key].copy() for cam, (key, _) in CAMERAS.items()}
+        renders.append(rendered)
         sweep.append(camera_scores(rendered, stored))
-    env.reset()
-    raw = env.set_init_state(states[0])
-    rendered = {cam: raw[key] for cam, (key, _) in CAMERAS.items()}
     try:
         flip, scores = pick_flip(rendered, stored)
     except ValueError:
@@ -103,11 +105,19 @@ def replay_demo(hdf5_path, task_name, demo="demo_0", resets=8):
         if first is None and env.check_success():
             first = t + 1
     final = bool(env.check_success())
+    env.reset()
+    again = env.set_init_state(states[0])
+    second = {cam: again[key] for cam, (key, _) in CAMERAS.items()}
+    pairs = [{cam: image_diff(a[cam], b[cam]) for cam in stored} for a, b in zip(renders, renders[1:])]
+    reset_jitter = {
+        "after_replay": {cam: image_diff(rendered[cam], second[cam]) for cam in stored},
+        "sweep_pairs": {cam: {"mean": float(np.mean([q[cam] for q in pairs])), "max": float(np.max([q[cam] for q in pairs]))} for cam in stored},
+    }
     env.close()
     return {
         "success": first is not None, "steps": int(len(actions)), "first_success_step": first,
         "success_at_end": final, "flip": flip, "flip_scores": scores, "best_flip": min(scores, key=scores.get),
-        "flip_scores_per_camera": camera_scores(rendered, stored), "flip_sweep": camera_sweep, "flip_sweep_resets": resets, "state_match": state_match,
+        "flip_scores_per_camera": camera_scores(rendered, stored), "flip_sweep": camera_sweep, "flip_sweep_resets": resets, "reset_jitter": reset_jitter, "state_match": state_match,
         "demo_state": [float(x) for x in demo_state], "wrapper_state": [float(x) for x in state],
     }
 

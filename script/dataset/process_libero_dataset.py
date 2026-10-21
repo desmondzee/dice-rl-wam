@@ -18,7 +18,7 @@ def normalize(x, lo, hi):
     return np.where(span == 0, 0.0, out).astype(np.float32)
 
 
-def convert(hdf5_path, out_dir, flip="vertical"):
+def convert(hdf5_path, out_dir, flip="none"):
     if flip not in FLIP_AXES:
         raise ValueError(f"Unknown flip {flip!r}")
     keys = ("states", "actions", "images", "rewards", "terminals")
@@ -58,7 +58,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--hdf5", required=True)
     parser.add_argument("--out", required=True)
-    parser.add_argument("--flip", default="vertical", choices=sorted(FLIP_AXES))
+    parser.add_argument("--flip", default="none", choices=sorted(FLIP_AXES))
     args = parser.parse_args()
     print(json.dumps(convert(args.hdf5, args.out, args.flip)))
 
