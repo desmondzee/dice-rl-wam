@@ -12,7 +12,7 @@ from gym import spaces
 
 NOOP = np.array([0, 0, 0, 0, 0, 0, -1.0])
 SETTLE_STEPS = 10
-FLIP = "vertical"
+FLIP = "none"
 
 
 def write_config(config, content):

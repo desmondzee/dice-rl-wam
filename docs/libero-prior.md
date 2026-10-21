@@ -5,7 +5,7 @@
 Task `KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it` (LIBERO-10), 128x128 agentview and wrist cameras, 20 Hz OSC_POSE, horizon 520.
 
 - Demo file on Jarvis: `~/Documents/dice/libero-demos/libero_10/<task>_demo.hdf5`, 50 demos, 15,232 steps, lengths 224 to 449 (mean 304.6).
-- Converted data: `$DICE_RL_DATA_DIR/libero/<task>/ph_pretrain/` (`train.npz` 555 MB, `normalization.npz`), produced by `script/dataset/process_libero_dataset.py`, converted with `--flip vertical` (the default).
+- Converted data: `$DICE_RL_DATA_DIR/libero/<task>/ph_pretrain/` (`train.npz` 555 MB, `normalization.npz`), produced by `script/dataset/process_libero_dataset.py`, converted with `--flip none` so the images keep the demo file's own orientation.
 - Gate 0 output: `$DICE_RL_DATA_DIR/libero/<task>/gate0.json`.
 
 ## Software environment
@@ -32,7 +32,7 @@ Run on Jarvis (GB10, 20 cores, no other GPU jobs) with `python -m script.dicerl_
 
 ### Demo replay
 
-`set_init_state(states[0])` of demo_0, then the 329 raw demo actions through the raw `OffScreenRenderEnv` (no wrapper, no normalisation): success reached, first at step 322 in the final run and step 326 in an earlier run (the scene fixtures are re-sampled at each `reset()`, so timing varies by a few steps). Success is still true after the last action.
+`set_init_state(states[0])` of demo_0, then the 329 raw demo actions through the raw `OffScreenRenderEnv` (no wrapper, no normalisation): success reached, first at step 301 in the final run (322 and 326 in earlier runs; the scene fixtures are re-sampled at each `reset()`, so timing varies by tens of steps). Success is still true after the last action.
 
 ### Image orientation
 
@@ -40,11 +40,13 @@ The demo file stores the raw MuJoCo orientation (agentview and wrist both upside
 
 | flip | score | agentview | wrist |
 |---|---|---|---|
-| none | 0.0236 | 0.0101 (0.0093) | 0.0236 (0.0239) |
-| vertical | 0.3700 | 0.3700 (0.3709) | 0.2521 (0.2539) |
-| both | 0.4063 | 0.4063 (0.4068) | 0.2780 (0.2764) |
+| none | 0.0327 | 0.0078 (0.0114) | 0.0327 (0.0291) |
+| vertical | 0.3689 | 0.3689 (0.3713) | 0.2566 (0.2530) |
+| both | 0.4059 | 0.4059 (0.4069) | 0.2819 (0.2748) |
 
-`none` is the unambiguous best match, 10 to 40 times closer than the others. It does not reach the 2/255 = 0.0078 criterion, so `pick_flip` raises and `flip` is null in `gate0.json`. The residual is reset-dependent scene jitter, not orientation: two renders of the same state from different `reset()` calls differ from each other by up to 0.9 and 2.8 percent (agentview, wrist), the same size as the difference to the stored frame, and the difference image shows only edges of the microwave and robot. The wrapper currently applies `vertical` and the converted data was written with `vertical`, so wrapper and data agree with each other but not with the demo file's own orientation.
+Criterion: the best flip's score must be below 0.05 and at most half of the next-best score, otherwise `pick_flip` raises with the three scores. This replaces the design's 2/255 = 0.0078 bound, which the scene cannot meet: the fixtures are re-sampled at each `reset()` and `set_init_state` does not restore them, so two renders of the same state from different resets differ from each other by up to 0.9 percent (agentview) and 2.8 percent (wrist), as large as the difference to the stored frame. The difference image shows only edges of the microwave and robot. `none` passes (0.0327 < 0.05, and about 11 times better than the next flip); the chosen flip is `none`.
+
+The wrapper's `FLIP` is `none` and the data on Jarvis was reconverted with `--flip none` (frame 0 of `train.npz` equals the demo file's frame 0 exactly), so the wrapper, the data and the demo file agree.
 
 ### State match
 
@@ -55,7 +57,7 @@ The wrapper state (`normalization_path=None`) against `obs/ee_pos[0]`, `obs/ee_o
 | after `set_init_state`, before settling | 0.0033 | 0.0142 (equivalent representation 0.0141) | 0.0022 |
 | after 10 settle steps | 0.0028 | 0.0568 | 0.0026 |
 
-The pre-settle state matches the first demo observation; settling moves the orientation by about 0.05 rad. The 0.014 rad orientation offset is a near-constant bias along the first demo steps (0.013 at steps 1 to 3), small compared with the demo ranges but above the 1e-2 bar.
+The pre-settle state matches the first demo observation; settling moves the orientation by about 0.05 rad. The 0.014 rad orientation offset is a near-constant bias along the first demo steps (0.013 at steps 1 to 3), accepted as reset jitter on the same axis-angle convention.
 
 ### Throughput
 
@@ -63,9 +65,9 @@ Random uniform chunks of 8 actions through `make_async` with `libero_image` and 
 
 | envs | env steps per second |
 |---|---|
-| 1 | 193.8 |
-| 4 | 654.0 |
-| 20 | 1638.3 |
+| 1 | 190.5 |
+| 4 | 657.4 |
+| 20 | 1625.8 |
 
 At 20 envs one 8-step chunk across all envs takes 0.098 s. A 100-episode evaluation is five waves of 20 episodes of up to 65 chunks (520 steps): 5 x 65 x 0.098 s = about 32 s of simulation, excluding policy inference, resets and video.
 

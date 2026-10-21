@@ -6,7 +6,8 @@ import time
 import numpy as np
 
 FLIPS = ("none", "vertical", "both")
-THRESHOLD = 2 / 255
+MAX_SCORE = 0.05
+MIN_RATIO = 2
 CAMERAS = {"agentview": ("agentview_image", "agentview_rgb"), "wrist": ("robot0_eye_in_hand_image", "eye_in_hand_rgb")}
 
 
@@ -30,9 +31,11 @@ def flip_scores(rendered, stored):
 
 def pick_flip(rendered, stored):
     scores = flip_scores(rendered, stored)
-    best = min(scores, key=scores.get)
-    if scores[best] >= THRESHOLD:
-        raise ValueError(f"No flip matches the stored frames: {scores}")
+    ranked = sorted(scores, key=scores.get)
+    best, second = scores[ranked[0]], scores[ranked[1]]
+    if best >= MAX_SCORE or second <= 0 or best * MIN_RATIO > second:
+        raise ValueError(f"No flip clearly matches the stored frames: {scores}")
+    best = ranked[0]
     return best, scores
 
 

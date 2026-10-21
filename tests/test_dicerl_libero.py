@@ -165,15 +165,25 @@ def test_flip_matches_wrapper_orient(tmp_path):
         assert np.array_equal(oriented(frames, flip), np.stack([orient(f, flip) for f in frames]))
 
 
-def test_pick_flip_rejects_mismatch():
+def test_pick_flip_accepts_clear_match_and_rejects_ambiguous():
     from script.dicerl_libero_gate0 import pick_flip
-    img = np.random.RandomState(0).randint(0, 255, (128, 128, 3), np.uint8)
+    rng = np.random.RandomState(0)
+    img = rng.randint(0, 255, (128, 128, 3), np.uint8)
+    other = rng.randint(0, 255, (128, 128, 3), np.uint8)
     rendered = {"agentview": img, "wrist": img}
-    stored = {"agentview": img[::-1], "wrist": img[::-1]}
-    flip, scores = pick_flip(rendered, stored)
-    assert flip == "vertical" and scores["vertical"] < 2 / 255
+    flip, scores = pick_flip(rendered, {"agentview": img, "wrist": img})
+    assert flip == "none" and scores["none"] == 0 and scores["vertical"] > 0.05
+    flip, scores = pick_flip(rendered, {"agentview": img[::-1], "wrist": img[::-1]})
+    assert flip == "vertical" and scores["vertical"] < 0.05
     with pytest.raises(ValueError):
-        pick_flip(rendered, {"agentview": np.roll(img, 7, 0), "wrist": img})
+        pick_flip(rendered, {"agentview": other, "wrist": other})
+    sym = np.concatenate([img[:64], img[:64][::-1]])
+    with pytest.raises(ValueError):
+        pick_flip({"agentview": sym, "wrist": sym}, {"agentview": sym, "wrist": sym})
+    flat = 100 + rng.randint(-3, 4, (128, 128, 3))
+    stored_flat = (100 + rng.randint(-3, 4, (128, 128, 3))).astype(np.uint8)
+    with pytest.raises(ValueError):
+        pick_flip({"agentview": flat.astype(np.uint8), "wrist": flat.astype(np.uint8)}, {"agentview": stored_flat, "wrist": stored_flat})
 
 
 @needs_gym
