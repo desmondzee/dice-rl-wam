@@ -78,3 +78,16 @@ The standalone evaluator (`script/eval_rl_checkpoint.py`) and the training loop 
 | pretrained | 0.366 | 0.520 | 0.473 | 0.443 | 0.443 |
 
 The spread across draws is about 6 points standard deviation, twice the binomial 2.9 for 300 independent episodes: on Tool Hang the outcome of an initial state depends more on the sampled action noise than on the state. The earlier "9-point gap" between the two paths was one such draw. Every 300-episode point on both our curve and the authors' therefore carries roughly ±6 points of sampling noise before any seed-to-seed training variance, and gate verdicts must average several evaluation points rather than read single rows.
+
+### Contraction diagnostic (`script/dicerl_sharpen.py`, `result/dicerl-sharpen/tool_hang_42/`)
+
+For each checkpoint: 60 max-Q-min rollouts on seeds 10000+ give 4,000–4,500 states; at each state K = 16 noises are drawn, the base action π_pre(s, z) and the corrected action π_pre(s, z) + r(s, z) are scored by the critic (min over the 10-ensemble), and the spread of the 16 corrected actions is compared with the spread of the 16 base actions (binned entropy ΔH with 50 bins over [−1, 1], and continuous Δlog-std).
+
+| step (env steps) | rollout success | V = mean Q(base) | ΔV | ΔH | Δlog-std | residual norm | Δlog-std by V quartile (low → high) |
+|---|---|---|---|---|---|---|---|
+| 1,000 (32k) | 0.20 | 0.231 | +0.015 | +0.015 | +0.100 | 0.096 | 0.073, 0.121, 0.108, 0.098 |
+| 4,000 (128k) | 0.60 | 0.313 | +0.027 | +0.001 | +0.086 | 0.119 | 0.083, 0.103, 0.098, 0.060 |
+| 7,000 (224k) | 0.53 | 0.266 | +0.029 | −0.001 | +0.032 | 0.116 | 0.025, 0.050, 0.031, 0.023 |
+| 8,000 (256k) | 0.70 | 0.338 | +0.037 | −0.007 | +0.021 | 0.116 | 0.031, 0.023, 0.011, 0.018 |
+
+Reading: the residual raises the critic's value of the executed action at every state (ΔV > 0 in all quartiles) and the gain grows with training, but it does not contract the action distribution. Early on it widens the spread of the K candidates (Δlog-std +0.10, i.e. 10% wider), and the widening decays towards zero by 256k steps; the per-state correlation between ΔH and either ΔV or V is below 0.14 in magnitude at every checkpoint, and the highest-value quartile is not contracted more than the others. The residual is a value-increasing shift of the whole candidate set rather than a sharpening of it. The same measure on the LingBot bounded recipe is in `docs/investigations/2026-10-20-residual-and-critic.md`; later Tool Hang checkpoints (14,000 and 34,000) will be added as the run reaches them.
