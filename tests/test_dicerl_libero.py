@@ -163,3 +163,28 @@ def test_flip_matches_wrapper_orient(tmp_path):
     frames = np.random.default_rng(0).integers(0, 255, (3, 8, 8, 3), dtype=np.uint8)
     for flip in ("none", "vertical", "both"):
         assert np.array_equal(oriented(frames, flip), np.stack([orient(f, flip) for f in frames]))
+
+
+def test_pick_flip_rejects_mismatch():
+    from script.dicerl_libero_gate0 import pick_flip
+    img = np.random.RandomState(0).randint(0, 255, (128, 128, 3), np.uint8)
+    rendered = {"agentview": img, "wrist": img}
+    stored = {"agentview": img[::-1], "wrist": img[::-1]}
+    flip, scores = pick_flip(rendered, stored)
+    assert flip == "vertical" and scores["vertical"] < 2 / 255
+    with pytest.raises(ValueError):
+        pick_flip(rendered, {"agentview": np.roll(img, 7, 0), "wrist": img})
+
+
+@needs_gym
+def test_make_libero_env_ignores_robosuite_horizon(monkeypatch):
+    import sys
+    import types
+    from env.gym_utils.wrapper import libero_image
+    seen = {}
+    fake = types.ModuleType("libero.libero.envs")
+    fake.OffScreenRenderEnv = lambda **kw: seen.update(kw)
+    monkeypatch.setitem(sys.modules, "libero.libero.envs", fake)
+    monkeypatch.setattr(libero_image, "libero_task_files", lambda name: ("task.bddl", None))
+    libero_image.make_libero_env("task")
+    assert seen["ignore_done"] is True and seen["bddl_file_name"] == "task.bddl"
