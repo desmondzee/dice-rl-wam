@@ -58,3 +58,12 @@ Both processes are single-threaded Python at about 85% of one core each; CUDA ti
 - 21:14 BST: both launched concurrently; 22:02: Square stopped at step 339 after the measurement above (its W&B run `kp2dh169` ends there; its run directory keeps the step-0 CSV).
 - 22:03: the `pkill` used to clear Square's leftover env workers matched the shared tmux server (its command line names the first session's command), which took the Tool Hang run (`epveqvjz`, step 230) down with it. Lesson: kill by pid, never by a pattern that the tmux server's or the shell's own command line can match.
 - 22:06 BST: Tool Hang seed 42 relaunched alone (`dicerl-tool_hang-42`, W&B `hm8ciyax`). The box-side tmux session `dicerl-chain` (`~/Documents/dice/dicerl/chain.sh`, log `chain.log`) stops it by session name once its evaluation CSV holds the step-34,000 row and launches Square seed 42. Earlier failed launches (wandb 0.17.7, released-config unknown keys) remain in the same log files, appended by `tee -a`.
+
+### Tool Hang seed 42, success on 300 held-out episodes (run `hm8ciyax`, 6.2 s/step)
+
+| env steps | 32k | 64k | 96k | 128k | 160k | 192k |
+|---|---|---|---|---|---|---|
+| ours | 0.330 | 0.287 | 0.520 | 0.473 | 0.553 | 0.617 |
+| authors | 0.183 | 0.340 | 0.553 | 0.457 | 0.710 | 0.473 |
+
+Through 192k (2026-10-21 08:30 BST) every point is within 16 points of the authors' and both curves swing ±15 points between consecutive evaluations, so the single-seed noise is of the same size as the gap; the running mean over the six points is 0.463 ours against 0.453 theirs.
