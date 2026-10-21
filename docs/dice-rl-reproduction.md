@@ -67,3 +67,14 @@ Both processes are single-threaded Python at about 85% of one core each; CUDA ti
 | authors | 0.183 | 0.340 | 0.553 | 0.457 | 0.710 | 0.473 |
 
 Through 192k (2026-10-21 08:30 BST) every point is within 16 points of the authors' and both curves swing ±15 points between consecutive evaluations, so the single-seed noise is of the same size as the gap; the running mean over the six points is 0.463 ours against 0.453 theirs.
+
+### Evaluation noise (step-7,000 checkpoint, 2026-10-21)
+
+The standalone evaluator (`script/eval_rl_checkpoint.py`) and the training loop use the same 300 reset seeds (10000–10299, applied through the robomimic wrapper's `np.random.seed` at every reset), the same 30 envs, the same max-Q-min selection with 16 samples and equivalent multi-step wrappers; the training loop additionally seeds torch with the run seed. Two standalone runs with torch seed 42 are identical, so both paths are deterministic given the seed and differ only by the policy's action noise. Repeated standalone evaluations of the same checkpoint on the same 300 initial states:
+
+| torch seed | unseeded | unseeded | 42 | 43 | training loop (seed 42) |
+|---|---|---|---|---|---|
+| fine-tuned, step 7,000 | 0.463 | 0.450 | 0.570 | 0.543 | 0.553 |
+| pretrained | 0.366 | 0.520 | 0.473 | 0.443 | 0.443 |
+
+The spread across draws is about 6 points standard deviation, twice the binomial 2.9 for 300 independent episodes: on Tool Hang the outcome of an initial state depends more on the sampled action noise than on the state. The earlier "9-point gap" between the two paths was one such draw. Every 300-episode point on both our curve and the authors' therefore carries roughly ±6 points of sampling noise before any seed-to-seed training variance, and gate verdicts must average several evaluation points rather than read single rows.
