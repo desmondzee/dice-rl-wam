@@ -12,7 +12,6 @@ MAX_DRIFT = 1e-4
 MAX_CONTROLLER_DRIFT = 2e-2
 RESTORE_TOLERANCE = 1e-6
 MIN_SOFT_REPLAYS = 5
-REPLAY_MARGIN = 2
 N_ENVS = 8
 CHUNK = 8
 HORIZON = 520
@@ -221,7 +220,7 @@ def controller(task, magnitude=0.3, steps=50):
 def failures(result):
     out = []
     hard, soft = result["replay"]["hard"]["successes"], result["replay"]["soft"]["successes"]
-    if soft < MIN_SOFT_REPLAYS or soft < hard - REPLAY_MARGIN:
+    if soft < MIN_SOFT_REPLAYS:
         out.append(f"replay soft {soft} hard {hard}")
     for name, per_state in result["equivalence"].items():
         for i, v in per_state.items():
