@@ -15,15 +15,15 @@ Script `script/dicerl_libero_gate_a.py`, output `$DICE_RL_DATA_DIR/libero/<task>
 
 | check | result |
 |---|---|
-| hard reset latency (`reset` + `set_init_state`, mean of 10) | 0.616 s |
-| soft reset latency | 0.0020 s (314x faster) |
-| async rate, 8 envs, chunk 8, 163 chunks (about 20 episodes), soft | 1218 env steps/s |
-| demo_0 replay, 10 passes, hard | 8/10 (first success at steps 318, 320, 325, 321, 322, 325, 326, 325) |
-| demo_0 replay, 10 passes, soft | 7/10 (first success at steps 326, 320, 321, 325, 326, 321, 323) |
+| hard reset latency (`reset` + `set_init_state`, mean of 10) | 0.643 s |
+| soft reset latency | 0.0020 s (321x faster) |
+| async rate, 8 envs, chunk 8, 163 chunks (about 20 episodes), soft | 1198 env steps/s |
+| demo_0 replay, 10 passes, hard | 6/10 in the latest run (8/10 in the run before) |
+| demo_0 replay, 10 passes, soft | 7/10 in the latest run (7/10 in the run before); per-pass first-success steps are in `gate_a.json` |
 | replay pass rule | soft at least 5 of 10 and at least hard minus 2: passed |
 | drift: 200 soft resets to state 0, 20 random steps between, max proprio spread | 0.0 (limit 1e-4) |
 
-Open-loop replay of a demo is nondeterministic even with hard resets (8 of 10 here, 5 of 10 in an earlier run), so the replay check compares success counts instead of requiring a single pass.
+Open-loop replay of a demo is nondeterministic even with hard resets (5, 6 and 8 of 10 across runs), so the replay check compares success counts instead of requiring a single pass.
 
 Equivalence of the first wrapper observation after `reset(options={"init_state": s})` against a fresh hard-reset build (max abs proprioception difference; mean abs image difference over 255 for agentview and wrist):
 
@@ -43,6 +43,9 @@ Controller reference (shifted joints are state 0 plus 0.3 rad with alternating s
 | shifted, `set_init_state` only | 0.277 |
 | shifted, with `update_initial_joints` | 5.5e-9 |
 | shifted, through `wrapper.reset` | 2.7e-9 |
+| shifted through the wrapper, then canonical state 0 through the wrapper, same soft env | 0.0424 (identical to the canonical row) |
+
+The canonical row is nonzero because the controller's default reference is the robot's `init_qpos` (second joint -0.161), not the demo joints (-0.133); a hard-reset env gives the same 0.0424. Restoring the canonical reference is therefore checked as equality with the canonical row (within 1e-6), not as 2e-2; the with-update bound is 2e-2. `load_state` compares joints to the canonical ones with `rtol=0, atol=1e-9`.
 
 Soft-reset gripper fix: the Panda gripper's `current_action` integrator survives a soft `env.reset()` (hard mode rebuilds it), which first gave a 3.0e-3 proprioception spread in the gripper dimensions (2.1e-4 in the equivalence check). The wrapper now sets `robot.gripper.current_action = np.zeros(gripper.dof)` after every `env.reset()` when `hard_reset` is false, which is the value of a fresh gripper.
 

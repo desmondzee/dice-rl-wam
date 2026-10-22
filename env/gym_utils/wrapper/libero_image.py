@@ -157,7 +157,7 @@ class LiberoImageWrapper(gym.Env):
     def load_state(self, state):
         raw_obs = self.env.set_init_state(state)
         joints = np.asarray(state)[1:8]
-        if self.canonical_joints is None or not np.allclose(joints, self.canonical_joints, atol=1e-9):
+        if self.canonical_joints is None or not np.allclose(joints, self.canonical_joints, rtol=0, atol=1e-9):
             self.env.env.robots[0].controller.update_initial_joints(joints)
         return raw_obs
 

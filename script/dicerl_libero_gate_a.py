@@ -9,6 +9,8 @@ import numpy as np
 EQUIVALENCE_STATES = (0, 17, 42)
 MAX_PROPRIO_DIFF = 1e-3
 MAX_DRIFT = 1e-4
+MAX_CONTROLLER_DRIFT = 2e-2
+RESTORE_TOLERANCE = 1e-6
 MIN_SOFT_REPLAYS = 5
 REPLAY_MARGIN = 2
 N_ENVS = 8
@@ -208,10 +210,13 @@ def controller(task, magnitude=0.3, steps=50):
         with_update = joint_drift(robot, shifted[1:8], env, steps)
         wrapper.reset(options={"init_state": shifted})
         via_wrapper = joint_drift(robot, shifted[1:8], env, steps)
+        wrapper.reset(options={"init_state": shifted})
+        wrapper.reset(options={"init_state": states[0]})
+        restored = joint_drift(robot, states[0][1:8], env, steps)
     finally:
         env.close()
     return {"magnitude": magnitude, "steps": steps, "canonical_state_0": canonical, "without_update": without,
-            "with_update": with_update, "via_wrapper": via_wrapper}
+            "with_update": with_update, "via_wrapper": via_wrapper, "shifted_then_canonical": restored}
 
 
 def failures(result):
@@ -223,6 +228,11 @@ def failures(result):
         for i, v in per_state.items():
             if v["proprio_max_abs"] > MAX_PROPRIO_DIFF:
                 out.append(f"equivalence {name} state {i}: {v['proprio_max_abs']}")
+    c = result["controller"]
+    if c["with_update"]["max_drift"] > MAX_CONTROLLER_DRIFT:
+        out.append(f"controller with_update {c['with_update']['max_drift']}")
+    if c["shifted_then_canonical"]["max_drift"] > c["canonical_state_0"]["max_drift"] + RESTORE_TOLERANCE:
+        out.append(f"controller shifted_then_canonical {c['shifted_then_canonical']['max_drift']}")
     if result["drift"]["max_proprio_spread"] > MAX_DRIFT:
         out.append(f"drift {result['drift']['max_proprio_spread']}")
     return out

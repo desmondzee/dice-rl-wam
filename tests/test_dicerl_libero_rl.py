@@ -66,6 +66,18 @@ def test_controller_reference_follows_loaded_joints(tmp_path):
 
 
 @needs_gym
+def test_controller_reference_update_tolerance_is_absolute_1e9(tmp_path):
+    env, w = make_rl_wrapper(tmp_path)
+    canonical = w.init_states[0]
+    tiny = canonical.copy(); tiny[1:8] += 1e-7
+    w.reset(options={"init_state": tiny})
+    assert len(env.controller_calls) == 1
+    inside = canonical.copy(); inside[1:8] += 1e-10
+    w.reset(options={"init_state": inside})
+    assert len(env.controller_calls) == 1
+
+
+@needs_gym
 def test_hard_reset_flag_is_stored_and_passed():
     from env.gym_utils.wrapper.libero_image import LiberoImageWrapper
     w = LiberoImageWrapper(FakeRLLibero(), None, hard_reset=False)
