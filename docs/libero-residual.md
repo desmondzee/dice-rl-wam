@@ -173,6 +173,10 @@ This launch was stopped at iteration about 300 because of the factory defect rec
 
 Same command and schedule as the stopped launch, on the fixed code (commit 64f5593): run directory `.../2026-10-22_17-44-34_42`, W&B run `7t5af9s4`, log `finetune_kitchenscene6_42_20261022-174434.log`, sessions `dicerl-rl-kitchenscene6-42` and `dicerl-rlwatch-42`. Every environment built through the factory now soft-resets with the gripper integrator zeroed.
 
+## Control run (Watson, 2026-10-22 22:57 BST)
+
+The user's decision after the relaunch: the same recipe on canonical starts only, as the control for attribution. Watson was prepared over the boxes' LAN (repo, 20-demo dataset, held-out state files and the prior checkpoint copied from Jarvis; LIBERO venv built with `brev/dicerl/setup_libero.sh`). Launched with `bash brev/dicerl/finetune_libero.sh <task> 42 shift.end_magnitude=0` on the same commit (64f5593): run directory `.../2026-10-22_22-56-55_42` under Watson's `$DICE_RL_LOG_DIR/libero-finetune/`, W&B run `uycoqpgp`, sessions `dicerl-rl-kitchenscene6-42` and `dicerl-rlwatch-42` on Watson. Identical config apart from `shift.end_magnitude: 0` (the ramp then holds the shift at 0 throughout, so every training start is a canonical stored state); same seed, same in-training and held-out monitoring protocols. Both runs use the fixed soft-reset path.
+
 ## Sweep
 
 | iteration | env steps | shift (rad) | in-training canonical | held-out monitoring (84, ±0.05) | residual norm | filter active |
