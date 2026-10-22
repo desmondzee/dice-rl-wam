@@ -125,3 +125,15 @@ Decision (user): the prior is trained on 20 demonstrations instead of 50. The 50
 
 
 ## Selection
+
+## Selection (2026-10-22)
+
+Selected prior: `state_100.pt` of run `2026-10-22_10-11-34_42` (20 demonstrations, epoch 100, 9,500 updates, W&B `zft63qq0`), path `~/Documents/dice/dicerl/log_dir/libero-pretrain/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it_pre_flow_matching_mlp_img_ta8_td10/2026-10-22_10-11-34_42/checkpoint/state_100.pt` on Jarvis.
+
+| evaluation | torch seeds | success | stderr | mean length |
+|---|---|---|---|---|
+| watcher (stop decision) | 0, 1 | 0.52 | 0.050 | 428.5 |
+| confirmation (`eval_100_seeds23.json`) | 2, 3 | 0.47 | 0.050 | 431.6 |
+| pooled, 200 episodes | 0–3 | 0.495 | 0.035 | 430 |
+
+The watcher stopped training at the first scheduled checkpoint because it was in the 0.40–0.60 band, so no neighbouring epochs were evaluated; the second seed pair confirms the placement. For comparison the 50-demo prior reached 0.74 at the same epoch. This is the in-distribution baseline the residual milestone builds on; its evaluation protocol (50 stored initial states × 2 torch seeds, 520 steps, 8-step chunks, single-sample flow) is the one every later comparison uses.
