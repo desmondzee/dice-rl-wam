@@ -196,8 +196,7 @@ def controller(task, magnitude=0.3, steps=50):
     env, wrapper, states = build(task, False)
     robot = env.env.robots[0]
     try:
-        env.reset()
-        env.set_init_state(states[0])
+        wrapper.reset(options={"init_state": states[0]})
         canonical = joint_drift(robot, states[0][1:8], env, steps)
         shifted = np.array(states[0])
         shifted[1:8] += magnitude * JOINT_PATTERN

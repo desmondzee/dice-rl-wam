@@ -69,7 +69,7 @@ def test_controller_reference_follows_loaded_joints(tmp_path):
 def test_controller_reference_update_tolerance_is_absolute_1e9(tmp_path):
     env, w = make_rl_wrapper(tmp_path)
     canonical = w.init_states[0]
-    tiny = canonical.copy(); tiny[1:8] += 1e-7
+    tiny = canonical.copy(); tiny[4] += 1e-7
     w.reset(options={"init_state": tiny})
     assert len(env.controller_calls) == 1
     inside = canonical.copy(); inside[1:8] += 1e-10
