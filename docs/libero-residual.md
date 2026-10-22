@@ -51,16 +51,16 @@ Soft-reset gripper fix: the Panda gripper's `current_action` integrator survives
 
 ## Gate B
 
-Script `script/dicerl_libero_gate_b.py` (part 1), output `$DICE_RL_DATA_DIR/libero/<task>/gate_b.json`. Run on Jarvis (GB10), 2026-10-22, exit status 0. One soft-reset env, real init states, `set_shift_seed(1)` before each magnitude, 200 training-path resets cycling over the 50 canonical states. The offset is a uniform direction on the 7-sphere with norm uniform in `[0, m]`; a draw is rejected when a joint is within 0.02 rad of its limit after `sim.forward()` or a robot or gripper geom touches a geom that is not a gripper geom, resampled up to 20 times, then falls back to the unshifted state.
+Script `script/dicerl_libero_gate_b.py` (part 1), output `$DICE_RL_DATA_DIR/libero/<task>/gate_b.json`. Run on Jarvis (GB10), 2026-10-22, exit status 0. One soft-reset env, real init states, `set_shift_seed(1)` before each magnitude (the per-reset stream is `RandomState([seed, reset_count])`), 200 training-path resets cycling over the 50 canonical states. The offset is a uniform direction on the 7-sphere with norm uniform in `[0, m]`; a draw is rejected when a joint is within 0.02 rad of its limit after `sim.forward()` or a robot or gripper geom touches a geom that is not a gripper geom, resampled up to 20 times, then falls back to the unshifted state.
 
 | magnitude (rad) | rejections / tries | rejection rate | fallbacks | joint l2 norm p10 / p50 / p90 | eef displacement p10 / p50 / p90 (m) |
 |---|---|---|---|---|---|
-| 0.1 | 0 / 200 | 0.000 | 0 | 0.008 / 0.047 / 0.089 | 0.0024 / 0.015 / 0.038 |
-| 0.3 | 5 / 205 | 0.024 | 0 | 0.024 / 0.132 / 0.263 | 0.0072 / 0.043 / 0.109 |
-| 0.5 | 9 / 209 | 0.043 | 0 | 0.040 / 0.224 / 0.446 | 0.0120 / 0.071 / 0.189 |
-| 0.6 | 11 / 211 | 0.052 | 0 | 0.048 / 0.275 / 0.536 | 0.0144 / 0.083 / 0.228 |
+| 0.1 | 0 / 200 | 0.000 | 0 | 0.011 / 0.054 / 0.095 | 0.0038 / 0.016 / 0.040 |
+| 0.3 | 10 / 210 | 0.048 | 0 | 0.032 / 0.151 / 0.282 | 0.0093 / 0.046 / 0.116 |
+| 0.5 | 14 / 214 | 0.065 | 0 | 0.054 / 0.247 / 0.467 | 0.0156 / 0.075 / 0.194 |
+| 0.6 | 15 / 215 | 0.070 | 0 | 0.064 / 0.301 / 0.560 | 0.0187 / 0.091 / 0.231 |
 
-Rejection rate is rejections over tries (rejections plus accepted draws); the gate fails if it exceeds 0.2 at 0.6 (it is 0.052). Joint norms are of accepted draws. Eef displacement is the norm of the unnormalised end-effector position after the shifted reset minus that after an unshifted reset of the same stored state (10 settle steps each); two unshifted resets of the same state give identical positions (jitter 0.0), so the displacement is entirely the shift. A diagnostic of 600 raw draws at 0.6 rad found no joint-limit rejections for this task (the narrowest margin never binds) and 19 contact rejections, all gripper or hand geoms against microwave geoms (`microwave_1_g14`, `g15`, `g17`) plus two `robot0_link6` contacts, so the contact check fires on the real env.
+Rejection rate is rejections over tries (rejections plus accepted draws); the gate fails if it exceeds 0.2 at 0.6 (it is 0.070). Joint norms are of accepted draws. Eef displacement is the norm of the unnormalised end-effector position after the shifted reset minus that after an unshifted reset of the same stored state (10 settle steps each); two unshifted resets of the same state give identical positions (jitter 0.0), so the displacement is entirely the shift. The earlier run with a summed seed gave the same statistics within noise (0.6 rad: 11 / 211, norm p50 0.275, eef p50 0.083). A diagnostic of 600 raw draws at 0.6 rad found no joint-limit rejections for this task (the narrowest margin never binds) and 19 contact rejections, all gripper or hand geoms against microwave geoms (`microwave_1_g14`, `g15`, `g17`) plus two `robot0_link6` contacts, so the contact check fires on the real env.
 
 Fallback resets reload the unshifted state after a fresh `env.reset()`, because `load_state` only updates the controller reference when the joints differ from the canonical ones and would otherwise leave the reference of the last rejected draw in place.
 

@@ -217,7 +217,7 @@ class LiberoImageWrapper(gym.Env):
         if "shift" in options:
             magnitude, rng = options["shift"]["magnitude"], np.random.RandomState(options["shift"]["seed"])
         elif not explicit and self.shift:
-            magnitude, rng = self.shift, np.random.RandomState(self.shift_seed + self.reset_count)
+            magnitude, rng = self.shift, np.random.RandomState([self.shift_seed, self.reset_count])
         self.reset_count += 1
         raw_obs = self.restart()
         if state is not None and magnitude:

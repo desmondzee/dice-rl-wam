@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from test_dicerl_libero import FakeLibero, needs_gym
 
@@ -188,6 +189,58 @@ def test_training_shift_draws_shifted_stored_state_and_counts(tmp_path):
     w.reset(options={"seed": 3})
     assert 0 < np.linalg.norm(env.state[1:8] - w.init_states[3][1:8]) <= 0.3
     assert w.shift_stats() == {"draws": 1, "rejections": 0, "fallbacks": 0}
+
+
+def shifted_joints(w, env, n):
+    out = []
+    for _ in range(n):
+        w.reset(options={"seed": 3})
+        out.append(env.state[1:8].copy())
+    return out
+
+
+@needs_gym
+def test_set_shift_seed_zeroes_reset_count(tmp_path):
+    env, w = make_rl_wrapper(tmp_path)
+    w.reset(options={"seed": 1}); w.reset(options={"seed": 2})
+    assert w.reset_count == 2
+    w.set_shift_seed(5)
+    assert w.reset_count == 0 and w.shift_seed == 5
+
+
+@needs_gym
+def test_shift_stream_is_deterministic_per_seed_and_reset(tmp_path):
+    runs = {}
+    for seed in (7, 7, 8):
+        env, w = make_rl_wrapper(tmp_path)
+        w.set_shift_seed(seed); w.set_shift(0.3)
+        runs.setdefault(seed, []).append(shifted_joints(w, env, 4))
+    a, b = runs[7]
+    assert all(np.array_equal(x, y) for x, y in zip(a, b))
+    assert not np.array_equal(a[0], a[1])
+    c = runs[8][0]
+    for k in range(3):
+        assert not np.array_equal(a[k + 1], c[k]) and not np.array_equal(c[k + 1], a[k])
+    assert not np.array_equal(a[0], c[0])
+
+
+@needs_gym
+@pytest.mark.parametrize("off", [0, None])
+def test_set_shift_zero_or_none_disables(tmp_path, off):
+    env, w = make_rl_wrapper(tmp_path)
+    w.set_shift_seed(7); w.set_shift(0.3); w.set_shift(off)
+    assert w.shift is None
+    w.reset(options={"seed": 3})
+    assert np.array_equal(env.state, w.init_states[3]) and w.shift_stats() == {"draws": 0, "rejections": 0, "fallbacks": 0}
+
+
+@needs_gym
+def test_shift_stats_clears_on_read(tmp_path):
+    env, w = make_rl_wrapper(tmp_path)
+    w.set_shift_seed(7); w.set_shift(0.3)
+    w.reset(options={"seed": 3})
+    assert w.shift_stats()["draws"] == 1
+    assert w.shift_stats() == {"draws": 0, "rejections": 0, "fallbacks": 0}
 
 
 @needs_gym
