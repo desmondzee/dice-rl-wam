@@ -44,7 +44,7 @@ The demo file stores the raw MuJoCo orientation (agentview and wrist both upside
 | vertical | 0.3705 | 0.3705 (0.3706) | 0.2522 (0.2534) |
 | both | 0.4066 | 0.4066 (0.4067) | 0.2772 (0.2766) |
 
-Criterion: the best flip's score must be below 0.05 and at most half of the next-best score, otherwise `pick_flip` raises with the three scores. This replaces the design's 2/255 = 0.0078 bound, which this scene does not meet on the wrist camera (best of 8 resets 0.0197). The bound is too tight because renders of the same state already differ between resets. `gate0.json` records this as `reset_jitter`, the mean absolute pixel difference as a fraction of 255 between two renders of the same `set_init_state(states[0])` after separate `reset()` calls:
+Criterion: the best flip's score must be below 0.05 and at most half of the next-best score, otherwise `pick_flip` raises with the three scores. This replaces the design's 2/255 = 0.0078 bound, which this scene does not meet on either camera: the wrist misses it clearly (best of 8 resets 0.0197) and agentview narrowly (0.0080 > 0.0078). The bound is too tight because renders of the same state already differ between resets. `gate0.json` records this as `reset_jitter`, the mean absolute pixel difference as a fraction of 255 between two renders of the same `set_init_state(states[0])` after separate `reset()` calls:
 
 | measurement | agentview | wrist |
 |---|---|---|
@@ -91,7 +91,7 @@ Config `brev/dicerl/cfg/libero/<task>/pre_flow_matching_unet_img.yaml` (Tool Han
 
 ### Smoke run (100 epochs, seed 42, Jarvis GB10)
 
-- 15,232 training samples (50 trajectories), batch 64, 238 updates per epoch: 21.20 s per epoch (mean of epochs 1 to 99; min 21.07, max 21.78). 8,000 epochs projects to 47.1 h, above the 24 h budget; the in-training rollouts add 80 x 12 s = 0.3 h.
+- 14,882 training samples (50 trajectories, 15,232 steps; each demo yields T - 7 samples at horizon 8), batch 64, 233 updates per epoch (the partial last batch is kept): 21.20 s per epoch (mean of epochs 1 to 99; min 21.07, max 21.78). 8,000 epochs projects to 47.1 h, above the 24 h budget; the in-training rollouts add 80 x 12 s = 0.3 h.
 - In-training rollout at epoch 100 (10 envs, 65 chunks): 11.8 s. Each checkpoint is 199 MB.
 - Evaluating `state_100.pt` with `script.dicerl_libero_eval --envs 25` (100 episodes, 50 states x 2 seeds) after the reset fix: 144 s wall including model load. `summary.json`: success_rate 0.74, stderr 0.044, n 100, mean_length 358.2. Successes by batch of 25: seed 0 22 and 16, seed 1 18 and 18.
 - The in-training rollout reported `Done envs: 1/10` and `success rate 0.9000` because its metric is the best summed reward over the rollout reaching 1 (any step with `check_success`), and 9 of 10 envs had succeeded, terminated and auto-reset before the last chunk, so only one was done at the end. It is not an inverted metric.
@@ -104,7 +104,7 @@ The first evaluation gave 0.22 in 76 s. Per episode, the first reset of each wor
 
 Decision (user): the prior is trained on 20 demonstrations instead of 50. The 50-demo prior already scored 0.74 on the held-out protocol at epoch 100 (smoke run above), against a target band of 0.40 to 0.60, so a weaker prior is wanted for the residual fine-tuning to have headroom.
 
-- Demos: `demo_0` to `demo_19` in numeric order. `process_libero_dataset.py --flip none --max-episodes 20` wrote `$DICE_RL_DATA_DIR/libero/<task>/ph_pretrain_20/` (`train.npz` 223 MB, `normalization.npz`, statistics over these 20 demos only); `ph_pretrain/` is untouched. Output: 20 episodes, 6,113 steps (95 updates per epoch at batch 64).
+- Demos: `demo_0` to `demo_19` in numeric order. `process_libero_dataset.py --flip none --max-episodes 20` wrote `$DICE_RL_DATA_DIR/libero/<task>/ph_pretrain_20/` (`train.npz` 223 MB, `normalization.npz`, statistics over these 20 demos only); `ph_pretrain/` is untouched. Output: 20 episodes, 6,113 steps, which give 5,973 samples (T - 7 per demo) and 94 updates per epoch at batch 64 (partial last batch kept).
 - Config: `train_dataset_path` and `normalization_path` point at `ph_pretrain_20`, `train_dataset.max_n_episodes: 20`, `train.save_model_freq: 100`; everything else as the 50-demo config.
 - Schedule: the watcher evaluates a checkpoint when its epoch is in {100, 200, ..., 1000, 2000, ..., 8000}, stops training at the first success rate in [0.40, 0.60], exits 1 at epoch 8000 without a hit or when the training session dies.
 - Launch: 2026-10-22 10:11:33 (Jarvis local time, UTC+1), `pretrain_libero.sh <task> 42`; sessions `dicerl-pre-kitchenscene6-42` and `dicerl-watch-42`; W&B run `zft63qq0` in `dice-rl-libero`; run directory `$DICE_RL_LOG_DIR/libero-pretrain/<task>_pre_flow_matching_mlp_img_ta8_td10/2026-10-22_10-11-34_42`.
@@ -118,17 +118,15 @@ Decision (user): the prior is trained on 20 demonstrations instead of 50. The 50
 - The row is in band, so the watcher stopped the training process group (the log ends at epoch 149) and exited 0; both tmux sessions are gone. Checkpoint: `<run dir>/checkpoint/state_100.pt` (208 MB), evaluation under `<run dir>/eval_100/`.
 - The evaluation ran concurrently with training on the same GPU and took about 9 minutes (10:26 to 10:35) instead of the 144 s measured alone; training epochs slowed to 14 to 17 s while it ran.
 
-### Findings that affect later tasks
+### Findings from pretraining
 
 - `import huggingface_hub` in the `libero` branch of `make_async` is required: with `pass`, the 10 env workers print the OpenGL init line and then hang for more than 200 s (reproduced twice with `train.n_epochs=1`); with the import the same command trains. libero imports `huggingface_hub` from its `download_utils` inside each forked worker; the cause of the hang was not isolated further. The evaluator alone (no wandb, no training) works either way.
 - `script/run.py` imports `pretty_errors` and `gdown`, so `setup_libero.sh` pins both.
 
 
-## Selection
-
 ## Selection (2026-10-22)
 
-Selected prior: `state_100.pt` of run `2026-10-22_10-11-34_42` (20 demonstrations, epoch 100, 9,500 updates, W&B `zft63qq0`), path `~/Documents/dice/dicerl/log_dir/libero-pretrain/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it_pre_flow_matching_mlp_img_ta8_td10/2026-10-22_10-11-34_42/checkpoint/state_100.pt` on Jarvis.
+Selected prior: `state_100.pt` of run `2026-10-22_10-11-34_42` (20 demonstrations, epoch 100, 9,400 updates, W&B `zft63qq0`), path `~/Documents/dice/dicerl/log_dir/libero-pretrain/KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it_pre_flow_matching_mlp_img_ta8_td10/2026-10-22_10-11-34_42/checkpoint/state_100.pt` on Jarvis.
 
 | evaluation | torch seeds | success | stderr | mean length |
 |---|---|---|---|---|
@@ -136,4 +134,6 @@ Selected prior: `state_100.pt` of run `2026-10-22_10-11-34_42` (20 demonstration
 | confirmation (`eval_100_seeds23.json`) | 2, 3 | 0.47 | 0.050 | 431.6 |
 | pooled, 200 episodes | 0–3 | 0.495 | 0.035 | 430 |
 
-The watcher stopped training at the first scheduled checkpoint because it was in the 0.40–0.60 band, so no neighbouring epochs were evaluated; the second seed pair confirms the placement. For comparison the 50-demo prior reached 0.74 at the same epoch. This is the in-distribution baseline the residual milestone builds on; its evaluation protocol (50 stored initial states × 2 torch seeds, 520 steps, 8-step chunks, single-sample flow) is the one every later comparison uses.
+The watcher stopped training at the first scheduled checkpoint because it was in the 0.40–0.60 band, so no neighbouring epochs were evaluated; the second seed pair confirms the placement. For comparison the 50-demo prior reached 0.74 at the same epoch. This is the in-distribution baseline the residual milestone builds on; its evaluation protocol (50 stored initial states × 2 torch seeds, 520 steps, 8-step chunks, single-sample flow) is the one every later comparison uses. Evaluations are statistical, not bitwise reproducible: replay from the same stored state reaches first success anywhere between steps 301 and 326 across resets. Episode lengths are counted in whole 8-step chunks, so terminated episodes are overstated by up to 7 steps.
+
+The confirmation evaluation is reproduced with `"$PY" -m script.dicerl_libero_eval --ckpt <run>/checkpoint/state_100.pt --envs 25 --seeds 2 3 --out <run>/eval_100_seeds23`, which writes `episodes.csv` and `summary.json` (with `seeds` and `weights: model`) to `<run>/eval_100_seeds23`. The recorded `eval_100_seeds23.json` was produced by the same functions before the `--seeds` flag existed.

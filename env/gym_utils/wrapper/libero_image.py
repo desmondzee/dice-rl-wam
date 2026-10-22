@@ -49,7 +49,9 @@ def libero_task_files(task_name):
     if task_name not in names:
         raise ValueError(f"Unknown LIBERO-10 task {task_name!r}")
     index = names.index(task_name)
-    return suite.get_task_bddl_file_path(index), np.asarray(suite.get_task_init_states(index))
+    states = np.asarray(suite.get_task_init_states(index))
+    states.setflags(write=False)
+    return suite.get_task_bddl_file_path(index), states
 
 
 def quat_to_axis_angle(quat_xyzw):

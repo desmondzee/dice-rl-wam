@@ -3,6 +3,7 @@ import importlib.util
 import numpy as np
 import pytest
 
+needs_h5py = pytest.mark.skipif(importlib.util.find_spec("h5py") is None, reason="h5py not installed")
 needs_gym = pytest.mark.skipif(importlib.util.find_spec("gym") is None, reason="gym not installed")
 
 
@@ -54,6 +55,17 @@ def test_every_reset_resets_raw_env_before_set_init_state_and_settles(tmp_path):
     w.reset(options={"seed": 2})
     assert env.calls == (["reset", "set_init_state"] + ["step"] * 10) * 2
     assert np.allclose(env.state, 2.0)
+
+
+@needs_gym
+def test_read_only_init_states_are_kept_without_copy(tmp_path):
+    from env.gym_utils.wrapper.libero_image import LiberoImageWrapper
+    states = np.arange(50)[:, None] * np.ones((50, 47))
+    states.setflags(write=False)
+    w = LiberoImageWrapper(FakeLibero(), shape_meta=None, init_states=states)
+    assert w.init_states.flags.writeable is False and np.shares_memory(w.init_states, states)
+    w.reset(seed=3)
+    assert states.flags.writeable is False and np.array_equal(states[3], 3 * np.ones(47))
 
 
 @needs_gym
@@ -131,6 +143,7 @@ def make_demo_h5(path, lengths=(5, 7)):
             g["states"] = np.zeros((n, 47))
 
 
+@needs_h5py
 def test_convert_shapes_and_order(tmp_path):
     from script.dataset.process_libero_dataset import convert
     make_demo_h5(tmp_path / "d.hdf5")
@@ -141,6 +154,7 @@ def test_convert_shapes_and_order(tmp_path):
     assert list(d["traj_lengths"]) == [5, 7] and d["rewards"].sum() == 2 and d["terminals"].sum() == 2
 
 
+@needs_h5py
 def test_convert_max_episodes_caps_demos_and_stats(tmp_path):
     from script.dataset.process_libero_dataset import convert
     make_demo_h5(tmp_path / "d.hdf5", lengths=(5, 7, 4))
@@ -150,6 +164,7 @@ def test_convert_max_episodes_caps_demos_and_stats(tmp_path):
     assert np.allclose(n["obs_max"][:3], [1.0, 1.5, 2.0])
 
 
+@needs_h5py
 def test_normalization_true_extremes(tmp_path):
     from script.dataset.process_libero_dataset import convert
     make_demo_h5(tmp_path / "d.hdf5")
@@ -161,6 +176,7 @@ def test_normalization_true_extremes(tmp_path):
     assert np.isclose(n["action_min"].min(), -0.5) and np.isclose(n["action_max"].max(), 0.5)
 
 
+@needs_h5py
 def test_convert_orders_demos_numerically_and_flips(tmp_path):
     import h5py
     from script.dataset.process_libero_dataset import convert
@@ -223,6 +239,11 @@ def test_episode_plan_order():
     from script.dicerl_libero_eval import episode_plan
     plan = episode_plan(3, (0, 1))
     assert plan == [{"init_state_id": 0, "seed": 0}, {"init_state_id": 1, "seed": 0}, {"init_state_id": 2, "seed": 0}, {"init_state_id": 0, "seed": 1}, {"init_state_id": 1, "seed": 1}, {"init_state_id": 2, "seed": 1}]
+
+
+def test_episode_plan_seed_major_with_custom_seeds():
+    from script.dicerl_libero_eval import episode_plan
+    assert episode_plan(2, (2, 3)) == [{"init_state_id": 0, "seed": 2}, {"init_state_id": 1, "seed": 2}, {"init_state_id": 0, "seed": 3}, {"init_state_id": 1, "seed": 3}]
 
 
 class FakeVenv:

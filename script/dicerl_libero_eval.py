@@ -97,17 +97,20 @@ def flow_policy(model, act_steps, device):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ckpt", required=True)
-    parser.add_argument("--envs", type=int, default=20)
+    parser.add_argument("--envs", type=int, default=25)
+    parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     parser.add_argument("--out", default=None)
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
+    if len(args.seeds) < 2:
+        parser.error("--seeds needs at least two values")
     from env.gym_utils.wrapper.libero_image import libero_task_files
     cfg = load_cfg(args.ckpt, args.device)
     venv = make_env(cfg, args.envs)
     try:
         _, model = load_prior(args.ckpt, args.device)
         init_states = libero_task_files(cfg.env.name)[1]
-        plan = episode_plan(50, (0, 1))
+        plan = episode_plan(50, tuple(args.seeds))
         act_steps, max_steps = cfg.act_steps, cfg.env.max_episode_steps
         rows = run_protocol(flow_policy(model, act_steps, args.device), venv, init_states, plan, args.envs, act_steps, max_steps)
     finally:
@@ -119,7 +122,7 @@ def main():
         writer = csv.DictWriter(f, fieldnames=["init_state_id", "seed", "success", "length"])
         writer.writeheader()
         writer.writerows(rows)
-    summary = {**summarise(rows), "ckpt": os.path.abspath(args.ckpt), "task": cfg.env.name, "max_steps": max_steps, "act_steps": act_steps, "n_envs": args.envs}
+    summary = {**summarise(rows), "ckpt": os.path.abspath(args.ckpt), "task": cfg.env.name, "max_steps": max_steps, "act_steps": act_steps, "n_envs": args.envs, "seeds": list(args.seeds), "weights": "model"}
     with open(os.path.join(out, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
     print(json.dumps(summary, indent=2))
