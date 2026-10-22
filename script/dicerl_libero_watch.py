@@ -23,12 +23,20 @@ def select_checkpoint(rows):
     return min(banded, key=lambda r: (round(abs(r["success_rate"] - 0.5), 9), r["epoch"]))
 
 
-def checkpoint_epochs(run_dir, every):
+def schedule_epochs(schedule):
+    epochs = set()
+    for part in schedule.split(","):
+        step, last = (int(x) for x in part.split(":"))
+        epochs.update(range(step, last + 1, step))
+    return sorted(epochs)
+
+
+def checkpoint_epochs(run_dir, epochs):
     ckpt_dir = os.path.join(run_dir, "checkpoint")
     if not os.path.isdir(ckpt_dir):
         return []
-    epochs = [int(m.group(1)) for f in os.listdir(ckpt_dir) if (m := re.fullmatch(r"state_(\d+)\.pt", f))]
-    return sorted(e for e in epochs if e % every == 0)
+    found = [int(m.group(1)) for f in os.listdir(ckpt_dir) if (m := re.fullmatch(r"state_(\d+)\.pt", f))]
+    return sorted(e for e in found if e in epochs)
 
 
 def evaluate(run_dir, epoch, envs):
@@ -80,7 +88,8 @@ def decide(rows, session, pgid):
     return None
 
 
-def watch(run_dir, every, envs, session, poll):
+def watch(run_dir, epochs, envs, session, poll):
+    epochs = set(epochs)
     sweep_path = os.path.join(run_dir, "prior_sweep.json")
     rows = json.load(open(sweep_path)) if os.path.exists(sweep_path) else []
     done = {r["epoch"] for r in rows}
@@ -89,7 +98,7 @@ def watch(run_dir, every, envs, session, poll):
     if code is not None:
         return code
     while True:
-        for epoch in checkpoint_epochs(run_dir, every):
+        for epoch in checkpoint_epochs(run_dir, epochs):
             if epoch in done:
                 continue
             row = evaluate(run_dir, epoch, envs)
@@ -109,12 +118,12 @@ def watch(run_dir, every, envs, session, poll):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--every", type=int, default=1000)
+    parser.add_argument("--schedule", default="100:1000,1000:8000")
     parser.add_argument("--envs", type=int, default=25)
     parser.add_argument("--session", required=True)
     parser.add_argument("--poll", type=int, default=300)
     args = parser.parse_args()
-    return watch(args.run_dir, args.every, args.envs, args.session, args.poll)
+    return watch(args.run_dir, schedule_epochs(args.schedule), args.envs, args.session, args.poll)
 
 
 if __name__ == "__main__":

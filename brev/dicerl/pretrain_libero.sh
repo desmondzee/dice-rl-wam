@@ -27,5 +27,5 @@ for _ in $(seq 120); do
 done
 rm -f "$STAMP"
 [ -n "$RUN_DIR" ] || { echo "run directory did not appear" >&2; exit 1; }
-tmux new-session -d -s "$WATCH" "$PY -m script.dicerl_libero_watch --run-dir $RUN_DIR --every 1000 --envs 25 --session $PRE 2>&1 | tee -a $DICE_RL_LOG_DIR/watch_${SHORT}_${SEED}.log"
+tmux new-session -d -s "$WATCH" "$PY -m script.dicerl_libero_watch --run-dir $RUN_DIR --schedule 100:1000,1000:8000 --envs 25 --session $PRE 2>&1 | tee -a $DICE_RL_LOG_DIR/watch_${SHORT}_${SEED}.log"
 echo "started $WATCH on $RUN_DIR"

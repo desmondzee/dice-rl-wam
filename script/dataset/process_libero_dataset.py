@@ -18,14 +18,14 @@ def normalize(x, lo, hi):
     return np.where(span == 0, 0.0, out).astype(np.float32)
 
 
-def convert(hdf5_path, out_dir, flip="none"):
+def convert(hdf5_path, out_dir, flip="none", max_episodes=None):
     if flip not in FLIP_AXES:
         raise ValueError(f"Unknown flip {flip!r}")
     keys = ("states", "actions", "images", "rewards", "terminals")
     parts = {k: [] for k in keys}
     lengths = []
     with h5py.File(hdf5_path, "r") as f:
-        for name in sorted(f["data"], key=lambda n: int(n.split("_")[1])):
+        for name in sorted(f["data"], key=lambda n: int(n.split("_")[1]))[:max_episodes]:
             g = f["data"][name]
             o = g["obs"]
             parts["states"].append(np.concatenate([o["ee_pos"][:], o["ee_ori"][:], o["gripper_states"][:]], -1))
@@ -59,8 +59,9 @@ def main():
     parser.add_argument("--hdf5", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--flip", default="none", choices=sorted(FLIP_AXES))
+    parser.add_argument("--max-episodes", type=int, default=None)
     args = parser.parse_args()
-    print(json.dumps(convert(args.hdf5, args.out, args.flip)))
+    print(json.dumps(convert(args.hdf5, args.out, args.flip, args.max_episodes)))
 
 
 if __name__ == "__main__":

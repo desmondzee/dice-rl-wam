@@ -141,6 +141,15 @@ def test_convert_shapes_and_order(tmp_path):
     assert list(d["traj_lengths"]) == [5, 7] and d["rewards"].sum() == 2 and d["terminals"].sum() == 2
 
 
+def test_convert_max_episodes_caps_demos_and_stats(tmp_path):
+    from script.dataset.process_libero_dataset import convert
+    make_demo_h5(tmp_path / "d.hdf5", lengths=(5, 7, 4))
+    assert convert(str(tmp_path / "d.hdf5"), str(tmp_path / "out"), max_episodes=2) == {"episodes": 2, "steps": 12}
+    d = np.load(tmp_path / "out" / "train.npz"); n = np.load(tmp_path / "out" / "normalization.npz")
+    assert list(d["traj_lengths"]) == [5, 7] and d["states"].shape[0] == 12
+    assert np.allclose(n["obs_max"][:3], [1.0, 1.5, 2.0])
+
+
 def test_normalization_true_extremes(tmp_path):
     from script.dataset.process_libero_dataset import convert
     make_demo_h5(tmp_path / "d.hdf5")
@@ -255,6 +264,21 @@ def test_select_checkpoint_closest_to_half_earlier_on_ties():
     assert select_checkpoint(rows)["epoch"] == 1000
 
 
+def test_schedule_epochs():
+    from script.dicerl_libero_watch import schedule_epochs
+    e = schedule_epochs("100:1000,1000:8000")
+    assert e[:11] == [100 * i for i in range(1, 10)] + [1000, 2000] and e[-1] == 8000 and e.count(1000) == 1 and len(e) == 9 + 8
+    assert schedule_epochs("1000:3000") == [1000, 2000, 3000]
+
+
+def test_checkpoint_epochs_follow_schedule(tmp_path):
+    from script.dicerl_libero_watch import checkpoint_epochs
+    (tmp_path / "checkpoint").mkdir()
+    for e in (100, 150, 1000, 1500, 2000):
+        (tmp_path / "checkpoint" / f"state_{e}.pt").write_text("x")
+    assert checkpoint_epochs(str(tmp_path), {100, 1000, 2000}) == [100, 1000, 2000]
+
+
 def _watch_stubs(monkeypatch, alive=True):
     import script.dicerl_libero_watch as w
     calls = {"stop": 0, "eval": []}
@@ -270,7 +294,7 @@ def test_watch_restart_with_in_band_row_stops_without_evaluating(tmp_path, monke
     import json
     w, calls = _watch_stubs(monkeypatch)
     (tmp_path / "prior_sweep.json").write_text(json.dumps([{"epoch": 1000, "success_rate": 0.5, "stderr": 0.1}]))
-    assert w.watch(str(tmp_path), 1000, 25, "s", 0) == 0
+    assert w.watch(str(tmp_path), w.schedule_epochs("100:1000,1000:8000"), 25, "s", 0) == 0
     assert calls["stop"] == 1 and calls["eval"] == []
 
 
@@ -278,13 +302,13 @@ def test_watch_restart_with_final_epoch_done_exits_one(tmp_path, monkeypatch):
     import json
     w, calls = _watch_stubs(monkeypatch)
     (tmp_path / "prior_sweep.json").write_text(json.dumps([{"epoch": 8000, "success_rate": 0.9, "stderr": 0.1}]))
-    assert w.watch(str(tmp_path), 1000, 25, "s", 0) == 1
+    assert w.watch(str(tmp_path), w.schedule_epochs("100:1000,1000:8000"), 25, "s", 0) == 1
     assert calls["stop"] == 0 and calls["eval"] == []
 
 
 def test_watch_dead_session_without_band_row_exits_one(tmp_path, monkeypatch):
     w, calls = _watch_stubs(monkeypatch, alive=False)
-    assert w.watch(str(tmp_path), 1000, 25, "s", 0) == 1
+    assert w.watch(str(tmp_path), w.schedule_epochs("100:1000,1000:8000"), 25, "s", 0) == 1
     assert calls["stop"] == 0
 
 
@@ -293,5 +317,5 @@ def test_watch_evaluates_new_checkpoint_then_notices_dead_session(tmp_path, monk
     w, calls = _watch_stubs(monkeypatch, alive=False)
     (tmp_path / "checkpoint").mkdir()
     (tmp_path / "checkpoint" / "state_1000.pt").write_text("x")
-    assert w.watch(str(tmp_path), 1000, 25, "s", 0) == 1
+    assert w.watch(str(tmp_path), w.schedule_epochs("100:1000,1000:8000"), 25, "s", 0) == 1
     assert calls["eval"] == [1000] and json.loads((tmp_path / "prior_sweep.json").read_text())[0]["epoch"] == 1000

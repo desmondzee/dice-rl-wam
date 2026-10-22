@@ -7,8 +7,8 @@ _target_: agent.pretrain.train_flow_matching_img_agent.TrainFlowMatchingImgAgent
 
 name: ${env_name}_pre_flow_matching_mlp_img_ta${horizon_steps}_td${flow_steps}
 logdir: ${oc.env:DICE_RL_LOG_DIR}/libero-pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
-train_dataset_path: data_dir/libero/${env_name}/ph_pretrain/train.npz
-normalization_path: data_dir/libero/${env_name}/ph_pretrain/normalization.npz
+train_dataset_path: data_dir/libero/${env_name}/ph_pretrain_20/train.npz
+normalization_path: data_dir/libero/${env_name}/ph_pretrain_20/normalization.npz
 
 seed: 42
 device: cuda:0
@@ -67,7 +67,7 @@ train:
     min_lr: 1e-5
   epoch_start_ema: 20
   update_ema_freq: 10
-  save_model_freq: 200
+  save_model_freq: 100
   render:
     freq: 2
     num: 1
@@ -120,6 +120,6 @@ train_dataset:
   cond_steps: ${cond_steps}
   img_cond_steps: ${img_cond_steps}
   device: ${device}
-  max_n_episodes: 50
+  max_n_episodes: 20
   use_6d_rot: ${use_6d_rot}
   abs_action: ${abs_action}
