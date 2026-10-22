@@ -43,10 +43,10 @@ def watch(run_dir, every, states_path, envs, session, poll):
             if iteration in done:
                 continue
             path = os.path.join(run_dir, f"model_step_{iteration}.pth")
-            if alive and time.time() - os.path.getmtime(path) < MIN_AGE_SECONDS:
-                pending = True
-                continue
             try:
+                if alive and time.time() - os.path.getmtime(path) < MIN_AGE_SECONDS:
+                    pending = True
+                    continue
                 summary = evaluate(run_dir, iteration, states_path, envs)
                 row = row_for(iteration, success_rate=summary["success_rate"], stderr=summary["stderr"])
             except (subprocess.CalledProcessError, OSError, ValueError, KeyError) as error:

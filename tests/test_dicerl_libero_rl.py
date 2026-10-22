@@ -409,14 +409,19 @@ def watch_fixture(tmp_path, monkeypatch, alive_values, evaluator):
 
 def test_rl_watch_skips_young_checkpoint_until_old(tmp_path, monkeypatch):
     calls = []
+    calls_at_sleep = []
     def evaluator(run_dir, it, states, envs):
         calls.append(it)
         return {"success_rate": 0.1, "stderr": 0.02}
     w, ckpt = watch_fixture(tmp_path, monkeypatch, [True, True, False], evaluator)
     clock = [ckpt.stat().st_mtime + 5]
+    def sleep(s):
+        calls_at_sleep.append(len(calls))
+        clock[0] += 60
     monkeypatch.setattr(w.time, "time", lambda: clock[0])
-    monkeypatch.setattr(w.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + 60))
+    monkeypatch.setattr(w.time, "sleep", sleep)
     assert w.watch(tmp_path, 2000, "s.npz", 25, "sess", 0) == 0
+    assert calls_at_sleep[0] == 0
     assert calls == [2000]
     assert [r["iteration"] for r in json.load(open(tmp_path / "heldout_sweep.json"))] == [2000]
 
