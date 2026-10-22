@@ -97,7 +97,6 @@ class LiberoImageWrapper(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.flip = flip
         self.render_camera_name = render_camera_name
-        self.has_reset_before = False
         self.video_writer = None
         self.last_raw_obs = None
         self.success_count = 0
@@ -163,10 +162,9 @@ class LiberoImageWrapper(gym.Env):
         if state is None and self.init_states is not None:
             index = seed % len(self.init_states) if seed is not None else np.random.randint(len(self.init_states))
             state = self.init_states[index]
-        if not self.has_reset_before:
-            self.env.reset()
-            self.has_reset_before = True
-        raw_obs = self.env.set_init_state(state) if state is not None else self.env.reset()
+        raw_obs = self.env.reset()
+        if state is not None:
+            raw_obs = self.env.set_init_state(state)
         for _ in range(SETTLE_STEPS):
             raw_obs, _, _, _ = self.env.step(NOOP)
         self.success_count = 0

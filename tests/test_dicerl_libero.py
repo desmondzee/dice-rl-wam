@@ -8,11 +8,11 @@ needs_gym = pytest.mark.skipif(importlib.util.find_spec("gym") is None, reason="
 
 class FakeLibero:
     def __init__(self, success_after=None, state_dim=47):
-        self.t = 0; self.success_after = success_after; self.state = np.zeros(state_dim); self.actions = []
-    def reset(self): self.t = 0; return self._obs()
-    def set_init_state(self, state): self.state = np.asarray(state); self.t = 0; return self._obs()
+        self.t = 0; self.success_after = success_after; self.state = np.zeros(state_dim); self.actions = []; self.calls = []
+    def reset(self): self.calls.append("reset"); self.t = 0; return self._obs()
+    def set_init_state(self, state): self.calls.append("set_init_state"); self.state = np.asarray(state); self.t = 0; return self._obs()
     def step(self, action):
-        self.actions.append(np.asarray(action)); self.t += 1
+        self.calls.append("step"); self.actions.append(np.asarray(action)); self.t += 1
         return self._obs(), 0.0, False, {}
     def check_success(self): return self.success_after is not None and self.t >= self.success_after
     def get_sim_state(self): return self.state
@@ -45,6 +45,15 @@ def test_reset_seed_selects_stored_state_and_settles(tmp_path):
     w.reset(options={"seed": 53})
     assert np.allclose(env.state, 3.0)
     assert len(env.actions) == 10 and np.allclose(env.actions[0], [0, 0, 0, 0, 0, 0, -1])
+
+
+@needs_gym
+def test_every_reset_resets_raw_env_before_set_init_state_and_settles(tmp_path):
+    env, w = make_wrapper(tmp_path)
+    w.reset(options={"seed": 1})
+    w.reset(options={"seed": 2})
+    assert env.calls == (["reset", "set_init_state"] + ["step"] * 10) * 2
+    assert np.allclose(env.state, 2.0)
 
 
 @needs_gym

@@ -82,7 +82,7 @@ At 20 envs one 8-step chunk across all envs takes 0.099 s. A 100-episode evaluat
 ### Findings that affect later tasks
 
 - `libero_image` needs a real `shape_meta` (obs `rgb` [128, 128, 6], `state` [8]); with `None`, `multi_step` fails on the missing `observation_space`. Pass the same `shape_meta` to `make_async`.
-- robosuite terminates an episode at its own horizon of 1000 steps and raises on the next step; `reset()` does not clear that because the wrapper only calls `env.reset()` once. `make_libero_env` now passes `ignore_done=True`; the wrapper enforces 520 steps itself.
+- robosuite terminates an episode at its own horizon of 1000 steps and raises on the next step; `reset()` does clear it; the wrapper calls `env.reset()` before every `set_init_state`. `make_libero_env` now passes `ignore_done=True`; the wrapper enforces 520 steps itself.
 - Rendering in the main process before forking the async workers makes a worker spin at 100 percent CPU forever. Create the vector env before any raw env in the same process, or run raw envs in a separate process.
 
 ## Pretraining
@@ -93,12 +93,12 @@ Config `brev/dicerl/cfg/libero/<task>/pre_flow_matching_unet_img.yaml` (Tool Han
 
 - 15,232 training samples (50 trajectories), batch 64, 238 updates per epoch: 21.20 s per epoch (mean of epochs 1 to 99; min 21.07, max 21.78). 8,000 epochs projects to 47.1 h, above the 24 h budget; the in-training rollouts add 80 x 12 s = 0.3 h.
 - In-training rollout at epoch 100 (10 envs, 65 chunks): 11.8 s. Each checkpoint is 199 MB.
-- Evaluating `state_100.pt` with `script.dicerl_libero_eval --envs 25` (100 episodes, 50 states x 2 seeds): 76 s wall including model load. `summary.json`: success_rate 0.22, stderr 0.041, n 100, mean_length 471.5.
+- Evaluating `state_100.pt` with `script.dicerl_libero_eval --envs 25` (100 episodes, 50 states x 2 seeds) after the reset fix: 144 s wall including model load. `summary.json`: success_rate 0.74, stderr 0.044, n 100, mean_length 358.2. Successes by batch of 25: seed 0 22 and 16, seed 1 18 and 18.
 - The in-training rollout reported `Done envs: 1/10` and `success rate 0.9000` because its metric is the best summed reward over the rollout reaching 1 (any step with `check_success`), and 9 of 10 envs had succeeded, terminated and auto-reset before the last chunk, so only one was done at the end. It is not an inverted metric.
 
-### Reset defect found by the smoke evaluation
+### Reset defect found and fixed by the smoke evaluation
 
-The 0.22 is an artefact. Per episode, seed 0 states 0 to 24 (the first reset of each worker) succeed 18 of 25, states 25 to 49 (second reset) 0 of 25, and seed 1 (later resets) 1 of 50. Probing the same checkpoint with 4 workers and states 0 to 3 repeated four times gives `[1 1 1 1]`, then `[0 0 0 0]` three times. The wrapper calls `env.reset()` only on the first reset and then `set_init_state`; forcing `env.reset()` before every `set_init_state` gives `[1 1 1 1]`, `[1 1 0 1]`, `[1 1 0 1]`, `[1 1 0 1]`. The first-episode rate of this 100-epoch checkpoint is therefore about 0.9 to 1.0, not 0.22, and any evaluation or rollout after a worker's first episode is wrong until the wrapper resets the raw env on every reset.
+The first evaluation gave 0.22 in 76 s. Per episode, the first reset of each worker succeeded 18 of 25, the second reset 0 of 25, and later resets (seed 1) 1 of 50. The wrapper called `env.reset()` only on a worker's first reset and then `set_init_state`; probing 4 workers on states 0 to 3 repeated four times gave `[1 1 1 1]` then `[0 0 0 0]` three times, while calling `env.reset()` before every `set_init_state` gave `[1 1 1 1]`, `[1 1 0 1]`, `[1 1 0 1]`, `[1 1 0 1]`. The wrapper now resets the raw env on every reset. Cost: the same evaluation takes 144 s instead of 76 s although episodes are shorter (mean length 358 instead of 471), about 17 s or more per batch of 25 parallel resets.
 
 ### Findings that affect later tasks
 
