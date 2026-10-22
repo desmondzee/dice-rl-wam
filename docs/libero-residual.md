@@ -64,6 +64,42 @@ Rejection rate is rejections over tries (rejections plus accepted draws); the ga
 
 Fallback resets reload the unshifted state after a fresh `env.reset()`, because `load_state` only updates the controller reference when the joints differ from the canonical ones and would otherwise leave the reference of the last rejected draw in place.
 
+## Gate B part 2: evaluators, LIBERO-Plus poses and prior baselines
+
+Evaluators (all take `--ckpt --envs --seeds (one or more) --states --shift --shift-seed --out --device`):
+
+- `script/dicerl_libero_eval.py` (prior, `state_100.pt`): `--states PATH` replaces the canonical init-state array with the rows of an npz (`states`, `labels`; the episode plan runs over those rows), `--shift M` passes `options["shift"] = {"magnitude": M, "seed": shift_seed + plan index}` on every reset (the `libero_image` block of the prior config has no `hard_reset` key, so these runs hard-reset). `episodes.csv` carries `label` (the state index as a string without `--states`); `summary.json` records `states` (path or `canonical`), `shift`, `shift_seed`, `seeds`, `n_envs`, `weights`.
+- `script/dicerl_libero_rl_eval.py` (residual, `model_step_<N>.pth` next to its `.hydra/config.yaml`): same flags, adds `iteration` to the summary. The visual features come from the prior (`pretrained_flow_policy.network.extract_visual_features`, state concatenated, `obs_dim = 8 + visual_feature_dim`), actions from `get_exploration_action(num_samples=16, "max_q_min", training_step=10**6)`. It has no checkpoint to run on yet; the iteration parser and the feature path are unit-tested on fakes.
+- `script/dicerl_libero_plus_states.py`: `export` (LeRobot environment, LIBERO-Plus package) and `build` (LIBERO venv) write the held-out sets; `breakdown --episodes` prints success per variant.
+
+LIBERO-Plus poses. Suite indices 640 to 681 of `libero_10` are tasks named `<task>_view_0_0_100_0_0_initstate_N`; `libero/envs/env_wrapper.py` turns `initstate_N` into the robot class `MountedPanda<N>` (the bddl files named so do not exist), and `MountedPanda<N>.init_qpos` is the variant's 7 joints. The stored init files are the canonical ones, so `export` reads the joints from the classes and `build` writes them into state indices 1 to 7 of canonical states 0 to 6 (variant-major, label `<variant>:<state>`, 294 rows; the monitoring set is states 0 and 1, 84 rows). The canonical stored states are the base `MountedPanda.init_qpos` plus noise (per-joint std 0.016 to 0.022), not a single vector. Check: 42 distinct poses, l2 offset from the base `MountedPanda.init_qpos` 0.1000 to 0.5000 (variants 640 to 647 at 0.1, 648 to 653 at 0.2, 654 to 661 at 0.3, 662 to 671 at 0.4, 672 to 681 at 0.5); from canonical state 0 (the vector `[-0.031, -0.133, 0.015, -2.439, 0.0, 2.207, 0.778]`) 0.0768 to 0.5264; the 294 rows against their own canonical state 0.0666 to 0.5629.
+
+Prior baselines (`state_100.pt`, Jarvis GB10, 25 envs, 520 steps, one run at a time, wall time per run including model load and 25-env start-up):
+
+| evaluation | episodes | success | stderr | mean length | wall |
+|---|---|---|---|---|---|
+| held-out LIBERO-Plus poses (`plus_robot_init.npz`, seed 0) | 294 | 0.136 (40) | 0.020 | 496.4 | 384 s |
+| monitoring set (`plus_robot_init_monitor.npz`, seed 0) | 84 | 0.202 (17) | 0.044 | 483.9 | 137 s |
+| in distribution (canonical 50 states, seeds 0 1 2) | 150 | 0.513 (77) | 0.041 | 435.3 | 210 s |
+| procedural shift 0.1 (shift seed 1000, seeds 0 1) | 100 | 0.42 | 0.049 | 449.8 | 143 s |
+| procedural shift 0.3 | 100 | 0.23 | 0.042 | 482.6 | 140 s |
+| procedural shift 0.5 | 100 | 0.13 | 0.034 | 495.0 | 137 s |
+| procedural shift 0.6 | 100 | 0.11 | 0.031 | 499.0 | 137 s |
+
+The in-distribution rate is inside the earlier seed-pair spread (0.52, 0.47, 0.38; pooled 0.457 over 300) so the wrapper changes of tasks 1 and 2 did not move the canonical baseline (seeds 0, 1, 2: 25, 25, 27 of 50).
+
+Held-out success by variant (mean over its 7 states) falls with the offset from the base pose:
+
+| offset (variants) | held-out successes | monitoring successes |
+|---|---|---|
+| 0.1 (640 to 647) | 20 / 56 | 9 / 16 |
+| 0.2 (648 to 653) | 13 / 42 | 4 / 12 |
+| 0.3 (654 to 661) | 7 / 56 | 3 / 16 |
+| 0.4 (662 to 671) | 0 / 70 | 1 / 20 |
+| 0.5 (672 to 681) | 0 / 70 | 0 / 20 |
+
+Per variant: 640 0.43, 641 0.57, 642 0.29, 643 0.29, 644 0.14, 645 0.14, 646 0.43, 647 0.57, 648 0.00, 649 0.43, 650 0.14, 651 0.14, 652 0.57, 653 0.57, 654 0.00, 655 0.43, 656 0.29, 657 0.00, 658 0.00, 659 0.14, 660 0.00, 661 0.14, and 0.00 for every variant from 662 to 681. Results are in `<prior run>/eval_plus_heldout`, `eval_plus_monitor`, `eval_indist`, `eval_shift_<m>` on Jarvis. The procedural curve uses the standard-fallback shifted draws of the wrapper (a rejected draw, at most 7 percent at 0.6, falls back to the unshifted state), so it is slightly optimistic at high magnitude.
+
 ## Gate C
 
 ## Config

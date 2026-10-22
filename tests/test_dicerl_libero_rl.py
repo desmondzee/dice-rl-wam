@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from test_dicerl_libero import FakeLibero, needs_gym
+from test_dicerl_libero import FakeLibero, FakeVenv, needs_gym
 
 CANONICAL = np.array([-0.031, -0.133, 0.015, -2.439, 0.0, 2.207, 0.778])
 
@@ -267,3 +267,84 @@ def test_ramp_magnitude_segments():
     assert ramp_magnitude(0, 3000, 6000, 0.6) == 0.0 and ramp_magnitude(2999, 3000, 6000, 0.6) == 0.0
     assert abs(ramp_magnitude(4500, 3000, 6000, 0.6) - 0.3) < 1e-12
     assert ramp_magnitude(6000, 3000, 6000, 0.6) == 0.6 and ramp_magnitude(20000, 3000, 6000, 0.6) == 0.6
+
+
+def test_states_file_validation(tmp_path):
+    from script.dicerl_libero_eval import load_states
+    np.savez(tmp_path / "s.npz", states=np.zeros((3, 47)), labels=np.array(["a", "b", "c"]))
+    s, l = load_states(tmp_path / "s.npz"); assert s.shape == (3, 47) and list(l) == ["a", "b", "c"]
+    np.savez(tmp_path / "bad.npz", states=np.zeros((3, 47)), labels=np.array(["a"]))
+    with pytest.raises(ValueError): load_states(tmp_path / "bad.npz")
+
+
+def test_single_seed_plan():
+    from script.dicerl_libero_eval import episode_plan
+    assert len(episode_plan(4, (0,))) == 4
+
+
+def test_run_protocol_shift_option_and_labels():
+    from script.dicerl_libero_eval import run_protocol, episode_plan
+    venv = FakeVenv(2, succeed_at=[10 ** 6, 10 ** 6]); venv.options = []
+    def reset_arg(options_list): venv.options.append(options_list); return FakeVenv.reset_arg(venv, options_list)
+    venv.reset_arg = reset_arg
+    rows = run_protocol(lambda o: np.zeros((2, 8, 7)), venv, np.zeros((2, 47)), episode_plan(2, (0,)), 2, max_steps=16, shift={"magnitude": 0.3, "seed": 1000}, labels=["x", "y"])
+    assert [o["shift"]["seed"] for o in venv.options[0]] == [1000, 1001] and venv.options[0][0]["shift"]["magnitude"] == 0.3
+    assert [r["label"] for r in rows] == ["x", "y"]
+
+
+def test_run_protocol_default_labels_and_no_shift_option():
+    from script.dicerl_libero_eval import run_protocol, episode_plan
+    venv = FakeVenv(2, succeed_at=[10 ** 6, 10 ** 6]); venv.options = []
+    def reset_arg(options_list): venv.options.append(options_list); return FakeVenv.reset_arg(venv, options_list)
+    venv.reset_arg = reset_arg
+    rows = run_protocol(lambda o: np.zeros((2, 8, 7)), venv, np.zeros((2, 47)), episode_plan(2, (0,)), 2, max_steps=16)
+    assert [r["label"] for r in rows] == ["0", "1"] and all("shift" not in o for o in venv.options[0])
+
+
+def test_build_plus_states(tmp_path):
+    from script.dicerl_libero_plus_states import build
+    canonical = np.tile(np.arange(47, dtype=float), (50, 1)); qpos = np.full((42, 7), 9.0); variants = np.arange(640, 682)
+    full, monitor = build(canonical, qpos, variants)
+    assert full["states"].shape == (294, 47) and monitor["states"].shape == (84, 47)
+    assert full["labels"][0] == "640:0" and np.array_equal(full["states"][0][1:8], np.full(7, 9.0)) and np.array_equal(full["states"][0][8:], canonical[0][8:])
+    assert monitor["labels"][-1] == "681:1"
+
+
+def test_variant_breakdown():
+    from script.dicerl_libero_plus_states import by_variant
+    rows = [{"label": "640:0", "success": "True"}, {"label": "640:1", "success": "False"}, {"label": "641:0", "success": "True"}]
+    assert by_variant(rows) == {"640": 0.5, "641": 1.0}
+
+
+def test_iteration_from_checkpoint_name():
+    from script.dicerl_libero_rl_eval import iteration_of
+    assert iteration_of("/a/b/model_step_12000.pth") == 12000
+    with pytest.raises(ValueError): iteration_of("/a/b/state_100.pt")
+
+
+def test_augment_concatenates_state_and_visual_features():
+    import torch
+    from script.dicerl_libero_rl_eval import augment
+    seen = {}
+    def extract(cond): seen.update(cond); return torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    model = type("M", (), {})(); model.pretrained_flow_policy = type("P", (), {})(); model.pretrained_flow_policy.network = type("N", (), {"extract_visual_features": staticmethod(extract)})()
+    obs = {"rgb": np.zeros((2, 1, 16, 16, 6), np.uint8), "state": np.ones((2, 1, 8))}
+    out = augment(model, obs, "cpu")
+    assert out.shape == (2, 1, 11) and torch.equal(out[:, 0, 8:], torch.arange(6, dtype=torch.float32).reshape(2, 3)) and torch.equal(out[:, 0, :8], torch.ones(2, 8))
+    assert seen["rgb"].shape == (2, 1, 6, 16, 16) and seen["state"].shape == (2, 1, 8)
+
+
+def test_residual_policy_slices_act_steps():
+    import torch
+    from script.dicerl_libero_rl_eval import residual_policy
+    calls = {}
+    class M:
+        class pretrained_flow_policy:
+            class network:
+                extract_visual_features = staticmethod(lambda cond: torch.zeros(cond["state"].shape[0], 3))
+        def get_exploration_action(self, state, num_samples, exploration_strategy, training_step):
+            calls.update(num_samples=num_samples, strategy=exploration_strategy, step=training_step)
+            return torch.arange(2 * 16 * 7, dtype=torch.float32).reshape(2, 16, 7), None
+    obs = {"rgb": np.zeros((2, 1, 16, 16, 6), np.uint8), "state": np.zeros((2, 1, 8))}
+    act = residual_policy(M(), 8, "cpu")(obs)
+    assert act.shape == (2, 8, 7) and calls == {"num_samples": 16, "strategy": "max_q_min", "step": 10 ** 6}
