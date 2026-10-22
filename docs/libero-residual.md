@@ -11,28 +11,29 @@ Wrapper changes (`env/gym_utils/wrapper/libero_image.py`, factory in `env/gym_ut
 
 ## Gate A: soft reset and controller reference
 
-Script `script/dicerl_libero_gate_a.py`, output `$DICE_RL_DATA_DIR/libero/<task>/gate_a.json`. Run on Jarvis (GB10), 2026-10-22. Exit status 1: the replay and drift checks failed (details below).
+Script `script/dicerl_libero_gate_a.py`, output `$DICE_RL_DATA_DIR/libero/<task>/gate_a.json`. Run on Jarvis (GB10), 2026-10-22, exit status 0.
 
 | check | result |
 |---|---|
-| hard reset latency (`reset` + `set_init_state`, mean of 10) | 0.608 s |
-| soft reset latency | 0.0019 s (312x faster) |
-| async rate, 8 envs, chunk 8, 163 chunks (about 20 episodes), soft | 1189 env steps/s |
-| demo_0 replay, hard, two passes | pass 1 success (step 320), pass 2 failure |
-| demo_0 replay, soft, two passes | pass 1 failure, pass 2 success (step 325) |
-| demo_0 replay, ten passes each (ad hoc, not in the script) | hard 5/10, soft 9/10 |
-| drift: 200 soft resets to state 0, 20 random steps between, max proprio spread | 3.04e-3 (gripper dims 6 and 7; every other dim at most 7.7e-6) |
-| drift, hard resets, same protocol (ad hoc) | 0.0 |
+| hard reset latency (`reset` + `set_init_state`, mean of 10) | 0.616 s |
+| soft reset latency | 0.0020 s (314x faster) |
+| async rate, 8 envs, chunk 8, 163 chunks (about 20 episodes), soft | 1218 env steps/s |
+| demo_0 replay, 10 passes, hard | 8/10 (first success at steps 318, 320, 325, 321, 322, 325, 326, 325) |
+| demo_0 replay, 10 passes, soft | 7/10 (first success at steps 326, 320, 321, 325, 326, 321, 323) |
+| replay pass rule | soft at least 5 of 10 and at least hard minus 2: passed |
+| drift: 200 soft resets to state 0, 20 random steps between, max proprio spread | 0.0 (limit 1e-4) |
+
+Open-loop replay of a demo is nondeterministic even with hard resets (8 of 10 here, 5 of 10 in an earlier run), so the replay check compares success counts instead of requiring a single pass.
 
 Equivalence of the first wrapper observation after `reset(options={"init_state": s})` against a fresh hard-reset build (max abs proprioception difference; mean abs image difference over 255 for agentview and wrist):
 
 | state | hard after 20 random episodes | soft fresh | soft after 20 random episodes |
 |---|---|---|---|
-| 0 | 0.0; 0.012, 0.027 | 0.0; 0.012, 0.020 | 1.80e-4; 0.0096, 0.027 |
-| 17 | 0.0; 0.018, 0.018 | 0.0; 0.015, 0.017 | 2.13e-4; 0.0099, 0.015 |
-| 42 | 0.0; 0.011, 0.023 | 0.0; 0.0045, 0.018 | 2.13e-4; 0.0025, 0.011 |
+| 0 | 0.0; 0.0043, 0.017 | 0.0; 0.0062, 0.0068 | 0.0; 0.0086, 0.021 |
+| 17 | 0.0; 0.013, 0.016 | 0.0; 0.0090, 0.014 | 0.0; 0.0047, 0.011 |
+| 42 | 0.0; 0.0037, 0.017 | 0.0; 0.011, 0.021 | 0.0; 0.012, 0.028 |
 
-Image differences of 0.003 to 0.03 are the same order for hard-after-random, so they are render jitter that exists with hard resets too (gate 0 reset jitter), not a soft-reset effect.
+Image differences of 0.004 to 0.03 are the same order for hard-after-random, so they are render jitter that exists with hard resets too (gate 0 reset jitter), not a soft-reset effect.
 
 Controller reference (shifted joints are state 0 plus 0.3 rad with alternating signs, 50 NOOP steps, max joint deviation from the loaded joints):
 
@@ -41,12 +42,9 @@ Controller reference (shifted joints are state 0 plus 0.3 rad with alternating s
 | canonical state 0 | 0.042 |
 | shifted, `set_init_state` only | 0.277 |
 | shifted, with `update_initial_joints` | 5.5e-9 |
-| shifted, through `wrapper.reset` | 5.5e-9 |
+| shifted, through `wrapper.reset` | 2.7e-9 |
 
-Findings:
-
-- The soft-reset gripper drift is the Panda gripper controller's `current_action` integrator, which survives `env.reset()` in soft mode (hard mode rebuilds it). Resetting it to its fresh value after `env.reset()` removed the drift in an ad hoc check (spread 0.0), but this is not applied in the wrapper.
-- Demo replay is not deterministic in either mode, so the two-pass replay check is not a reliable pass or fail signal.
+Soft-reset gripper fix: the Panda gripper's `current_action` integrator survives a soft `env.reset()` (hard mode rebuilds it), which first gave a 3.0e-3 proprioception spread in the gripper dimensions (2.1e-4 in the equivalence check). The wrapper now sets `robot.gripper.current_action = np.zeros(gripper.dof)` after every `env.reset()` when `hard_reset` is false, which is the value of a fresh gripper.
 
 ## Gate B
 

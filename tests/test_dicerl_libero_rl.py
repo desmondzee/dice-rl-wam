@@ -13,9 +13,23 @@ class FakeController:
         self.calls.append(np.asarray(joints))
 
 
+class FakeGripper:
+    dof = 1
+
+    def __init__(self):
+        self.current_action = np.array([0.75, -0.75])
+        self.resets = 0
+
+    def __setattr__(self, name, value):
+        if name == "current_action" and np.array_equal(value, np.zeros(self.dof)):
+            object.__setattr__(self, "resets", self.resets + 1)
+        object.__setattr__(self, name, value)
+
+
 class FakeRobot:
     def __init__(self):
         self.controller = FakeController()
+        self.gripper = FakeGripper()
 
 
 class FakeInner:
@@ -33,11 +47,11 @@ class FakeRLLibero(FakeLibero):
         return self.env.robots[0].controller.calls
 
 
-def make_rl_wrapper(tmp_path):
+def make_rl_wrapper(tmp_path, **kw):
     from test_dicerl_libero import make_wrapper
     base = np.zeros(47)
     base[1:8] = CANONICAL
-    return make_wrapper(tmp_path, env=FakeRLLibero(), init_states=np.tile(base, (50, 1)))
+    return make_wrapper(tmp_path, env=FakeRLLibero(), init_states=np.tile(base, (50, 1)), **kw)
 
 
 @needs_gym
@@ -57,3 +71,21 @@ def test_hard_reset_flag_is_stored_and_passed():
     w = LiberoImageWrapper(FakeRLLibero(), None, hard_reset=False)
     assert w.hard_reset is False
     assert LiberoImageWrapper(FakeRLLibero(), None).hard_reset is True
+
+
+@needs_gym
+def test_soft_reset_resets_gripper_integrator_every_reset(tmp_path):
+    env, w = make_rl_wrapper(tmp_path, hard_reset=False)
+    gripper = env.env.robots[0].gripper
+    for n in (1, 2, 3):
+        gripper.current_action = np.array([0.75, -0.75])
+        w.reset(options={"seed": n})
+        assert np.array_equal(gripper.current_action, np.zeros(1))
+        assert gripper.resets == n
+
+
+@needs_gym
+def test_hard_reset_leaves_gripper_alone(tmp_path):
+    env, w = make_rl_wrapper(tmp_path)
+    w.reset(options={"seed": 1})
+    assert env.env.robots[0].gripper.resets == 0

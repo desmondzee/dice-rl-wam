@@ -9,6 +9,8 @@ import numpy as np
 EQUIVALENCE_STATES = (0, 17, 42)
 MAX_PROPRIO_DIFF = 1e-3
 MAX_DRIFT = 1e-4
+MIN_SOFT_REPLAYS = 5
+REPLAY_MARGIN = 2
 N_ENVS = 8
 CHUNK = 8
 HORIZON = 520
@@ -44,7 +46,7 @@ def replay_once(env, states, actions):
     return {"success": first is not None, "first_success_step": first, "success_at_end": bool(env.check_success())}
 
 
-def replay(task, hdf5, hard_reset):
+def replay(task, hdf5, hard_reset, passes=10):
     import h5py
     from env.gym_utils.wrapper.libero_image import make_libero_env
     with h5py.File(hdf5, "r") as f:
@@ -52,11 +54,12 @@ def replay(task, hdf5, hard_reset):
         states, actions = g["states"][:], g["actions"][:]
     env = make_libero_env(task, hard_reset=hard_reset)
     try:
-        first, second = replay_once(env, states, actions), replay_once(env, states, actions)
+        results = [replay_once(env, states, actions) for _ in range(passes)]
     finally:
         env.close()
-    return {"hard_reset": hard_reset, "steps": int(len(actions)), "first_pass": first, "second_pass": second,
-            "success": first["success"] and second["success"]}
+    return {"hard_reset": hard_reset, "steps": int(len(actions)), "passes": results,
+            "successes": sum(r["success"] for r in results),
+            "first_success_steps": [r["first_success_step"] for r in results]}
 
 
 def first_obs(wrapper, states, index):
@@ -213,8 +216,9 @@ def controller(task, magnitude=0.3, steps=50):
 
 def failures(result):
     out = []
-    if not (result["replay"]["hard"]["success"] and result["replay"]["soft"]["success"]):
-        out.append("replay")
+    hard, soft = result["replay"]["hard"]["successes"], result["replay"]["soft"]["successes"]
+    if soft < MIN_SOFT_REPLAYS or soft < hard - REPLAY_MARGIN:
+        out.append(f"replay soft {soft} hard {hard}")
     for name, per_state in result["equivalence"].items():
         for i, v in per_state.items():
             if v["proprio_max_abs"] > MAX_PROPRIO_DIFF:

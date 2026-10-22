@@ -175,6 +175,9 @@ class LiberoImageWrapper(gym.Env):
             index = seed % len(self.init_states) if seed is not None else np.random.randint(len(self.init_states))
             state = self.init_states[index]
         raw_obs = self.env.reset()
+        if not self.hard_reset:
+            gripper = self.env.env.robots[0].gripper
+            gripper.current_action = np.zeros(gripper.dof)
         if state is not None:
             raw_obs = self.load_state(state)
         for _ in range(SETTLE_STEPS):
