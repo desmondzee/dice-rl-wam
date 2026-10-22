@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import pytest
 
@@ -361,3 +362,34 @@ def test_shift_stats_summed_into_summary(tmp_path):
     cfg = types.SimpleNamespace(env=types.SimpleNamespace(name="t", max_episode_steps=16), act_steps=8)
     write_results(args, cfg, [{"init_state_id": 0, "label": "0", "seed": 0, "success": True, "length": 8}], {"weights": "model", "shift_stats": stats})
     assert json.load(open(tmp_path / "summary.json"))["shift_stats"] == stats
+
+
+def test_checkpoint_iterations(tmp_path):
+    from script.dicerl_libero_rl_watch import checkpoint_iterations
+    for n in (1000, 2000, 2500, 4000): (tmp_path / f"model_step_{n}.pth").write_bytes(b"x")
+    assert checkpoint_iterations(tmp_path, 2000) == [2000, 4000]
+
+
+def test_rl_watch_rows_and_exit(tmp_path, monkeypatch):
+    import script.dicerl_libero_rl_watch as w
+    (tmp_path / "model_step_2000.pth").write_bytes(b"x")
+    monkeypatch.setattr(w, "evaluate", lambda run_dir, it, states, envs: {"success_rate": 0.3, "stderr": 0.05})
+    alive = iter([True, False]); monkeypatch.setattr(w, "session_alive", lambda s: next(alive))
+    monkeypatch.setattr(w.time, "sleep", lambda s: None)
+    assert w.watch(tmp_path, 2000, "states.npz", 25, "sess", 0) == 0
+    rows = json.load(open(tmp_path / "heldout_sweep.json"))
+    assert rows == [{"iteration": 2000, "env_steps": 128000, "success_rate": 0.3, "stderr": 0.05}]
+
+
+@needs_gym
+def test_shift_agent_update_sets_magnitude_once_per_change(monkeypatch):
+    from script.dicerl_libero_rl import ShiftedResidualAgent
+    calls = []
+    agent = ShiftedResidualAgent.__new__(ShiftedResidualAgent)
+    agent.cfg = type("C", (), {"shift": type("S", (), {"end_magnitude": 0.6, "ramp_start": 3000, "ramp_end": 6000, "seed": 42})()})()
+    agent.venv = type("V", (), {"call_sync": lambda self, name, **kw: calls.append((name, kw)) or [({"draws": 1, "rejections": 0, "fallbacks": 0}, True)]})()
+    agent._shift_magnitude = None; agent._shift_logged_step = -1; agent.use_wandb = False; agent.horizon_steps = 8; agent.n_envs = 8
+    monkeypatch.setattr(ShiftedResidualAgent.__mro__[1], "update_networks", lambda self, training_step=0: ("parent", training_step))
+    assert agent.update_networks(training_step=10) == ("parent", 10)
+    agent.update_networks(training_step=10); agent.update_networks(training_step=4500)
+    assert [c for c in calls if c[0] == "set_shift"] == [("set_shift", {"magnitude": 0.0}), ("set_shift", {"magnitude": 0.3})]

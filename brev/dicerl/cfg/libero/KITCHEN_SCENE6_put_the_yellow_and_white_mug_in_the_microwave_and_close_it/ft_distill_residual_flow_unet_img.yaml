@@ -1,0 +1,172 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+  job:
+    chdir: false
+_target_: script.dicerl_libero_rl.ShiftedResidualAgent
+
+name: ${env_name}_ft_distill_residual_flow_unet_img_ta${horizon_steps}_fl${flow_steps}
+logdir: ${oc.env:DICE_RL_LOG_DIR}/libero-finetune/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+base_policy_path: ${oc.env:DICE_RL_LOG_DIR}/libero-pretrain/${env_name}_pre_flow_matching_mlp_img_ta8_td10/2026-10-22_10-11-34_42/checkpoint/state_100.pt
+normalization_path: data_dir/libero/${env_name}/ph_pretrain_20/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it
+run_eval: true
+obs_dim: 8
+action_dim: 7
+use_6d_rot: false
+abs_action: false
+flow_steps: 10
+cond_steps: 1
+img_cond_steps: 1
+horizon_steps: 8
+act_steps: 8
+noise_dim: 56
+
+shift:
+  end_magnitude: 0.6
+  ramp_start: 3000
+  ramp_end: 6000
+  seed: 42
+
+env:
+  env_type: libero
+  n_envs: 8
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 520
+  save_video: False
+  use_image_obs: true
+  wrappers:
+    libero_image:
+      normalization_path: ${normalization_path}
+      success_steps_before_termination: 1
+      hard_reset: false
+      shape_meta: ${shape_meta}
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: True
+      gamma: ${train.gamma}
+
+shape_meta:
+  obs:
+    rgb:
+      shape: [128, 128, 6]
+    state:
+      shape: [8]
+  action:
+    shape: [7]
+
+wandb:
+  entity: ${oc.env:DICE_RL_WANDB_ENTITY}
+  project: dice-rl-libero
+  run: ${now:%Y-%m-%d_%H-%M-%S_%f}_${name}
+
+train:
+  num_train_steps: 10000000
+  val_freq: 10
+  n_steps: 100
+  n_train_itr: 1000
+  batch_size: 256
+  eval_freq: 1000
+  save_freq: 1000
+  save_model_freq: 100
+  gamma: 0.99
+  tau: 0.01
+  update_freq: 1
+  gradient_steps: 20
+  actor_lr: 1e-4
+  critic_lr: 1e-4
+  actor_weight_decay: 1e-5
+  critic_weight_decay: 1e-5
+  use_lr_scheduler: True
+  lr_scheduler:
+    first_cycle_steps: 1000
+    warmup_steps: 10
+    min_lr: 1e-6
+  actor_update_freq: 2
+  critic_target_update_freq: 2
+  render:
+    freq: 1
+    num: 0
+  log_freq: 1
+  max_grad_norm: 1.0
+
+replay_buffer:
+  max_size: 2000000
+  use_n_step: true
+  n_step: 3
+  expert_use_n_step: ${expert_dataset.use_n_step}
+  expert_n_step: ${expert_dataset.n_step}
+
+use_rlpd: true
+expert_ratio: 0.3
+
+use_adaptive_expert_ratio: true
+adaptive_expert_ratio_start: 0.5
+adaptive_expert_ratio_end: 0.1
+adaptive_expert_ratio_steps: 10000
+
+model:
+  _target_: model.rl.distill_residual_rl_img.DistillResidualRLImgModel
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  noise_dim: ${noise_dim}
+  cond_steps: ${cond_steps}
+  horizon_steps: ${horizon_steps}
+  device: ${device}
+  condition_residual_on_base_action: true
+  num_multi_z_for_actor_loss: 16
+  use_n_step: ${replay_buffer.use_n_step}
+  n_step: ${replay_buffer.n_step}
+  pretrained_flow_policy_path: ${base_policy_path}
+  actor_hidden_dims: [1024, 1024, 1024]
+  critic_hidden_dims: [1024, 1024, 1024]
+  activation_type: "GELU"
+  use_layernorm: true
+  bc_loss_weight: 50.0
+  critic_weight: 1.0
+  use_soft_q_filtering: true
+  q_filtering_warmup_steps: 3000
+  q_underestimation_threshold: -0.55
+  replay_flow_warmup_steps: 3000
+  use_q_normalization: true
+  disable_q_loss_for_expert_data: true
+  always_retain_bc_loss_for_expert_data: false
+  multi_sample_next_noise: true
+  num_next_noise_samples: 4
+  critic_ensemble_size: 10
+
+expert_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceQLearningDataset
+  dataset_path: data_dir/libero/${env_name}/ph_pretrain_20/train.npz
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  img_cond_steps: ${img_cond_steps}
+  device: ${device}
+  discount_factor: ${train.gamma}
+  gamma: ${train.gamma}
+  max_n_episodes: 20
+  use_img: true
+  success_steps_for_termination: ${env.wrappers.libero_image.success_steps_before_termination}
+  use_n_step: true
+  n_step: 3
+  use_6d_rot: ${use_6d_rot}
+  abs_action: ${abs_action}
+
+visualize_trajectories: false
+visualization_freq: 200000000
+num_eval_episodes: 30
+eval_n_envs: 10
+
+log_q_overestimation: true
+
+online_explore_strategy: "max_q_min"
+evaluate_strategy: "max_q_min"
+num_exploration_samples: 16

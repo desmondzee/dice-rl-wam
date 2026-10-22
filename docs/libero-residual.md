@@ -102,7 +102,56 @@ Per variant: 640 0.43, 641 0.57, 642 0.29, 643 0.29, 644 0.14, 645 0.14, 646 0.4
 
 ## Gate C
 
+Smoke run on Jarvis (GB10), 2026-10-22, seed 42, launched with `WATCH_EVERY=100 bash brev/dicerl/finetune_libero.sh <task> 42 train.num_train_steps=200 train.save_freq=100` (sessions `dicerl-rl-kitchenscene6-42` and `dicerl-rlwatch-42`, run directory `libero-finetune/<name>/2026-10-22_16-24-13_42`). Both sessions ended on their own (training at iteration 200, then the watcher saw its session gone and exited 0); no session or worker process was left.
+
+| measurement | result |
+|---|---|
+| iteration-0 evaluation (before training) | 7 min 50 s: frozen prior 300 episodes 4 min 25 s (success 0.447), untrained residual 300 episodes 3 min 26 s (success 0.000, mean length 520) |
+| iterations 0 to 100 | 372 s (3.7 s per iteration); no gradient updates until iteration 64, when the first episodes finish and the replay buffer holds a batch |
+| iterations 100 to 200 | 1045 s (10.45 s per iteration, 344 iterations per hour), all with 20 gradient steps per iteration; includes the monitoring evaluation of iteration 100 sharing the GPU for about 93 s |
+| in-training evaluation at iteration 200 | 3 min 31 s, success 0.487 (146 of 300), mean length 428.8 (canonical stored states) |
+| monitoring evaluation, iteration 100 (`model_step_100.pth`, 84 episodes, seed 0) | success 0.083 (7 of 84, stderr 0.030), about 93 s sharing the GPU with training |
+| monitoring evaluation, iteration 200 | success 0.119 (10 of 84, stderr 0.035), about 120 s; frozen prior on this set 0.202 |
+| residual evaluator | loaded both checkpoints (`iteration` 100 and 200 in `summary.json`, `shift_stats` all zero), results in `heldout_100`, `heldout_200`, rows in `heldout_sweep.json` |
+| W&B | `shift/magnitude`, `shift/draws`, `shift/rejections`, `shift/fallbacks` present on 135 of 136 logged rows (read back through the API); all zero in the smoke because the ramp starts at iteration 3,000 |
+
+Evaluation times are derived from the 300 s watcher poll cycle (start) and the summary file time (end), so they are good to a few seconds only for the end and to the poll alignment for the start.
+
+Projection to 13,000 iterations: 13,000 × 10.45 s = 37.7 h of training (34.4 h if the 93 s of overlap is removed from the 100 to 200 window), plus 13 in-training evaluations of 3.5 min (0.74 h), the iteration-0 evaluation (0.13 h) and 6 monitoring evaluations of about 2 min (0.2 h): about 38.8 h, under the 48 h limit. The smoke does not reach exploration after the flow warm-up (iteration 3,000 onward uses 16 samples through `max_q_min`; the smoke used the single-sample path), nor a non-zero shift (resets with draws and resamples), so the rate after iteration 3,000 is an extrapolation; the monitoring evaluator, which uses 16 samples on 25 envs, took about 100 s for 84 episodes, which suggests the extra rollout cost is small next to the 20 gradient steps.
+
+A bare check of the training path with a non-zero shift (2 workers through `make_async` with the run's wrappers including `multi_step_full`, `set_shift_seed` 42 and 43, `set_shift(magnitude=0.6)`, ten no-option `reset()` calls): `shift_stats` per worker `draws` 10 and 10, `rejections` 1 and 0, `fallbacks` 0 and 0, joint proprioception spread across resets 0.76 (normalised units), so the vector-env calls and the auto-reset path reach the wrapper.
+
+The step-0 success of 0.000 is the untrained residual (random actor initialisation on top of the base action, no behaviour-cloning updates yet), which is not the prior; the frozen prior in the same evaluation is 0.447.
+
+Dependency: the vendored agent imports `plotly` at module level (`util/state_visualization.py`), which the LIBERO venv lacked. `plotly==5.24.1` (the root `pyproject.toml` pin; installs `tenacity==9.2.1` with it) was installed into `dicerl-libero-venv` and added to `brev/dicerl/setup_libero.sh`; no existing package changed.
+
 ## Config
+
+`brev/dicerl/cfg/libero/<task>/ft_distill_residual_flow_unet_img.yaml`, the released Square image config (`cfg/robomimic/finetune/square/ft_distill_residual_flow_unet_img.yaml`) with comments removed and these differences (everything else is as released: `gradient_steps` 20, 10 critics, `bc_loss_weight` 50, `n_step` 3, expert ratio 0.5 to 0.1 over 10,000, `eval_freq` 1,000, `eval_n_envs` 10, `num_eval_episodes` 30, `max_q_min` with 16 samples, `q_filtering_warmup_steps` and `replay_flow_warmup_steps` 3,000):
+
+| key | released Square image | LIBERO residual |
+|---|---|---|
+| `_target_` | `TrainDistillResidualFlowImgAgent` | `script.dicerl_libero_rl.ShiftedResidualAgent` |
+| `logdir` | `log_dir/robomimic-finetune/...` | `$DICE_RL_LOG_DIR/libero-finetune/...` |
+| `base_policy_path` | Square pretrain `state_2000.pt` | prior `state_100.pt` of `2026-10-22_10-11-34_42` |
+| `normalization_path`, `expert_dataset.dataset_path` | `robomimic/square-img/ph_pretrain`, `ph_finetune/train.npz` | `libero/<task>/ph_pretrain_20/normalization.npz`, `train.npz` |
+| `robomimic_env_cfg_path`, `env.specific` | set | removed |
+| `env_name`, `env.env_type` | `square`, unset | `<task>`, `libero` |
+| `obs_dim`, `horizon_steps`, `act_steps`, `noise_dim` | 9, 4, 4, 28 | 8, 8, 8, 56 |
+| `env.max_episode_steps` | 400 | 520 |
+| wrapper block | `robomimic_image` (image and low-dim keys, `use_6d_rot`, `success_steps_before_termination` 1) | `libero_image` (`normalization_path`, `shape_meta`, `success_steps_before_termination` 1, `hard_reset: false`); `multi_step` unchanged |
+| `shape_meta` | rgb 96×96×6, state 9 | rgb 128×128×6, state 8 |
+| `wandb` | entity null, `robomimic-...` project | entity `$DICE_RL_WANDB_ENTITY`, project `dice-rl-libero` |
+| `train.num_train_steps`, `train.save_freq` | 150,000, unset (default 1,000) | 10,000,000, 1,000 |
+| `model.condition_residual_on_base_action` | false | true |
+| `model.use_soft_q_filtering` | false | true |
+| `model.q_underestimation_threshold` | -0.25 | -0.55 |
+| `model.always_retain_bc_loss_for_expert_data` | true | false |
+| `expert_dataset.max_n_episodes` | 50 | 20 |
+| `expert_dataset.success_steps_for_termination` | `robomimic_image` block | `libero_image` block |
+| `shift` | absent | `end_magnitude: 0.6, ramp_start: 3000, ramp_end: 6000, seed: 42` |
+
+The released config has no network block (the prior's network is rebuilt from the prior run's `.hydra/config.yaml`, crop 116 of 128), so none was copied. `script/dicerl_libero_rl.py` sets the per-worker shift seeds once (`shift.seed + worker index`), applies `ramp_magnitude` through `set_shift` when the magnitude changes, and logs the shift metrics to W&B once per iteration. `script/dicerl_libero_rl_watch.py` evaluates `model_step_<N>.pth` (N a multiple of `--every`) on the monitoring states with the residual evaluator (seed 0, 25 envs), appends `{iteration, env_steps, success_rate, stderr}` to `heldout_sweep.json`, never stops training, and exits when the training session is gone.
 
 ## Launch
 
