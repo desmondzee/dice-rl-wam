@@ -130,11 +130,46 @@ def test_controller_reference_update_tolerance_is_absolute_1e9(tmp_path):
 
 
 @needs_gym
-def test_hard_reset_flag_is_stored_and_passed():
+def test_directly_built_wrapper_stores_hard_reset_and_defaults_true():
     from env.gym_utils.wrapper.libero_image import LiberoImageWrapper
     w = LiberoImageWrapper(FakeRLLibero(), None, hard_reset=False)
     assert w.hard_reset is False
     assert LiberoImageWrapper(FakeRLLibero(), None).hard_reset is True
+
+
+@needs_gym
+@pytest.mark.parametrize("configured", [False, True, None])
+def test_factory_forwards_hard_reset_to_raw_env_and_wrapper(monkeypatch, configured):
+    import sys, types
+    import env.gym_utils.wrapper.libero_image as li
+    from omegaconf import OmegaConf
+    from env.gym_utils import make_async
+    monkeypatch.setitem(sys.modules, "huggingface_hub", sys.modules.get("huggingface_hub") or types.ModuleType("huggingface_hub"))
+    monkeypatch.setenv("MUJOCO_GL", "egl")
+    built = {}
+
+    def fake_make(task, hard_reset=True, **kw):
+        built["hard_reset"] = hard_reset
+        return FakeRLLibero()
+
+    base = np.zeros(47)
+    base[1:8] = CANONICAL
+    monkeypatch.setattr(li, "make_libero_env", fake_make)
+    monkeypatch.setattr(li, "libero_task_files", lambda task: (None, np.tile(base, (50, 1))))
+    block = {"shape_meta": {"obs": {"rgb": {"shape": [128, 128, 6]}, "state": {"shape": [8]}}, "action": {"shape": [7]}}, "success_steps_before_termination": 1}
+    if configured is not None:
+        block["hard_reset"] = configured
+    wrappers = OmegaConf.create({"libero_image": block, "multi_step": {"n_obs_steps": 1, "n_action_steps": 8, "max_episode_steps": 520, "reset_within_step": True}})
+    venv = make_async("t", env_type="libero", num_envs=1, asynchronous=False, max_episode_steps=520, wrappers=wrappers, obs_dim=8, action_dim=7, use_image_obs=True, shape_meta=None)
+    wrapper = venv.envs[0]
+    while not isinstance(wrapper, li.LiberoImageWrapper):
+        wrapper = wrapper.env
+    expected = True if configured is None else configured
+    assert built["hard_reset"] is expected and wrapper.hard_reset is expected
+    gripper = wrapper.env.env.robots[0].gripper
+    gripper.current_action = np.array([0.75, -0.75])
+    wrapper.reset(options={"seed": 1})
+    assert np.array_equal(gripper.current_action, np.zeros(1)) is (not expected)
 
 
 @needs_gym
@@ -360,10 +395,33 @@ def test_shift_stats_summed_into_summary(tmp_path):
     assert shift_totals(venv, None) == {"draws": 0, "rejections": 0, "fallbacks": 0}
     stats = shift_totals(venv, {"magnitude": 0.6, "seed": 1})
     assert stats == {"draws": 7, "rejections": 3, "fallbacks": 1}
-    args = types.SimpleNamespace(ckpt="c/state_1.pt", out=str(tmp_path), envs=2, seeds=[0], states=None, shift=0.6, shift_seed=1)
-    cfg = types.SimpleNamespace(env=types.SimpleNamespace(name="t", max_episode_steps=16), act_steps=8)
+    args = types.SimpleNamespace(ckpt="c/state_1.pt", out=str(tmp_path), envs=2, seeds=[0], states=None, shift=0.6, shift_seed=1, hard_reset=None)
+    cfg = types.SimpleNamespace(env=types.SimpleNamespace(name="t", max_episode_steps=16, wrappers={}), act_steps=8)
     write_results(args, cfg, [{"init_state_id": 0, "label": "0", "seed": 0, "success": True, "length": 8}], {"weights": "model", "shift_stats": stats})
     assert json.load(open(tmp_path / "summary.json"))["shift_stats"] == stats
+
+
+def test_hard_reset_override_lands_in_wrapper_block_and_summary(tmp_path, monkeypatch):
+    import argparse, json, types
+    import env.gym_utils as gym_utils
+    from script.dicerl_libero_eval import add_protocol_args, make_env, write_results
+    captured = []
+    monkeypatch.setattr(gym_utils, "make_async", lambda *a, **kw: captured.append(kw["wrappers"]))
+    def make_cfg(wrappers):
+        env = types.SimpleNamespace(name="t", env_type="libero", max_episode_steps=16, wrappers=wrappers)
+        return types.SimpleNamespace(env=env, obs_dim=8, action_dim=7, shape_meta=None, act_steps=8)
+    cfg = make_cfg({"libero_image": {"hard_reset": False}, "multi_step": {"n_obs_steps": 1}})
+    bare = make_cfg({"libero_image": {}})
+    parser = argparse.ArgumentParser(); add_protocol_args(parser)
+    assert parser.parse_args(["--ckpt", "c"]).hard_reset is None
+    assert parser.parse_args(["--ckpt", "c", "--hard-reset", "true"]).hard_reset == "true"
+    for config, override, expected in ((cfg, None, False), (cfg, "true", True), (cfg, "false", False), (bare, None, True), (bare, "false", False)):
+        make_env(config, 2, override)
+        assert captured[-1]["libero_image"]["hard_reset"] is expected
+        args = types.SimpleNamespace(ckpt="c/state_1.pt", out=str(tmp_path), envs=2, seeds=[0], states=None, shift=None, shift_seed=1, hard_reset=override)
+        write_results(args, config, [{"init_state_id": 0, "label": "0", "seed": 0, "success": True, "length": 8}], {})
+        assert json.load(open(tmp_path / "summary.json"))["hard_reset"] is expected
+    assert cfg.env.wrappers["libero_image"]["hard_reset"] is False and "hard_reset" not in bare.env.wrappers["libero_image"]
 
 
 def test_checkpoint_iterations(tmp_path):

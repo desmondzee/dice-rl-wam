@@ -6,10 +6,20 @@ Task `KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it`
 
 Wrapper changes (`env/gym_utils/wrapper/libero_image.py`, factory in `env/gym_utils/__init__.py`):
 
-- `make_libero_env(..., hard_reset=True)` forwards `hard_reset` to `OffScreenRenderEnv`. The default keeps pretraining and prior evaluation unchanged. The factory pops `hard_reset` from the `libero_image` block and builds the env with it.
-- `LiberoImageWrapper.load_state(state)` calls `env.set_init_state(state)` and then `controller.update_initial_joints(state[1:8])` when those joints differ from `init_states[0][1:8]` by more than 1e-9. `env.reset()` rebuilds the controller, so its reference is canonical after every reset.
+- `make_libero_env(..., hard_reset=True)` forwards `hard_reset` to `OffScreenRenderEnv`. The default keeps pretraining and prior evaluation unchanged. The factory pops `hard_reset` from the `libero_image` block and passes it both to `make_libero_env` and to `LiberoImageWrapper`, so the wrapper's soft-reset gripper handling follows the env's mode (until the fix recorded under gate A, only the env received it).
+- `LiberoImageWrapper.load_state(state)` calls `env.set_init_state(state)` and then `controller.update_initial_joints(state[1:8])` when those joints differ from `init_states[0][1:8]` by more than 1e-9. `env.reset()` rebuilds the controller, so after a reset its reference is LIBERO's default (the robot's `init_qpos`), not the demo joints. Only stored state 0 matches the canonical joints, so it keeps that default; stored states 1 to 49 carry about 0.02 rad of per-joint noise around state 0, differ from it by more than 1e-9, and therefore get the controller-reference update. Every milestone-2 number (prior baselines, training, in-training evaluation) used this rule, so the internal comparison is consistent; an explicit canonical rule with re-measured baselines is deferred to the layout axis.
 
 ## Gate A: soft reset and controller reference
+
+Gate A validated the directly constructed wrapper (`LiberoImageWrapper(env, ..., hard_reset=False)`). The vectorised factory path (`make_async`) dropped the flag before the wrapper, so training and evaluation through it ran soft resets with `LiberoImageWrapper.hard_reset` still True and without the gripper zeroing; this was found in the final review and is fixed (the factory passes `hard_reset` to the wrapper; a fake-backed test builds through `make_async` and asserts both the raw env and the wrapper receive it). Prior `state_100.pt`, 150 in-distribution episodes (canonical 50 states, seeds 0 1 2, 25 envs), Jarvis, 2026-10-22:
+
+| reset mode | success | stderr | mean length |
+|---|---|---|---|
+| hard (`--hard-reset true`, run after the fix) | 0.467 (70 of 150) | 0.041 | 438.6 |
+| soft with the gripper carry-over (`--hard-reset false`, before the factory fix) | 0.540 (81 of 150) | 0.041 | 430.4 |
+| soft, fixed (`--hard-reset false`, after the fix) | 0.453 (68 of 150) | 0.041 | 438.8 |
+
+The earlier recorded hard run of the same protocol gave 0.513 (77 of 150). The four runs disagree on 49 to 64 of the 150 episodes pairwise (including the two hard runs, 55), so per-run success varies by about one standard error and the carry-over effect (0.540 against 0.453 and 0.467) is not resolved at this sample size; the fixed soft mode and hard mode agree within noise. Factory-path re-check after the fix (2 soft envs through `make_async`, 20 random-action episodes each, then a reset to stored state 0): max abs proprioception difference against a fresh hard-reset build 0.0 for both envs (limit 1e-4); `robot.gripper.current_action` right after the soft `restart()` is zero in both envs (it was `[0.5, -0.5]` and `[-1, 1]` before, nonzero after all 20 episodes in each).
 
 Script `script/dicerl_libero_gate_a.py`, output `$DICE_RL_DATA_DIR/libero/<task>/gate_a.json`. Run on Jarvis (GB10), 2026-10-22, latest run exit status 0.
 
@@ -60,16 +70,16 @@ Script `script/dicerl_libero_gate_b.py` (part 1), output `$DICE_RL_DATA_DIR/libe
 | 0.5 | 14 / 214 | 0.065 | 0 | 0.054 / 0.247 / 0.467 | 0.0156 / 0.075 / 0.194 |
 | 0.6 | 15 / 215 | 0.070 | 0 | 0.064 / 0.301 / 0.560 | 0.0187 / 0.091 / 0.231 |
 
-Rejection rate is rejections over tries (rejections plus accepted draws); the gate fails if it exceeds 0.2 at 0.6 (it is 0.070). Joint norms are of accepted draws. Eef displacement is the norm of the unnormalised end-effector position after the shifted reset minus that after an unshifted reset of the same stored state (10 settle steps each); two unshifted resets of the same state give identical positions (jitter 0.0), so the displacement is entirely the shift. The earlier run with a summed seed gave the same statistics within noise (0.6 rad: 11 / 211, norm p50 0.275, eef p50 0.083). A diagnostic of 600 raw draws at 0.6 rad found no joint-limit rejections for this task (the narrowest margin never binds) and 19 contact rejections, all gripper or hand geoms against microwave geoms (`microwave_1_g14`, `g15`, `g17`) plus two `robot0_link6` contacts, so the contact check fires on the real env.
+Rejection rate is rejections over tries (rejections plus accepted draws); the gate fails if it exceeds 0.2 at 0.6 (it is 0.070). Joint norms are of accepted draws. Eef displacement is the norm of the unnormalised end-effector position after the shifted reset minus that after an unshifted reset of the same stored state (10 settle steps each); two unshifted resets of the same state give identical positions (jitter 0.0), so the displacement is entirely the shift. The earlier run with a summed seed gave the same statistics within noise (0.6 rad: 11 / 211, norm p50 0.275, eef p50 0.083). A diagnostic of 600 raw draws at 0.6 rad (summed-seed stream) found no joint-limit rejections for this task (the narrowest margin never binds) and 19 contact rejections, all gripper or hand geoms against microwave geoms (`microwave_1_g14`, `g15`, `g17`) plus two `robot0_link6` contacts, so the contact check fires on the real env.
 
 Fallback resets reload the unshifted state after a fresh `env.reset()`, because `load_state` only updates the controller reference when the joints differ from the canonical ones and would otherwise leave the reference of the last rejected draw in place.
 
 ## Gate B part 2: evaluators, LIBERO-Plus poses and prior baselines
 
-Evaluators (all take `--ckpt --envs --seeds (one or more) --states --shift --shift-seed --out --device`):
+Evaluators (all take `--ckpt --envs --seeds (one or more) --states --shift --shift-seed --hard-reset {true,false} --out --device`; `--hard-reset` defaults to the config's `libero_image.hard_reset` (true when absent) and the resolved mode is written to `summary.json` as `hard_reset`):
 
-- `script/dicerl_libero_eval.py` (prior, `state_100.pt`): `--states PATH` replaces the canonical init-state array with the rows of an npz (`states`, `labels`; the episode plan runs over those rows), `--shift M` passes `options["shift"] = {"magnitude": M, "seed": shift_seed + plan index}` on every reset (the `libero_image` block of the prior config has no `hard_reset` key, so these runs hard-reset). `episodes.csv` carries `label` (the state index as a string without `--states`); `summary.json` records `states` (path or `canonical`), `shift`, `shift_seed`, `seeds`, `n_envs`, `weights`.
-- `script/dicerl_libero_rl_eval.py` (residual, `model_step_<N>.pth` next to its `.hydra/config.yaml`): same flags, adds `iteration` to the summary. The visual features come from the prior (`pretrained_flow_policy.network.extract_visual_features`, state concatenated, `obs_dim = 8 + visual_feature_dim`), actions from `get_exploration_action(num_samples=16, "max_q_min", training_step=10**6)`. It has no checkpoint to run on yet; the iteration parser and the feature path are unit-tested on fakes.
+- `script/dicerl_libero_eval.py` (prior, `state_100.pt`): `--states PATH` replaces the canonical init-state array with the rows of an npz (`states`, `labels`; the episode plan runs over those rows), `--shift M` passes `options["shift"] = {"magnitude": M, "seed": shift_seed + plan index}` on every reset (the `libero_image` block of the prior config has no `hard_reset` key, so these runs hard-reset unless `--hard-reset` says otherwise). `episodes.csv` carries `label` (the state index as a string without `--states`); `summary.json` records `states` (path or `canonical`), `shift`, `shift_seed`, `seeds`, `n_envs`, `weights`.
+- `script/dicerl_libero_rl_eval.py` (residual, `model_step_<N>.pth` next to its `.hydra/config.yaml`): same flags, adds `iteration` to the summary. The visual features come from the prior (`pretrained_flow_policy.network.extract_visual_features`, state concatenated, `obs_dim = 8 + visual_feature_dim`), actions from `get_exploration_action(num_samples=16, "max_q_min", training_step=10**6)`.
 - `script/dicerl_libero_plus_states.py`: `export` (LeRobot environment, LIBERO-Plus package) and `build` (LIBERO venv) write the held-out sets; `breakdown --episodes` prints success per variant.
 
 LIBERO-Plus poses. Suite indices 640 to 681 of `libero_10` are tasks named `<task>_view_0_0_100_0_0_initstate_N`; `libero/envs/env_wrapper.py` turns `initstate_N` into the robot class `MountedPanda<N>` (the bddl files named so do not exist), and `MountedPanda<N>.init_qpos` is the variant's 7 joints. The stored init files are the canonical ones, so `export` reads the joints from the classes and `build` writes them into state indices 1 to 7 of canonical states 0 to 6 (variant-major, label `<variant>:<state>`, 294 rows; the monitoring set is states 0 and 1, 84 rows). The canonical stored states are the base `MountedPanda.init_qpos` plus noise (per-joint std 0.016 to 0.022), not a single vector. Check: 42 distinct poses, l2 offset from the base `MountedPanda.init_qpos` 0.1000 to 0.5000 (variants 640 to 647 at 0.1, 648 to 653 at 0.2, 654 to 661 at 0.3, 662 to 671 at 0.4, 672 to 681 at 0.5); from canonical state 0 (the vector `[-0.031, -0.133, 0.015, -2.439, 0.0, 2.207, 0.778]`) 0.0768 to 0.5264; the 294 rows against their own canonical state 0.0666 to 0.5629.
@@ -153,13 +163,9 @@ Dependency: the vendored agent imports `plotly` at module level (`util/state_vis
 
 The released config has no network block (the prior's network is rebuilt from the prior run's `.hydra/config.yaml`, crop 116 of 128), so none was copied. `script/dicerl_libero_rl.py` sets the per-worker shift seeds once (`shift.seed + worker index`), applies `ramp_magnitude` through `set_shift` when the magnitude changes, and logs the shift metrics to W&B once per iteration. `script/dicerl_libero_rl_watch.py` evaluates `model_step_<N>.pth` (N a multiple of `--every`) on the monitoring states with the residual evaluator (seed 0, 25 envs), appends `{iteration, env_steps, success_rate, stderr}` to `heldout_sweep.json`, never stops training, skips checkpoints younger than 30 s while training is alive, retries a failed evaluation on the next poll up to 3 times and then records `{iteration, env_steps, error}` and moves on, and exits only when the training session is gone and nothing is pending.
 
-## Launch
+## Launch (2026-10-22 17:12 BST), stopped
 
-## Sweep
-
-## Final results
-
-## Launch (2026-10-22 17:12 BST)
+This launch was stopped at iteration about 300 because of the factory defect recorded under gate A (its soft resets ran without the gripper zeroing). It is discarded and a relaunch on the fixed code follows. The text below describes the schedule, which the relaunch keeps.
 
 `bash brev/dicerl/finetune_libero.sh KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it 42`: sessions `dicerl-rl-kitchenscene6-42` and `dicerl-rlwatch-42`, run directory `$DICE_RL_LOG_DIR/libero-finetune/..._ft_distill_residual_flow_unet_img_ta8_fl10/2026-10-22_17-11-57_42`, W&B run `02jssndy` in `dice-rl-libero`. Schedule: shift 0 until iteration 3,000, linear to 0.6 rad at 6,000, then held; checkpoints every 1,000 iterations; held-out monitoring every 2,000 on the 84-episode set; stop at 850k env steps (about 13,000 iterations) or after three consecutive monitoring rows without improvement once the ramp has ended. Projection from gate C: about 39 h, to be re-checked at iterations 3,500–4,000 once the 16-sample exploration and the shift are active. The run cannot be resumed: a restart restarts the ramp and the per-worker reset-count RNG.
 
@@ -167,3 +173,7 @@ The released config has no network block (the prior's network is rebuilt from th
 
 | iteration | env steps | shift (rad) | in-training canonical | held-out monitoring (84, ±0.05) | residual norm | filter active |
 |---|---|---|---|---|---|---|
+
+## Final protocols
+
+Prior and residual are evaluated in one matched reset mode, hard, matching the prior baselines above (`--hard-reset true` on both evaluators); the resolved mode is recorded as `hard_reset` in each `summary.json`. Monitoring rows during training come from the config's soft mode and are compared only with each other.

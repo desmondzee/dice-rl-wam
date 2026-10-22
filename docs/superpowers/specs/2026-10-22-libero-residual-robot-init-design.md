@@ -84,7 +84,7 @@ Protocols, all with 8-step chunks, 520 steps, 25 envs, `max_q_min` with 16 sampl
 
 The frozen prior is evaluated on all four protocols before training starts, so every residual number has its baseline beside it.
 
-The recipe bounds the residual through the BC penalty (β = 100 on the squared residual, relaxed only by the soft Q filter), so the correction a shifted start can receive is limited by the critic's action gradient relative to β rather than by any explicit clip. The released code already logs `residual_norm` and `q_filtering_active`; the record's sweep table carries both beside the shift magnitude, so a penalty that binds (residual norm flat while the held-out number stalls at the larger magnitudes) is visible and the documented levers are β (the paper ablates 50, 100, 150) and the deferred magnitude bound.
+The recipe bounds the residual through the BC penalty (β = `bc_loss_weight: 50`, the released Square image value, on the squared residual, relaxed only by the soft Q filter), so the correction a shifted start can receive is limited by the critic's action gradient relative to β rather than by any explicit clip. The released code already logs `residual_norm` and `q_filtering_active`; the record's sweep table carries both beside the shift magnitude, so a penalty that binds (residual norm flat while the held-out number stalls at the larger magnitudes) is visible and the documented levers are β (the paper ablates 50, 100, 150) and the deferred magnitude bound.
 
 ## Records
 

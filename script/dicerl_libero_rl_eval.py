@@ -60,7 +60,7 @@ def main():
     cfg = residual_cfg(args.ckpt, args.device)
     init_states, labels, plan, shift = protocol_inputs(args, cfg.env.name)
     _, model = load_residual(args.ckpt, args.device)
-    venv = make_env(cfg, args.envs)
+    venv = make_env(cfg, args.envs, args.hard_reset)
     try:
         rows = run_protocol(residual_policy(model, cfg.act_steps, args.device), venv, init_states, plan, args.envs, cfg.act_steps, cfg.env.max_episode_steps, shift, labels)
         stats = shift_totals(venv, shift)

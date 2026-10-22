@@ -89,11 +89,20 @@ def load_prior(ckpt_path, device):
     return cfg, model.to(device).eval()
 
 
-def make_env(cfg, n_envs):
+def resolved_hard_reset(cfg, override=None):
+    if override is not None:
+        return override == "true"
+    return bool(cfg.env.wrappers.get("libero_image", {}).get("hard_reset", True))
+
+
+def make_env(cfg, n_envs, hard_reset=None):
+    import copy
     from env.gym_utils import make_async
+    wrappers = copy.deepcopy(cfg.env.wrappers)
+    wrappers["libero_image"]["hard_reset"] = resolved_hard_reset(cfg, hard_reset)
     return make_async(
         cfg.env.name, env_type=cfg.env.env_type, num_envs=n_envs, asynchronous=True,
-        max_episode_steps=cfg.env.max_episode_steps, wrappers=cfg.env.wrappers, obs_dim=cfg.obs_dim,
+        max_episode_steps=cfg.env.max_episode_steps, wrappers=wrappers, obs_dim=cfg.obs_dim,
         action_dim=cfg.action_dim, use_image_obs=True, shape_meta=cfg.shape_meta,
     )
 
@@ -124,6 +133,7 @@ def add_protocol_args(parser):
     parser.add_argument("--states", default=None)
     parser.add_argument("--shift", type=float, default=None)
     parser.add_argument("--shift-seed", type=int, default=1000)
+    parser.add_argument("--hard-reset", choices=("true", "false"), default=None)
     parser.add_argument("--out", default=None)
     parser.add_argument("--device", default="cuda:0")
 
@@ -149,7 +159,7 @@ def write_results(args, cfg, rows, extra):
     summary = {
         **summarise(rows), "ckpt": os.path.abspath(args.ckpt), "task": cfg.env.name, "max_steps": cfg.env.max_episode_steps,
         "act_steps": cfg.act_steps, "n_envs": args.envs, "seeds": list(args.seeds), "states": args.states or "canonical",
-        "shift": args.shift or None, "shift_seed": args.shift_seed, **extra,
+        "hard_reset": resolved_hard_reset(cfg, args.hard_reset), "shift": args.shift or None, "shift_seed": args.shift_seed, **extra,
     }
     with open(os.path.join(out, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2)
@@ -162,7 +172,7 @@ def main():
     args = parser.parse_args()
     cfg = load_cfg(args.ckpt, args.device)
     init_states, labels, plan, shift = protocol_inputs(args, cfg.env.name)
-    venv = make_env(cfg, args.envs)
+    venv = make_env(cfg, args.envs, args.hard_reset)
     try:
         _, model = load_prior(args.ckpt, args.device)
         rows = run_protocol(flow_policy(model, cfg.act_steps, args.device), venv, init_states, plan, args.envs, cfg.act_steps, cfg.env.max_episode_steps, shift, labels)
