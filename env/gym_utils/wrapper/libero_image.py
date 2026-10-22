@@ -10,6 +10,8 @@ import imageio
 import numpy as np
 from gym import spaces
 
+from .libero_shift import MAX_TRIES, sample_offset, shift_state, valid_start
+
 NOOP = np.array([0, 0, 0, 0, 0, 0, -1.0])
 SETTLE_STEPS = 10
 FLIP = "none"
@@ -101,6 +103,10 @@ class LiberoImageWrapper(gym.Env):
         self.flip = flip
         self.render_camera_name = render_camera_name
         self.hard_reset = hard_reset
+        self.shift = None
+        self.shift_seed = 0
+        self.reset_count = 0
+        self.counts = {"draws": 0, "rejections": 0, "fallbacks": 0}
         self.canonical_joints = None if self.init_states is None else np.array(self.init_states[0][1:8])
         self.video_writer = None
         self.last_raw_obs = None
@@ -161,6 +167,38 @@ class LiberoImageWrapper(gym.Env):
             self.env.env.robots[0].controller.update_initial_joints(joints)
         return raw_obs
 
+    def set_shift_seed(self, seed):
+        self.shift_seed = seed
+        self.reset_count = 0
+
+    def set_shift(self, magnitude):
+        self.shift = magnitude or None
+
+    def shift_stats(self):
+        out, self.counts = self.counts, {"draws": 0, "rejections": 0, "fallbacks": 0}
+        return out
+
+    def restart(self):
+        raw_obs = self.env.reset()
+        if not self.hard_reset:
+            gripper = self.env.env.robots[0].gripper
+            gripper.current_action = np.zeros(gripper.dof)
+        return raw_obs
+
+    def draw_start(self, state, magnitude, rng):
+        self.counts["draws"] += 1
+        for _ in range(MAX_TRIES):
+            shifted = shift_state(state, sample_offset(rng, magnitude))
+            self.load_state(shifted)
+            self.env.sim.forward()
+            if valid_start(self.env):
+                return shifted
+            self.counts["rejections"] += 1
+        self.counts["fallbacks"] += 1
+        self.restart()
+        self.load_state(state)
+        return np.array(state)
+
     def reset(self, options={}, **kwargs):
         if self.video_writer is not None:
             self.video_writer.close()
@@ -171,14 +209,20 @@ class LiberoImageWrapper(gym.Env):
         state = options.get("init_state", None)
         if seed is not None:
             self.seed(seed)
+        explicit = state is not None
         if state is None and self.init_states is not None:
             index = seed % len(self.init_states) if seed is not None else np.random.randint(len(self.init_states))
             state = self.init_states[index]
-        raw_obs = self.env.reset()
-        if not self.hard_reset:
-            gripper = self.env.env.robots[0].gripper
-            gripper.current_action = np.zeros(gripper.dof)
-        if state is not None:
+        magnitude, rng = None, None
+        if "shift" in options:
+            magnitude, rng = options["shift"]["magnitude"], np.random.RandomState(options["shift"]["seed"])
+        elif not explicit and self.shift:
+            magnitude, rng = self.shift, np.random.RandomState(self.shift_seed + self.reset_count)
+        self.reset_count += 1
+        raw_obs = self.restart()
+        if state is not None and magnitude:
+            self.draw_start(state, magnitude, rng)
+        elif state is not None:
             raw_obs = self.load_state(state)
         for _ in range(SETTLE_STEPS):
             raw_obs, _, _, _ = self.env.step(NOOP)
