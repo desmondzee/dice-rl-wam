@@ -4,7 +4,7 @@ import re
 
 import torch
 
-from script.dicerl_libero_eval import add_protocol_args, make_env, protocol_inputs, run_dir_of, run_protocol, write_results
+from script.dicerl_libero_eval import add_protocol_args, make_env, protocol_inputs, run_dir_of, run_protocol, shift_totals, write_results
 
 STATE_DIM = 8
 
@@ -63,9 +63,10 @@ def main():
     venv = make_env(cfg, args.envs)
     try:
         rows = run_protocol(residual_policy(model, cfg.act_steps, args.device), venv, init_states, plan, args.envs, cfg.act_steps, cfg.env.max_episode_steps, shift, labels)
+        stats = shift_totals(venv, shift)
     finally:
         venv.close()
-    write_results(args, cfg, rows, {"weights": "model_state_dict", "iteration": iteration})
+    write_results(args, cfg, rows, {"weights": "model_state_dict", "iteration": iteration, "shift_stats": stats})
 
 
 if __name__ == "__main__":

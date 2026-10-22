@@ -108,6 +108,15 @@ def flow_policy(model, act_steps, device):
     return policy
 
 
+def shift_totals(venv, shift):
+    totals = {"draws": 0, "rejections": 0, "fallbacks": 0}
+    if shift is not None:
+        for stats, _ in venv.call_sync("shift_stats"):
+            for key in totals:
+                totals[key] += stats[key]
+    return totals
+
+
 def add_protocol_args(parser):
     parser.add_argument("--ckpt", required=True)
     parser.add_argument("--envs", type=int, default=25)
@@ -157,9 +166,10 @@ def main():
     try:
         _, model = load_prior(args.ckpt, args.device)
         rows = run_protocol(flow_policy(model, cfg.act_steps, args.device), venv, init_states, plan, args.envs, cfg.act_steps, cfg.env.max_episode_steps, shift, labels)
+        stats = shift_totals(venv, shift)
     finally:
         venv.close()
-    write_results(args, cfg, rows, {"weights": "model"})
+    write_results(args, cfg, rows, {"weights": "model", "shift_stats": stats})
 
 
 if __name__ == "__main__":

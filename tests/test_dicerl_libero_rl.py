@@ -348,3 +348,16 @@ def test_residual_policy_slices_act_steps():
     obs = {"rgb": np.zeros((2, 1, 16, 16, 6), np.uint8), "state": np.zeros((2, 1, 8))}
     act = residual_policy(M(), 8, "cpu")(obs)
     assert act.shape == (2, 8, 7) and calls == {"num_samples": 16, "strategy": "max_q_min", "step": 10 ** 6}
+
+
+def test_shift_stats_summed_into_summary(tmp_path):
+    import json, types
+    from script.dicerl_libero_eval import shift_totals, write_results
+    venv = types.SimpleNamespace(call_sync=lambda name: [({"draws": 3, "rejections": 1, "fallbacks": 0}, True), ({"draws": 4, "rejections": 2, "fallbacks": 1}, True)])
+    assert shift_totals(venv, None) == {"draws": 0, "rejections": 0, "fallbacks": 0}
+    stats = shift_totals(venv, {"magnitude": 0.6, "seed": 1})
+    assert stats == {"draws": 7, "rejections": 3, "fallbacks": 1}
+    args = types.SimpleNamespace(ckpt="c/state_1.pt", out=str(tmp_path), envs=2, seeds=[0], states=None, shift=0.6, shift_seed=1)
+    cfg = types.SimpleNamespace(env=types.SimpleNamespace(name="t", max_episode_steps=16), act_steps=8)
+    write_results(args, cfg, [{"init_state_id": 0, "label": "0", "seed": 0, "success": True, "length": 8}], {"weights": "model", "shift_stats": stats})
+    assert json.load(open(tmp_path / "summary.json"))["shift_stats"] == stats
