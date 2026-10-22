@@ -204,9 +204,11 @@ def make_async(
         if env_type == "libero":
             os.environ["MUJOCO_GL"] = "egl"
             from env.gym_utils.wrapper.libero_image import make_libero_env, libero_task_files
-            env = make_libero_env(id)
+            blocks = {name: dict(args) for name, args in wrappers.items()}
+            hard = blocks.get("libero_image", {}).pop("hard_reset", True)
+            env = make_libero_env(id, hard_reset=hard)
             _, init_states = libero_task_files(id)
-            for wrapper, args in wrappers.items():
+            for wrapper, args in blocks.items():
                 extra = {"init_states": init_states} if wrapper == "libero_image" else {}
                 env = wrapper_dict[wrapper](env, **args, **extra)
             return env

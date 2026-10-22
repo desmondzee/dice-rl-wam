@@ -1,4 +1,5 @@
 import importlib.util
+import types
 
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ needs_gym = pytest.mark.skipif(importlib.util.find_spec("gym") is None, reason="
 class FakeLibero:
     def __init__(self, success_after=None, state_dim=47):
         self.t = 0; self.success_after = success_after; self.state = np.zeros(state_dim); self.actions = []; self.calls = []
+        self.env = types.SimpleNamespace(robots=[types.SimpleNamespace(controller=types.SimpleNamespace(update_initial_joints=lambda joints: None))])
     def reset(self): self.calls.append("reset"); self.t = 0; return self._obs()
     def set_init_state(self, state): self.calls.append("set_init_state"); self.state = np.asarray(state); self.t = 0; return self._obs()
     def step(self, action):
@@ -24,10 +26,11 @@ class FakeLibero:
 
 def make_wrapper(tmp_path, **kw):
     from env.gym_utils.wrapper.libero_image import LiberoImageWrapper
+    init_states = kw.pop("init_states", np.arange(50)[:, None] * np.ones((50, 47)))
     np.savez(tmp_path / "norm.npz", obs_min=np.full(8, -1.0), obs_max=np.full(8, 1.0), action_min=np.full(7, -1.0), action_max=np.full(7, 1.0))
     env = kw.pop("env", FakeLibero())
     return env, LiberoImageWrapper(env, shape_meta={"obs": {"rgb": {"shape": [128, 128, 6]}, "state": {"shape": [8]}}, "action": {"shape": [7]}},
-                                   normalization_path=str(tmp_path / "norm.npz"), init_states=np.arange(50)[:, None] * np.ones((50, 47)), **kw)
+                                   normalization_path=str(tmp_path / "norm.npz"), init_states=init_states, **kw)
 
 
 @needs_gym

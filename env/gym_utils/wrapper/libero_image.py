@@ -69,12 +69,12 @@ def orient(image, flip):
     raise ValueError(f"Unknown flip {flip!r}")
 
 
-def make_libero_env(task_name, camera_names=("agentview", "robot0_eye_in_hand"), image_hw=128):
+def make_libero_env(task_name, camera_names=("agentview", "robot0_eye_in_hand"), image_hw=128, hard_reset=True):
     bddl, _ = libero_task_files(task_name)
     from libero.libero.envs import OffScreenRenderEnv
     return OffScreenRenderEnv(
         bddl_file_name=bddl, camera_heights=image_hw, camera_widths=image_hw, camera_names=list(camera_names),
-        ignore_done=True,
+        ignore_done=True, hard_reset=hard_reset,
     )
 
 
@@ -90,6 +90,7 @@ class LiberoImageWrapper(gym.Env):
         max_episode_steps=520,
         flip=FLIP,
         render_camera_name="agentview",
+        hard_reset=True,
     ):
         self.env = env
         self.shape_meta = shape_meta
@@ -99,6 +100,8 @@ class LiberoImageWrapper(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.flip = flip
         self.render_camera_name = render_camera_name
+        self.hard_reset = hard_reset
+        self.canonical_joints = None if self.init_states is None else np.array(self.init_states[0][1:8])
         self.video_writer = None
         self.last_raw_obs = None
         self.success_count = 0
@@ -151,6 +154,13 @@ class LiberoImageWrapper(gym.Env):
     def get_sim_state(self):
         return self.env.get_sim_state()
 
+    def load_state(self, state):
+        raw_obs = self.env.set_init_state(state)
+        joints = np.asarray(state)[1:8]
+        if self.canonical_joints is None or not np.allclose(joints, self.canonical_joints, atol=1e-9):
+            self.env.env.robots[0].controller.update_initial_joints(joints)
+        return raw_obs
+
     def reset(self, options={}, **kwargs):
         if self.video_writer is not None:
             self.video_writer.close()
@@ -166,7 +176,7 @@ class LiberoImageWrapper(gym.Env):
             state = self.init_states[index]
         raw_obs = self.env.reset()
         if state is not None:
-            raw_obs = self.env.set_init_state(state)
+            raw_obs = self.load_state(state)
         for _ in range(SETTLE_STEPS):
             raw_obs, _, _, _ = self.env.step(NOOP)
         self.success_count = 0
