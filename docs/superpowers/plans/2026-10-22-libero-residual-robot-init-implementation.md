@@ -170,7 +170,7 @@ Expected: ImportError on `libero_shift`.
 
 - [ ] **Step 3: Implement `libero_shift.py` and the wrapper changes**
 
-`draw_start`: for `MAX_TRIES` draws, `load_state(shift_state(state, sample_offset(rng, magnitude)))`, `env.sim.forward()`, return on `valid_start`; count rejections; after the loop count a fallback and `load_state(state)`. The training path's rng is `np.random.RandomState(self.shift_seed + self.reset_count)` with `reset_count` incremented per reset; the option path's rng is `RandomState(options["shift"]["seed"])`.
+`draw_start`: for `MAX_TRIES` draws, `load_state(shift_state(state, sample_offset(rng, magnitude)))`, `env.sim.forward()`, return on `valid_start`; count rejections; after the loop count a fallback and `load_state(state)`. The training path's rng is `np.random.RandomState([self.shift_seed, self.reset_count])` with `reset_count` incremented per reset; the option path's rng is `RandomState(options["shift"]["seed"])`.
 
 - [ ] **Step 4: Run the tests**
 
