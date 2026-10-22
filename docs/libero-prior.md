@@ -87,7 +87,7 @@ At 20 envs one 8-step chunk across all envs takes 0.099 s. A 100-episode evaluat
 
 ## Pretraining
 
-Config `brev/dicerl/cfg/libero/<task>/pre_flow_matching_unet_img.yaml` (Tool Hang recipe with 128x128 two-camera images, random crop 116, 8-d state, 10 flow steps, 10 envs, 520-step horizon). `brev/dicerl/pretrain_libero.sh <task> [seed] [--epochs N]` starts the training tmux session `dicerl-pre-<task-short>-<seed>` and the watcher session `dicerl-watch-<seed>`, which evaluates every 1,000th epoch checkpoint with 25 envs and stops training at the first success rate in [0.40, 0.60]. The watcher logs to `$DICE_RL_LOG_DIR/watch_<task-short>_<seed>.log` and records every evaluation in `<run_dir>/prior_sweep.json` (written atomically). On a band hit it sends SIGTERM to the training pane's process group (so env workers die with it) and kills the training session; on restart it re-applies that decision from `prior_sweep.json` before polling. It exits 1 when epoch 8000 was evaluated without a band hit or the training session is gone.
+Config `brev/dicerl/cfg/libero/<task>/pre_flow_matching_unet_img.yaml` (Tool Hang recipe with 128x128 two-camera images, random crop 116, 8-d state, 10 flow steps, 10 envs, 520-step horizon). `brev/dicerl/pretrain_libero.sh <task> [seed] [--epochs N]` starts the training tmux session `dicerl-pre-<task-short>-<seed>` and the watcher session `dicerl-watch-<seed>`, which evaluates checkpoints on the schedule `--schedule 100:1000,1000:8000` (every 100 epochs through 1,000, then every 1,000 through 8,000) with 25 envs and stops training at the first success rate in [0.40, 0.60]. The watcher logs to `$DICE_RL_LOG_DIR/watch_<task-short>_<seed>.log` and records every evaluation in `<run_dir>/prior_sweep.json` (written atomically). On a band hit it sends SIGTERM to the training pane's process group (so env workers die with it) and kills the training session; on restart it re-applies that decision from `prior_sweep.json` before polling. It exits 1 when epoch 8000 was evaluated without a band hit or the training session is gone.
 
 ### Smoke run (100 epochs, seed 42, Jarvis GB10)
 
@@ -99,6 +99,24 @@ Config `brev/dicerl/cfg/libero/<task>/pre_flow_matching_unet_img.yaml` (Tool Han
 ### Reset defect found and fixed by the smoke evaluation
 
 The first evaluation gave 0.22 in 76 s. Per episode, the first reset of each worker succeeded 18 of 25, the second reset 0 of 25, and later resets (seed 1) 1 of 50. The wrapper called `env.reset()` only on a worker's first reset and then `set_init_state`; probing 4 workers on states 0 to 3 repeated four times gave `[1 1 1 1]` then `[0 0 0 0]` three times, while calling `env.reset()` before every `set_init_state` gave `[1 1 1 1]`, `[1 1 0 1]`, `[1 1 0 1]`, `[1 1 0 1]`. The wrapper now resets the raw env on every reset. Cost: the same evaluation takes 144 s instead of 76 s although episodes are shorter (mean length 358 instead of 471), about 17 s or more per batch of 25 parallel resets.
+
+### 20-demo run
+
+Decision (user): the prior is trained on 20 demonstrations instead of 50. The 50-demo prior already scored 0.74 on the held-out protocol at epoch 100 (smoke run above), against a target band of 0.40 to 0.60, so a weaker prior is wanted for the residual fine-tuning to have headroom.
+
+- Demos: `demo_0` to `demo_19` in numeric order. `process_libero_dataset.py --flip none --max-episodes 20` wrote `$DICE_RL_DATA_DIR/libero/<task>/ph_pretrain_20/` (`train.npz` 223 MB, `normalization.npz`, statistics over these 20 demos only); `ph_pretrain/` is untouched. Output: 20 episodes, 6,113 steps (95 updates per epoch at batch 64).
+- Config: `train_dataset_path` and `normalization_path` point at `ph_pretrain_20`, `train_dataset.max_n_episodes: 20`, `train.save_model_freq: 100`; everything else as the 50-demo config.
+- Schedule: the watcher evaluates a checkpoint when its epoch is in {100, 200, ..., 1000, 2000, ..., 8000}, stops training at the first success rate in [0.40, 0.60], exits 1 at epoch 8000 without a hit or when the training session dies.
+- Launch: 2026-10-22 10:11:33 (Jarvis local time, UTC+1), `pretrain_libero.sh <task> 42`; sessions `dicerl-pre-kitchenscene6-42` and `dicerl-watch-42`; W&B run `zft63qq0` in `dice-rl-libero`; run directory `$DICE_RL_LOG_DIR/libero-pretrain/<task>_pre_flow_matching_mlp_img_ta8_td10/2026-10-22_10-11-34_42`.
+- Epoch rate: 8.84 s per epoch (mean of epochs 1 to 60; min 8.46, max 8.88), against 21.2 s on 50 demos. In-training rollout at epoch 100: 10 envs, success 0.5000 (5 of 10 done at the end).
+- Epoch 100 was saved at 10:26 and evaluated by the watcher (100 episodes, 50 states x 2 seeds), first and only `prior_sweep.json` row:
+
+| epoch | success rate | stderr | n | mean length |
+|---|---|---|---|---|
+| 100 | 0.52 | 0.050 | 100 | 428.5 |
+
+- The row is in band, so the watcher stopped the training process group (the log ends at epoch 149) and exited 0; both tmux sessions are gone. Checkpoint: `<run dir>/checkpoint/state_100.pt` (208 MB), evaluation under `<run dir>/eval_100/`.
+- The evaluation ran concurrently with training on the same GPU and took about 9 minutes (10:26 to 10:35) instead of the 144 s measured alone; training epochs slowed to 14 to 17 s while it ran.
 
 ### Findings that affect later tasks
 
