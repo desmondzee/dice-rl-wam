@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import numpy as np
 import pytest
 
@@ -393,3 +395,57 @@ def test_shift_agent_update_sets_magnitude_once_per_change(monkeypatch):
     assert agent.update_networks(training_step=10) == ("parent", 10)
     agent.update_networks(training_step=10); agent.update_networks(training_step=4500)
     assert [c for c in calls if c[0] == "set_shift"] == [("set_shift", {"magnitude": 0.0}), ("set_shift", {"magnitude": 0.3})]
+
+
+def watch_fixture(tmp_path, monkeypatch, alive_values, evaluator):
+    import script.dicerl_libero_rl_watch as w
+    ckpt = tmp_path / "model_step_2000.pth"
+    ckpt.write_bytes(b"x")
+    monkeypatch.setattr(w, "evaluate", evaluator)
+    alive = iter(alive_values)
+    monkeypatch.setattr(w, "session_alive", lambda s: next(alive))
+    return w, ckpt
+
+
+def test_rl_watch_skips_young_checkpoint_until_old(tmp_path, monkeypatch):
+    calls = []
+    def evaluator(run_dir, it, states, envs):
+        calls.append(it)
+        return {"success_rate": 0.1, "stderr": 0.02}
+    w, ckpt = watch_fixture(tmp_path, monkeypatch, [True, True, False], evaluator)
+    clock = [ckpt.stat().st_mtime + 5]
+    monkeypatch.setattr(w.time, "time", lambda: clock[0])
+    monkeypatch.setattr(w.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + 60))
+    assert w.watch(tmp_path, 2000, "s.npz", 25, "sess", 0) == 0
+    assert calls == [2000]
+    assert [r["iteration"] for r in json.load(open(tmp_path / "heldout_sweep.json"))] == [2000]
+
+
+def test_rl_watch_retries_then_records_one_row(tmp_path, monkeypatch):
+    attempts = []
+    def evaluator(run_dir, it, states, envs):
+        attempts.append(it)
+        if len(attempts) < 3:
+            raise subprocess.CalledProcessError(1, "eval")
+        return {"success_rate": 0.2, "stderr": 0.03}
+    w, ckpt = watch_fixture(tmp_path, monkeypatch, [True, True, True, False], evaluator)
+    os.utime(ckpt, (0, 0))
+    monkeypatch.setattr(w.time, "sleep", lambda s: None)
+    assert w.watch(tmp_path, 2000, "s.npz", 25, "sess", 0) == 0
+    assert len(attempts) == 3
+    assert json.load(open(tmp_path / "heldout_sweep.json")) == [{"iteration": 2000, "env_steps": 128000, "success_rate": 0.2, "stderr": 0.03}]
+
+
+def test_rl_watch_error_row_after_three_attempts(tmp_path, monkeypatch):
+    attempts = []
+    def evaluator(run_dir, it, states, envs):
+        attempts.append(it)
+        raise FileNotFoundError("summary.json")
+    w, ckpt = watch_fixture(tmp_path, monkeypatch, [True, True, True, False], evaluator)
+    os.utime(ckpt, (0, 0))
+    monkeypatch.setattr(w.time, "sleep", lambda s: None)
+    assert w.watch(tmp_path, 2000, "s.npz", 25, "sess", 0) == 0
+    assert len(attempts) == 3
+    rows = json.load(open(tmp_path / "heldout_sweep.json"))
+    assert len(rows) == 1 and rows[0]["iteration"] == 2000 and rows[0]["env_steps"] == 128000
+    assert "summary.json" in rows[0]["error"] and "success_rate" not in rows[0]
