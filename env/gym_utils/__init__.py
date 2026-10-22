@@ -193,7 +193,7 @@ def make_async(
         import robomimic.utils.env_utils as EnvUtils
         import robomimic.utils.obs_utils as ObsUtils
     elif env_type == "libero":
-        pass
+        import huggingface_hub
     elif "avoiding" in id:
         import gym_avoiding
     else:

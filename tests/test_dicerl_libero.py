@@ -230,3 +230,17 @@ def test_eval_resets_with_init_state_every_episode():
     assert venv.resets == [[0.0, 1.0], [2.0, 3.0]]
     assert [r["success"] for r in rows] == [True, False, True, False] and rows[0]["length"] == 7 * 8 and rows[1]["length"] == 80
     s = summarise(rows); assert s["n"] == 4 and s["success_rate"] == 0.5 and abs(s["stderr"] - 0.25) < 1e-9
+
+
+def test_select_checkpoint_none_in_band():
+    from script.dicerl_libero_watch import select_checkpoint, in_band
+    assert select_checkpoint([{"epoch": 1000, "success_rate": 0.7}, {"epoch": 2000, "success_rate": 0.65}]) is None
+    assert not in_band(0.39) and in_band(0.40) and in_band(0.60) and not in_band(0.61)
+
+
+def test_select_checkpoint_closest_to_half_earlier_on_ties():
+    from script.dicerl_libero_watch import select_checkpoint
+    rows = [{"epoch": 1000, "success_rate": 0.42}, {"epoch": 2000, "success_rate": 0.56}, {"epoch": 3000, "success_rate": 0.44}]
+    assert select_checkpoint(rows)["epoch"] == 2000
+    rows = [{"epoch": 1000, "success_rate": 0.45}, {"epoch": 2000, "success_rate": 0.55}]
+    assert select_checkpoint(rows)["epoch"] == 1000

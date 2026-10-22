@@ -1,0 +1,125 @@
+defaults:
+  - _self_
+hydra:
+  run:
+    dir: ${logdir}
+_target_: agent.pretrain.train_flow_matching_img_agent.TrainFlowMatchingImgAgent
+
+name: ${env_name}_pre_flow_matching_mlp_img_ta${horizon_steps}_td${flow_steps}
+logdir: ${oc.env:DICE_RL_LOG_DIR}/libero-pretrain/${name}/${now:%Y-%m-%d}_${now:%H-%M-%S}_${seed}
+train_dataset_path: data_dir/libero/${env_name}/ph_pretrain/train.npz
+normalization_path: data_dir/libero/${env_name}/ph_pretrain/normalization.npz
+
+seed: 42
+device: cuda:0
+env_name: KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it
+obs_dim: 8
+action_dim: 7  # 10D for 6D rotation, 7D for axis-angle (set manually based on use_6d_rot), default is 7
+use_6d_rot: false  # Set to true to use 6D rotation representation (10D actions), default is false.
+abs_action: false  # Whether actions are absolute poses (true) or deltas (false). Set true when using absolute action dataset, default is false.
+flow_steps: 10
+horizon_steps: 8
+cond_steps: 1
+img_cond_steps: 1
+act_steps: 8
+
+env:
+  env_type: libero
+  n_envs: 10
+  name: ${env_name}
+  best_reward_threshold_for_success: 1
+  max_episode_steps: 520
+  save_video: true
+  use_image_obs: true
+  wrappers:
+    libero_image:
+      normalization_path: ${normalization_path}
+      shape_meta: ${shape_meta}
+    multi_step:
+      n_obs_steps: ${cond_steps}
+      n_action_steps: ${act_steps}
+      max_episode_steps: ${env.max_episode_steps}
+      reset_within_step: True
+
+# Shape metadata for visual observations
+shape_meta:
+  obs:
+    rgb:
+      shape: [128, 128, 6]
+    state:
+      shape: [8]
+  action: 
+    shape: [7]
+
+wandb:
+  entity: ${oc.env:DICE_RL_WANDB_ENTITY}
+  project: dice-rl-libero
+  run: ${now:%H-%M-%S}_${name}
+
+train:
+  n_epochs: 8000
+  batch_size: 64
+  learning_rate: 1e-4
+  weight_decay: 1e-6
+  lr_scheduler:
+    first_cycle_steps: 10000
+    warmup_steps: 100
+    min_lr: 1e-5
+  epoch_start_ema: 20
+  update_ema_freq: 10
+  save_model_freq: 200
+  render:
+    freq: 2
+    num: 1
+
+model:
+  _target_: model.flow_matching.flow_matching.FlowMatchingModel
+  network:
+    _target_: model.flow_matching.vision_resnet_mlp_flow_matching.VisionResNetFlowMatchingMLP
+    num_img: 2
+    spatial_emb: 64
+    time_dim: 64
+    dropout: 0.1
+    visual_feature_dim: 128  # Visual feature dimension after fusion
+    fused_feature_dim: 128 
+    img_cond_steps: ${img_cond_steps}
+    cond_dim: 8
+    horizon_steps: ${horizon_steps}
+    action_dim: ${action_dim}
+    img_height: 128
+    img_width: 128
+    num_kp: 32  # Number of keypoints for spatial softmax
+    unet_base_channels: 128  # Base channels for UNet
+    unet_channel_mults: [1, 2, 2]  # Channel multipliers for UNet layers
+    use_augmentation: true
+    crop_height: 116
+    crop_width: 116
+  horizon_steps: ${horizon_steps}
+  obs_dim: ${obs_dim}
+  action_dim: ${action_dim}
+  flow_steps: ${flow_steps}
+  integration_method: 'euler' # "euler" | "heun" | "rk4"
+  schedule: 'linear' # "linear" | "cosine"
+  t_sampling: 'uniform' # "uniform" | "beta" | "stratified"
+  weight_method: 'none' # "none" | "importance"
+  device: ${device}
+
+ema:
+  # decay: 0.995
+  inv_gamma: 1.0
+  max_value: 0.9999
+  min_value: 0.0
+  power: 0.75
+  update_after_step: 0
+
+train_dataset:
+  _target_: agent.dataset.sequence.StitchedSequenceDataset
+  use_img: true
+  dataset_path: ${train_dataset_path}
+  horizon_steps: ${horizon_steps}
+  cond_steps: ${cond_steps}
+  img_cond_steps: ${img_cond_steps}
+  device: ${device}
+  max_n_episodes: 50
+  use_6d_rot: ${use_6d_rot}
+  abs_action: ${abs_action}

@@ -87,4 +87,23 @@ At 20 envs one 8-step chunk across all envs takes 0.099 s. A 100-episode evaluat
 
 ## Pretraining
 
+Config `brev/dicerl/cfg/libero/<task>/pre_flow_matching_unet_img.yaml` (Tool Hang recipe with 128x128 two-camera images, random crop 116, 8-d state, 10 flow steps, 10 envs, 520-step horizon). `brev/dicerl/pretrain_libero.sh <task> [seed] [--epochs N]` starts the training tmux session `dicerl-pre-<task-short>-<seed>` and the watcher session `dicerl-watch-<seed>`, which evaluates every 1,000th epoch checkpoint with 25 envs and stops training at the first success rate in [0.40, 0.60].
+
+### Smoke run (100 epochs, seed 42, Jarvis GB10)
+
+- 15,232 training samples (50 trajectories), batch 64, 238 updates per epoch: 21.20 s per epoch (mean of epochs 1 to 99; min 21.07, max 21.78). 8,000 epochs projects to 47.1 h, above the 24 h budget; the in-training rollouts add 80 x 12 s = 0.3 h.
+- In-training rollout at epoch 100 (10 envs, 65 chunks): 11.8 s. Each checkpoint is 199 MB.
+- Evaluating `state_100.pt` with `script.dicerl_libero_eval --envs 25` (100 episodes, 50 states x 2 seeds): 76 s wall including model load. `summary.json`: success_rate 0.22, stderr 0.041, n 100, mean_length 471.5.
+- The in-training rollout reported `Done envs: 1/10` and `success rate 0.9000` because its metric is the best summed reward over the rollout reaching 1 (any step with `check_success`), and 9 of 10 envs had succeeded, terminated and auto-reset before the last chunk, so only one was done at the end. It is not an inverted metric.
+
+### Reset defect found by the smoke evaluation
+
+The 0.22 is an artefact. Per episode, seed 0 states 0 to 24 (the first reset of each worker) succeed 18 of 25, states 25 to 49 (second reset) 0 of 25, and seed 1 (later resets) 1 of 50. Probing the same checkpoint with 4 workers and states 0 to 3 repeated four times gives `[1 1 1 1]`, then `[0 0 0 0]` three times. The wrapper calls `env.reset()` only on the first reset and then `set_init_state`; forcing `env.reset()` before every `set_init_state` gives `[1 1 1 1]`, `[1 1 0 1]`, `[1 1 0 1]`, `[1 1 0 1]`. The first-episode rate of this 100-epoch checkpoint is therefore about 0.9 to 1.0, not 0.22, and any evaluation or rollout after a worker's first episode is wrong until the wrapper resets the raw env on every reset.
+
+### Findings that affect later tasks
+
+- `import huggingface_hub` in the `libero` branch of `make_async` is required: with `pass`, the 10 env workers print the OpenGL init line and then hang for more than 200 s (reproduced twice with `train.n_epochs=1`); with the import the same command trains. libero imports `huggingface_hub` from its `download_utils` inside each forked worker; the cause of the hang was not isolated further. The evaluator alone (no wandb, no training) works either way.
+- `script/run.py` imports `pretty_errors` and `gdown`, so `setup_libero.sh` pins both.
+
+
 ## Selection
