@@ -87,7 +87,7 @@ At 20 envs one 8-step chunk across all envs takes 0.099 s. A 100-episode evaluat
 
 ## Pretraining
 
-Config `brev/dicerl/cfg/libero/<task>/pre_flow_matching_unet_img.yaml` (Tool Hang recipe with 128x128 two-camera images, random crop 116, 8-d state, 10 flow steps, 10 envs, 520-step horizon). `brev/dicerl/pretrain_libero.sh <task> [seed] [--epochs N]` starts the training tmux session `dicerl-pre-<task-short>-<seed>` and the watcher session `dicerl-watch-<seed>`, which evaluates every 1,000th epoch checkpoint with 25 envs and stops training at the first success rate in [0.40, 0.60].
+Config `brev/dicerl/cfg/libero/<task>/pre_flow_matching_unet_img.yaml` (Tool Hang recipe with 128x128 two-camera images, random crop 116, 8-d state, 10 flow steps, 10 envs, 520-step horizon). `brev/dicerl/pretrain_libero.sh <task> [seed] [--epochs N]` starts the training tmux session `dicerl-pre-<task-short>-<seed>` and the watcher session `dicerl-watch-<seed>`, which evaluates every 1,000th epoch checkpoint with 25 envs and stops training at the first success rate in [0.40, 0.60]. The watcher logs to `$DICE_RL_LOG_DIR/watch_<task-short>_<seed>.log` and records every evaluation in `<run_dir>/prior_sweep.json` (written atomically). On a band hit it sends SIGTERM to the training pane's process group (so env workers die with it) and kills the training session; on restart it re-applies that decision from `prior_sweep.json` before polling. It exits 1 when epoch 8000 was evaluated without a band hit or the training session is gone.
 
 ### Smoke run (100 epochs, seed 42, Jarvis GB10)
 

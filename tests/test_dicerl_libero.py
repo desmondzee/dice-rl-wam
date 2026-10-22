@@ -253,3 +253,45 @@ def test_select_checkpoint_closest_to_half_earlier_on_ties():
     assert select_checkpoint(rows)["epoch"] == 2000
     rows = [{"epoch": 1000, "success_rate": 0.45}, {"epoch": 2000, "success_rate": 0.55}]
     assert select_checkpoint(rows)["epoch"] == 1000
+
+
+def _watch_stubs(monkeypatch, alive=True):
+    import script.dicerl_libero_watch as w
+    calls = {"stop": 0, "eval": []}
+    monkeypatch.setattr(w, "training_pgid", lambda session: None)
+    monkeypatch.setattr(w, "stop_training", lambda session, pgid: calls.__setitem__("stop", calls["stop"] + 1))
+    monkeypatch.setattr(w, "session_alive", lambda session: alive)
+    monkeypatch.setattr(w, "evaluate", lambda run_dir, epoch, envs: calls["eval"].append(epoch) or {"epoch": epoch, "success_rate": 0.9, "stderr": 0.0})
+    monkeypatch.setattr(w.time, "sleep", lambda s: None)
+    return w, calls
+
+
+def test_watch_restart_with_in_band_row_stops_without_evaluating(tmp_path, monkeypatch):
+    import json
+    w, calls = _watch_stubs(monkeypatch)
+    (tmp_path / "prior_sweep.json").write_text(json.dumps([{"epoch": 1000, "success_rate": 0.5, "stderr": 0.1}]))
+    assert w.watch(str(tmp_path), 1000, 25, "s", 0) == 0
+    assert calls["stop"] == 1 and calls["eval"] == []
+
+
+def test_watch_restart_with_final_epoch_done_exits_one(tmp_path, monkeypatch):
+    import json
+    w, calls = _watch_stubs(monkeypatch)
+    (tmp_path / "prior_sweep.json").write_text(json.dumps([{"epoch": 8000, "success_rate": 0.9, "stderr": 0.1}]))
+    assert w.watch(str(tmp_path), 1000, 25, "s", 0) == 1
+    assert calls["stop"] == 0 and calls["eval"] == []
+
+
+def test_watch_dead_session_without_band_row_exits_one(tmp_path, monkeypatch):
+    w, calls = _watch_stubs(monkeypatch, alive=False)
+    assert w.watch(str(tmp_path), 1000, 25, "s", 0) == 1
+    assert calls["stop"] == 0
+
+
+def test_watch_evaluates_new_checkpoint_then_notices_dead_session(tmp_path, monkeypatch):
+    import json
+    w, calls = _watch_stubs(monkeypatch, alive=False)
+    (tmp_path / "checkpoint").mkdir()
+    (tmp_path / "checkpoint" / "state_1000.pt").write_text("x")
+    assert w.watch(str(tmp_path), 1000, 25, "s", 0) == 1
+    assert calls["eval"] == [1000] and json.loads((tmp_path / "prior_sweep.json").read_text())[0]["epoch"] == 1000
