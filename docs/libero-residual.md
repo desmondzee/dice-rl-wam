@@ -169,6 +169,10 @@ This launch was stopped at iteration about 300 because of the factory defect rec
 
 `bash brev/dicerl/finetune_libero.sh KITCHEN_SCENE6_put_the_yellow_and_white_mug_in_the_microwave_and_close_it 42`: sessions `dicerl-rl-kitchenscene6-42` and `dicerl-rlwatch-42`, run directory `$DICE_RL_LOG_DIR/libero-finetune/..._ft_distill_residual_flow_unet_img_ta8_fl10/2026-10-22_17-11-57_42`, W&B run `02jssndy` in `dice-rl-libero`. Schedule: shift 0 until iteration 3,000, linear to 0.6 rad at 6,000, then held; checkpoints every 1,000 iterations; held-out monitoring every 2,000 on the 84-episode set; stop at 850k env steps (about 13,000 iterations) or after three consecutive monitoring rows without improvement once the ramp has ended. Projection from gate C: about 39 h, to be re-checked at iterations 3,500–4,000 once the 16-sample exploration and the shift are active. The run cannot be resumed: a restart restarts the ramp and the per-worker reset-count RNG.
 
+## Relaunch (2026-10-22 17:44 BST)
+
+Same command and schedule as the stopped launch, on the fixed code (commit 64f5593): run directory `.../2026-10-22_17-44-34_42`, W&B run `7t5af9s4`, log `finetune_kitchenscene6_42_20261022-174434.log`, sessions `dicerl-rl-kitchenscene6-42` and `dicerl-rlwatch-42`. Every environment built through the factory now soft-resets with the gripper integrator zeroed.
+
 ## Sweep
 
 | iteration | env steps | shift (rad) | in-training canonical | held-out monitoring (84, ±0.05) | residual norm | filter active |
