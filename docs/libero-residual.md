@@ -179,8 +179,16 @@ The user's decision after the relaunch: the same recipe on canonical starts only
 
 ## Sweep
 
-| iteration | env steps | shift (rad) | in-training canonical | held-out monitoring (84, ±0.05) | residual norm | filter active |
+| iteration | env steps | shift (rad) | shifted run: in-training canonical | shifted run: held-out monitoring (84, ±0.05) | control: in-training canonical | control: held-out monitoring (84, ±0.05) |
 |---|---|---|---|---|---|---|
+| 0 | 0 | 0 | 0.45 (prior) | 0.20 (prior) | 0.45 (prior) | 0.20 (prior) |
+| 2,000 | 128k | 0 | 0.86 | 0.49 | 0.85 | 0.50 |
+| 4,000 | 256k | 0.20 | 0.98 | 0.52 | 0.98 | 0.55 |
+| 6,000 | 384k | 0.60 | 1.00 | 0.65 | 0.99 | 0.49 |
+| 8,000 | 512k | 0.60 | 1.00 | 0.71 | 1.00 | 0.52 |
+| 10,000 | 640k | 0.60 | 1.00 | 0.76 | — | — |
+
+Read on 2026-10-23 22:45 BST (shifted run at iteration 10,000 after 29 h, 10.3 s per iteration over the last 2,000; control at 8,000 after 24 h). Both runs reach 0.98–1.00 in distribution by 256k env steps. On the held-out LIBERO-Plus poses the two runs are indistinguishable while the shift is zero (0.49 vs 0.50 at 128k) and small (0.52 vs 0.55 at 256k, magnitude 0.2), then separate once the ramp reaches 0.6 rad: 0.65 vs 0.49 at 384k, 0.71 vs 0.52 at 512k, with the shifted run still rising at 640k (0.76). The control's held-out number is flat at about 0.50 from 128k on: in-distribution RL transfers the prior's 0.20 to about 0.50 on these poses and no further. Residual norm and filter activity columns are read from W&B at the final evaluation.
 
 ## Final protocols
 
